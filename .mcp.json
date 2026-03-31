@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "multi-fleet": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/../tools/multifleet_mcp.py"],
+      "env": {
+        "MULTIFLEET_NODE_ID": "",
+        "FLEET_NERVE_PORT": "8855"
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "multi-fleet-marketplace",
+  "description": "Marketplace for the Multi-Fleet cross-machine AI collaboration plugin",
+  "owner": {
+    "name": "Aaron Tjomsland",
+    "email": "aaron@ersimulator.com"
+  },
+  "plugins": [
+    {
+      "name": "multi-fleet",
+      "description": "Cross-machine AI collaboration — real-time messaging, task agents, productivity visibility",
+      "version": "1.0.0",
+      "source": "./",
+      "author": { "name": "Aaron Tjomsland", "email": "aaron@ersimulator.com" },
+      "skills": [
+        "./skills/using-multi-fleet",
+        "./skills/productivity-view",
+        "./skills/fleet-send",
+        "./skills/fleet-status",
+        "./skills/fleet-wake",
+        "./skills/fleet-task"
+      ]
+    }
+  ]
+}
