@@ -156,6 +156,113 @@ When a node has no NATS messages sent or received for >5 minutes, the watchdog a
 **Activity tracking:**
 - `_touch_activity()` is called on every message send and receive
 - The idle timer only fires when there is genuinely no NATS traffic
+## Idle Detection Protocol
+
+The watchdog detects idle peers and converts downtime into productive work. Built on top of the heartbeat check already running every 10s.
+
+**How it works:**
+
+1. **Heartbeat monitoring** — every 30s, evaluate each peer's activity state from heartbeat metadata
+2. **Idle threshold** — a peer is "idle" if its last task completion was >5 minutes ago AND no active task is running
+3. **Productive nudge** — when a peer crosses the idle threshold, send a nudge via the working fleet channel containing:
+   - Pending backlog items (from `docs/plans/` incomplete markers)
+   - Recent plan documents that need review
+   - Suggested tasks based on recent git activity
+4. **Fleet-wide idle** — if ALL peers are idle simultaneously, propose coordinated productive work: test suites, documentation passes, dependency upgrades, or technical debt reduction
+
+**Implementation reference:** Extends the existing heartbeat check in the watchdog loop. The idle state is derived from heartbeat metadata fields (`lastTaskCompleted`, `activeTask`). Nudges are sent via the same NATS/HTTP channels used for fleet messaging.
+
+```bash
+# Check idle status of all peers
+curl -s http://127.0.0.1:8855/watchdog/status | python3 -c "
+import json, sys; d=json.load(sys.stdin)
+for p,s in d.get('peers',{}).items():
+    print(f'{p}: idle={s.get(\"idleSeconds\",\"?\")}s  lastTask={s.get(\"lastTask\",\"none\")}')
+"
+```
+
+## Proactive Task Generation
+
+When idle, the watchdog shifts from monitoring to productive work generation.
+
+**Task discovery sources (checked in order):**
+
+| Source | What to look for | Priority |
+|--------|-----------------|----------|
+| `docs/plans/` | Incomplete items, TODOs, unstarted phases | High |
+| `.fleet-messages/` | Unanswered proposals, pending reviews | High |
+| `git log --since=24h` | Recent changes lacking tests or docs | Medium |
+| `docs/inbox/` | Unprocessed raw ideas needing triage | Low |
+| Plugin/skill health | Broken or degraded capabilities | Medium |
+
+**What the watchdog does with discovered tasks:**
+
+1. **Generate task suggestions** — formatted as fleet messages with context, rationale, and estimated effort
+2. **Send via fleet messaging** — routed to the most appropriate peer based on current focus (from `.claude/focus.json`)
+3. **Spawn background agents** — for non-blocking investigation only (read-only exploration, never writes without approval):
+   - Scan for test coverage gaps in recently changed files
+   - Check for stale dependencies or security advisories
+   - Identify dead code or unused imports in active project
+
+```bash
+# View generated task suggestions
+curl -s http://127.0.0.1:8855/watchdog/suggestions | python3 -m json.tool
+
+# View background investigation results
+ls /tmp/atlas-agent-results/watchdog-*.json
+```
+
+## Big Picture Awareness
+
+Idle time is study time. The watchdog uses downtime to build and maintain system-wide understanding.
+
+**What the watchdog studies:**
+
+- **CLAUDE.md** — project-wide instructions, protocols, invariants. Detects drift between documented and actual behavior
+- **docs/MULTI-FLEET.md** — fleet architecture, communication patterns. Validates current topology matches docs
+- **3-surgeons plugin health** — probes all three surgeons (`3s probe`), reports degradation
+- **superpowers plugin health** — verifies skill availability and tool reachability
+- **Technical debt identification** — flags files with high churn + low test coverage, TODOs older than 7 days, functions exceeding complexity thresholds
+- **Missing test detection** — cross-references `git diff --stat` against test directories to find untested changes
+- **Improvement proposals** — synthesizes findings into concrete suggestions posted to `.fleet-messages/` for fleet review
+
+**Awareness outputs are written to:**
+- `/tmp/atlas-agent-results/watchdog-awareness-<timestamp>.json` (detailed findings)
+- Fleet message channel (summary proposals for peer review)
+
+## Rate Limiting
+
+Idle detection and proactive work are rate-limited to prevent noise and interruption of active work.
+
+| Action | Limit | Rationale |
+|--------|-------|-----------|
+| Productive nudge per peer | 1 per 5 minutes | Avoid nagging — one nudge is enough |
+| Self-assigned background task | 1 per 10 minutes | Prevent resource contention on local machine |
+| Fleet-wide idle proposal | 1 per 15 minutes | Coordinated work needs breathing room |
+| Background agent spawn | Max 3 concurrent | Stay within crash-prevention limits (CLAUDE.md: max 10 agents) |
+| Big picture scan | 1 per 30 minutes | Study is low-priority, yields to any real work |
+
+**Hard rules:**
+- **Never interrupt active work** — if a peer's heartbeat shows `activeTask` is set, suppress all idle suggestions for that peer
+- **Never send nudges during repairs** — if the repair system is active, idle detection pauses entirely
+- **Cooldown after task assignment** — after a peer accepts a suggested task, suppress nudges for that peer for 10 minutes
+
+**Configuration** (in `.multifleet/config.json`):
+
+```json
+{
+  "watchdog": {
+    "idleDetection": {
+      "enabled": true,
+      "idleThresholdSeconds": 300,
+      "nudgeIntervalSeconds": 300,
+      "selfTaskIntervalSeconds": 600,
+      "maxBackgroundAgents": 3,
+      "bigPictureScanIntervalSeconds": 1800
+    }
+  }
+}
+```
 
 ## When to Use This Skill
 
@@ -164,3 +271,6 @@ When a node has no NATS messages sent or received for >5 minutes, the watchdog a
 - Debugging why repairs keep triggering (check watchdog log for patterns)
 - Disabling auto-repair during maintenance windows
 - Monitoring fleet health over time (log retention)
+- Configuring idle detection thresholds and nudge frequency
+- Reviewing proactive task suggestions generated during idle time
+- Checking big picture awareness findings and improvement proposals

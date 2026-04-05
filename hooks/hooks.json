@@ -19,11 +19,28 @@
           {
             "type": "command",
             "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' prompt-submit",
-            "async": false
+            "async": false,
+            "timeout": 10000
           }
         ]
       }
     ],
+<<<<<<< Updated upstream
+=======
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' session-start",
+            "async": false,
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+>>>>>>> Stashed changes
     "TeammateIdle": [
       {
         "matcher": "",
@@ -32,7 +49,8 @@
             "type": "command",
             "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' teammate-idle",
             "async": true,
-            "asyncRewake": true
+            "asyncRewake": true,
+            "timeout": 10000
           }
         ]
       }
@@ -44,7 +62,8 @@
           {
             "type": "command",
             "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' stop",
-            "async": true
+            "async": true,
+            "timeout": 10000
           }
         ]
       }

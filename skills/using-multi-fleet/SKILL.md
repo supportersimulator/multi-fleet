@@ -48,6 +48,24 @@ P6: Wake-on-LAN    (3s budget)   -- wake sleeping machines
 P7: Git push        (10s budget)  -- guaranteed delivery (eventual)
 P8: Direct text injection (LAST RESORT ONLY) -- into user's typing space
 ```
+## Communication Protocol (8-Priority Fallback)
+
+Every message tries all channels in order. First success wins. 30s timeout per channel.
+
+| Priority | Channel | Latency | Description |
+|----------|---------|---------|-------------|
+| **P0** | Cloud relay | <200ms | AWS/cloud bridge — works across networks |
+| **P1** | NATS pub/sub | <100ms | Real-time, bidirectional |
+| **P2** | HTTP direct | <1s | Peer-to-peer, no central dependency |
+| **P3** | Chief relay | 1-2s | Queues for offline nodes |
+| **P4** | Seed file | next prompt | SSH write to target's seed dir |
+| **P5** | SSH direct | 2-5s | Reliable, works through firewalls |
+| **P6** | Wake-on-LAN | 10-60s | Wake sleeping machines |
+| **P7** | Git push | async | Guaranteed delivery (eventual) |
+
+**User input injection is LAST PRIORITY ONLY** — the system exhausts all automated channels before falling back to human-visible seed files or git.
+
+**Secrets**: Keychain/AWS/env vars only. Never hardcode credentials in config or messages. SSH keys via `~/.ssh/`, API keys via env.
 
 **Total budget: 30 seconds.** P8 (direct text injection into a user's active typing space) is ALWAYS last priority — it disrupts flow and is only acceptable when P1-P7 have all failed.
 
@@ -107,6 +125,18 @@ A message delivery that does not satisfy all five conditions is **not a valid de
 
 ### </HARD-GATE>
 
+## Self-Healing Invariant
+
+> **The fleet MUST converge to ideal communication state.**
+
+This is the core principle. Every session checks channel health on start. Every message delivery that falls through to non-ideal channels triggers background healing. The only acceptable steady state is **all channels working on all nodes**.
+
+Concretely:
+- **Session start**: daemon probes all peers on P0-P2. Failures logged + repair queued.
+- **Message fallthrough**: delivery on P3+ triggers `fleet-repair` via the working channel.
+- **Periodic health**: watchdog runs every 30s, auto-escalates through 4 repair levels (notify → guide → assist → remote).
+- **Convergence check**: `fleet-check` against all peers verifies full chain. Run after any network change.
+
 ## Message Types
 
 | Type | What happens | Disrupts session? |
@@ -118,11 +148,12 @@ A message delivery that does not satisfy all five conditions is **not a valid de
 | `sync` | Silent state bookkeeping | No |
 | `broadcast` | Seed file on all nodes | No |
 
-## All 11 Skills
+## All 12 Skills
 
 | Skill | What It Does | When to Invoke |
 |-------|-------------|----------------|
 | **using-multi-fleet** | This skill. Architecture overview, role guide, skill index. | First time using multi-fleet, need orientation |
+| **fleet-protocol** | CORE — self-healing communication invariant, channel priority (P0-P7), repair escalation, idle productivity, secrets protection. | Understanding how fleet communication works, debugging delivery, adding channels |
 | **fleet-send** | Send a message (context, task, alert, broadcast) to another machine. | Need to communicate with another node |
 | **fleet-task** | Dispatch autonomous work to another machine with session-aware agents. | Need work done on another node without human interaction |
 | **fleet-status** | Quick health check: who's online, idle, working. | Before dispatching work, checking connectivity |
@@ -258,6 +289,76 @@ curl -s http://127.0.0.1:8855/channels | python3 -m json.tool
 
 # Check specific peer
 curl -s http://127.0.0.1:8855/channels/<peer-id> | python3 -m json.tool
+## Idle Protocol
+
+**When peers are idle**: suggest productive work from `docs/plans/`. Check backlog, propose next tasks, dispatch low-priority work to idle nodes.
+
+**When YOU are idle**: study the big picture, check fleet health, propose improvements. Never just say "waiting" — always be productive:
+- Run `fleet-check` against all peers
+- Review `docs/plans/` for unstarted work
+- Check `/tasks/live` for stuck agents
+- Propose fleet improvements or optimizations
+
+## Plugin Ecosystem
+
+Multi-Fleet works alongside two other plugin systems. They complement each other:
+
+| Plugin | Role | What It Does |
+|--------|------|-------------|
+| **Superpowers** | Process discipline | brainstorming → writing-plans → executing-plans → verification |
+| **3-Surgeons** | Truth verification | sentinel for blast radius, cross-exam for decisions, gains-gate for quality |
+| **Multi-Fleet** | Cross-machine coordination | distribute execution, aggregate results, fleet-wide visibility |
+
+**How they interact:**
+- Superpowers plans the work locally → Multi-Fleet distributes it across machines
+- 3-Surgeons sentinel checks blast radius BEFORE fleet-wide operations
+- Cross-exam validates architectural decisions that affect multiple nodes
+- Each node runs its own Superpowers + 3-Surgeons independently; Multi-Fleet coordinates between them
+
+## Quick Start for New Installs
+
+### Step 1: Install the plugin
+
+```bash
+claude plugin add multi-fleet   # or clone into ~/.claude/plugins/
+```
+
+### Step 2: Configure fleet identity
+
+```bash
+# Create .multifleet/config.json in your project root
+# Set your node ID:
+export MULTIFLEET_NODE_ID=$(hostname -s | tr '[:upper:]' '[:lower:]')
+# Edit .multifleet/config.json — add your node to the "nodes" object
+```
+
+### Step 3: Start the daemon
+
+```bash
+# The daemon runs on port 8855 — manages all message routing
+node multi-fleet/bin/fleet-nerve-mcp  # or via LaunchAgent for persistence
+```
+
+### Step 4: Verify connectivity
+
+```bash
+bash scripts/fleet-test-fallback.sh          # Test all channels to all peers
+bash scripts/fleet-test-fallback.sh mac1     # Test channels to specific node
+```
+
+### Step 5: Set up monitoring
+
+```
+/loop 1m /fleet-dashboard
+```
+
+Live fleet monitor — shows tasks dispatching, agents working, replies arriving. Silent when idle.
+
+### Step 6: Verify health
+
+```bash
+curl -s http://127.0.0.1:8855/health | python3 -m json.tool
+curl -s http://127.0.0.1:8855/fleet/live | python3 -m json.tool
 ```
 
 ## Key Principles
@@ -274,3 +375,8 @@ curl -s http://127.0.0.1:8855/channels/<peer-id> | python3 -m json.tool
 5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session. P8 (text injection) only when P1-P7 exhausted.
 6. **Idle = explore** — no node sits silent when there is discoverable work. See HARD-GATE Idle Protocol.
 7. **Secrets never in code** — env var → Keychain → AWS. Fallbacks flagged. See HARD-GATE Secrets Invariant.
+2. **Always deliver** — the 8-priority fallback chain ensures messages reach their target. Even if it takes git push as a last resort.
+3. **Session awareness** — task agents inherit context from the target's active session. They don't work blind.
+4. **Self-healing** — broken channels are detected and repaired automatically. The fleet MUST converge to all-channels-working state.
+5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session.
+6. **Never idle** — idle machines study plans, check health, propose improvements. Idle is wasted capacity.

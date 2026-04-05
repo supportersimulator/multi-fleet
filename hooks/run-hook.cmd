@@ -4,6 +4,17 @@
 # Gracefully degrades if daemon not running.
 
 set -euo pipefail
+# Multi-Fleet hook runner — auto-healing on every session event
+# Checks fleet seed files and worker results, injects messages as context
+# Uses MULTIFLEET_NODE_ID env var — works on any machine without hardcoding
+#
+# Invariants:
+#   - All hooks complete within 10 seconds (timeout enforced in hooks.json)
+#   - Never expose secrets in output
+#   - Use asyncRewake for non-blocking fleet message injection
+#   - Log errors but never crash the hook (exit 0 on error)
+
+set -o pipefail
 
 HOOK_TYPE="${1:-session-start}"
 
@@ -72,6 +83,10 @@ output_json() {
     python3 -c "import json,sys; print(json.dumps({'systemMessage': sys.argv[1]}))" "$combined"
   fi
 }
+OUTBOX="/tmp/fleet-outbox-${NODE_ID}"
+FLEET_STATE="/tmp/fleet-state-${NODE_ID}"
+LAST_INJECT_FILE="/tmp/fleet-last-inject-${NODE_ID}"
+INBOX_ARCHIVE="/tmp/fleet-inbox-archive-${NODE_ID}"
 
 # --- Shared helpers ---
 
@@ -263,6 +278,7 @@ send_session_notification() {
 ensure_api_keys() {
   # Load keys from keychain -> fleet env fallback -> AWS SM refresh
   # Never logs key values. Startup-only refresh.
+  # Never logs key values. Startup-only refresh (3-surgeon consensus 2026-04-05).
   local needs_refresh=0
 
   for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
@@ -300,6 +316,16 @@ ensure_api_keys() {
         emit "[FLEET] Refreshed ${key_name} from AWS Secrets Manager"
       fi
     done
+        local aws_val
+        aws_val=$(aws secretsmanager get-secret-value --secret-id "$key_name" --query 'SecretString' --output text 2>/dev/null)
+        if [ -n "$aws_val" ]; then
+          security delete-generic-password -s "$key_name" 2>/dev/null
+          security add-generic-password -s "$key_name" -a "atlas" -w "$aws_val" 2>/dev/null
+          export "$key_name=$aws_val"
+          echo "[FLEET] Refreshed $key_name from AWS Secrets Manager -> Keychain"
+        fi
+      done
+    fi
   fi
 }
 
@@ -501,6 +527,169 @@ done)
 SEED_EOF
     echo "[FLEET] Idle repair seed written to ${seed_path}"
   fi
+# Check peer channel health and spawn healing if degraded
+check_peer_health_and_heal() {
+  local fleet_data degraded_peers
+  fleet_data=$(curl -sf --max-time 3 "$DAEMON_URL/fleet/live" 2>/dev/null) || return 0
+
+  degraded_peers=$(echo "$fleet_data" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    peers = data.get('peers', data.get('fleet', []))
+    if isinstance(peers, dict):
+        peers = [{'id': k, **v} for k, v in peers.items()]
+    degraded = []
+    for p in peers:
+        channels = p.get('channels', {})
+        for ch_name, ch_status in channels.items():
+            if isinstance(ch_status, dict):
+                st = ch_status.get('status', 'unknown')
+            else:
+                st = str(ch_status)
+            if st in ('degraded', 'down', 'error', 'unreachable'):
+                degraded.append(f\"{p.get('id','?')}:{ch_name}={st}\")
+    if degraded:
+        print('|'.join(degraded))
+except:
+    pass
+" 2>/dev/null)
+
+  if [ -n "$degraded_peers" ]; then
+    echo "[FLEET HEAL] Degraded channels detected: ${degraded_peers}"
+    # Spawn background healing — write request file for daemon to pick up
+    mkdir -p "$FLEET_STATE"
+    echo "{\"action\":\"heal\",\"degraded\":\"${degraded_peers}\",\"ts\":$(date +%s),\"requestor\":\"${NODE_ID}\"}" \
+      > "${FLEET_STATE}/heal-request-$(date +%s).json"
+    # Attempt direct daemon heal endpoint (non-blocking, best-effort)
+    curl -sf --max-time 2 -X POST "$DAEMON_URL/fleet/heal" \
+      -H "Content-Type: application/json" \
+      -d "{\"degraded\":\"${degraded_peers}\",\"requestor\":\"${NODE_ID}\"}" 2>/dev/null &
+  fi
+}
+
+# Report this node's channel status to the fleet
+report_channel_status() {
+  curl -sf --max-time 2 -X POST "$DAEMON_URL/fleet/status" \
+    -H "Content-Type: application/json" \
+    -d "{\"node\":\"${NODE_ID}\",\"status\":\"online\",\"ts\":$(date +%s),\"event\":\"session-start\"}" 2>/dev/null || true
+}
+
+# Send offline notification to fleet
+notify_going_offline() {
+  curl -sf --max-time 2 -X POST "$DAEMON_URL/fleet/status" \
+    -H "Content-Type: application/json" \
+    -d "{\"node\":\"${NODE_ID}\",\"status\":\"offline\",\"ts\":$(date +%s),\"event\":\"stop\"}" 2>/dev/null || true
+}
+
+# Archive unprocessed inbox messages (for stop hook)
+archive_unprocessed_inbox() {
+  mkdir -p "$INBOX_ARCHIVE"
+  # Archive seed file if still present
+  if [ -f "$SEED_FILE" ] && [ -s "$SEED_FILE" ]; then
+    cp "$SEED_FILE" "${INBOX_ARCHIVE}/unprocessed-seed-$(date +%s).md"
+    echo "[FLEET] Archived unprocessed seed file"
+  fi
+  # Archive any daemon inbox messages
+  local inbox_dump
+  inbox_dump=$(curl -sf --max-time 2 "$DAEMON_URL/inbox?archive=true" 2>/dev/null)
+  if [ -n "$inbox_dump" ]; then
+    echo "$inbox_dump" > "${INBOX_ARCHIVE}/daemon-inbox-$(date +%s).json"
+  fi
+}
+
+# Flush outbox messages to daemon
+flush_outbox() {
+  if [ -d "$OUTBOX" ] && [ "$(ls -A "$OUTBOX" 2>/dev/null)" ]; then
+    local flush_count
+    flush_count=$(ls -1 "$OUTBOX" | wc -l | tr -d ' ')
+    echo "[FLEET] Flushing ${flush_count} unsent message(s)..."
+    for msg in "$OUTBOX"/*; do
+      TARGET=$(basename "$msg" | sed 's/\.md$//' | tr -cd 'a-zA-Z0-9_-')
+      curl -sf --max-time 3 -X POST "$DAEMON_URL/message" \
+        -H "Content-Type: application/json" \
+        -d "{\"type\":\"seed\",\"target\":\"${TARGET}\",\"payload\":$(python3 -c "import json,sys;print(json.dumps(open(sys.argv[1]).read()))" "$msg")}" 2>/dev/null \
+        && rm -f "$msg"
+    done
+  fi
+}
+
+# Check rate limit for fleet context injection (once per 60s)
+should_inject_fleet_context() {
+  local now last_inject elapsed
+  now=$(date +%s)
+  last_inject=0
+  if [ -f "$LAST_INJECT_FILE" ]; then
+    last_inject=$(cat "$LAST_INJECT_FILE" 2>/dev/null || echo 0)
+  fi
+  elapsed=$(( now - last_inject ))
+  if [ "$elapsed" -ge 60 ]; then
+    echo "$now" > "$LAST_INJECT_FILE"
+    return 0
+  fi
+  return 1
+}
+
+# Check for fleet messages arrived since last prompt
+check_fleet_messages_since_last() {
+  if ! should_inject_fleet_context; then
+    return 1
+  fi
+  local msgs
+  msgs=$(curl -sf --max-time 2 "$DAEMON_URL/inbox?since=last" 2>/dev/null)
+  local msg_count
+  msg_count=$(echo "$msgs" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    messages = data.get('messages', [])
+    if messages:
+        print(len(messages))
+        for m in messages[:5]:
+            src = m.get('from', m.get('source', '?'))
+            preview = str(m.get('subject', m.get('preview', m.get('payload', ''))))[:80]
+            print(f'  [{src}] {preview}')
+    else:
+        print('0')
+except:
+    print('0')
+" 2>/dev/null)
+
+  if [ -n "$msg_count" ] && [ "$(echo "$msg_count" | head -1)" != "0" ]; then
+    echo "[FLEET] New messages since last check:"
+    echo "$msg_count" | tail -n +2
+    return 0
+  fi
+  return 1
+}
+
+# Suggest productive tasks when idle and fleet has pending work
+suggest_fleet_tasks() {
+  local pending
+  pending=$(curl -sf --max-time 2 "$DAEMON_URL/fleet/pending" 2>/dev/null)
+  if [ -n "$pending" ]; then
+    local task_count
+    task_count=$(echo "$pending" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    tasks = data.get('tasks', data.get('pending', []))
+    if tasks:
+        print(len(tasks))
+        for t in tasks[:3]:
+            desc = str(t.get('description', t.get('task', t.get('summary', '?'))))[:100]
+            print(f'  - {desc}')
+except:
+    print('0')
+" 2>/dev/null)
+    if [ -n "$task_count" ] && [ "$(echo "$task_count" | head -1)" != "0" ]; then
+      echo "[FLEET] Pending fleet work available:"
+      echo "$task_count" | tail -n +2
+      echo "[FLEET] Consider picking up a pending task"
+      return 0
+    fi
+  fi
+  return 1
 }
 
 # --- Hook handlers ---
@@ -558,6 +747,20 @@ case "$HOOK_TYPE" in
     if [ ${#MSG_LINES[@]} -gt 0 ]; then
       output_json
     fi
+    # NEW: Check peer health, spawn healing if degraded
+    check_peer_health_and_heal
+
+    # NEW: Report this node's channel status to fleet
+    report_channel_status
+    ;;
+
+  prompt-submit)
+    # Existing: check seed inbox and worker results
+    check_seed_inbox
+    check_worker_results
+
+    # NEW: If fleet messages arrived since last check, prepend summary (rate limited: 60s)
+    check_fleet_messages_since_last
     ;;
 
   teammate-idle)
@@ -579,6 +782,17 @@ case "$HOOK_TYPE" in
       exit 2  # asyncRewake — wake the session
     fi
 
+    # NEW: Check daemon inbox for pending messages
+    local_inbox=$(curl -sf --max-time 2 "$DAEMON_URL/inbox" 2>/dev/null)
+    local_count=$(echo "$local_inbox" | python3 -c "import sys,json;print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo 0)
+    if [ "$local_count" != "0" ] && [ -n "$local_count" ]; then
+      echo "[FLEET] ${local_count} daemon message(s) waiting — injecting via rewake"
+      exit 0  # rewake to process
+    fi
+
+    # NEW: If idle > 5min and fleet has pending work, suggest tasks
+    suggest_fleet_tasks && exit 0
+
     # Nothing pending — stay idle
     exit 0
     ;;
@@ -597,6 +811,22 @@ case "$HOOK_TYPE" in
   *)
     echo '{"systemMessage":"[FLEET] Unknown hook type: '"$HOOK_TYPE"'"}'
     exit 1
+    # NEW: Flush any pending outbox messages before session ends
+    flush_outbox
+
+    # NEW: Send going-offline notification to fleet
+    notify_going_offline
+
+    # NEW: Archive any unprocessed inbox messages
+    archive_unprocessed_inbox
+
+    echo "[FLEET] Session ending on ${NODE_ID}"
+    ;;
+
+  *)
+    echo "[FLEET] Unknown hook type: $HOOK_TYPE"
+    # Don't crash — exit 0 per invariant
+    exit 0
     ;;
 esac
 
