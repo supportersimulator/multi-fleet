@@ -24,6 +24,7 @@ Tools:
   fleet_relay            — queue a message for chief store-and-forward relay
   fleet_discover         — discover fleet peers from config + heartbeats
   fleet_send_smart       — session-aware smart routing to a peer
+  fleet_doctor           — run 6 diagnostic health checks on this node
 
 Usage:
   python3 tools/fleet_nerve_mcp.py
@@ -34,10 +35,13 @@ import json
 import logging
 import os
 import socket
+import sqlite3
+import subprocess
 import sys
 import time
 import traceback
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,36 @@ sys.path.insert(0, str(REPO_ROOT))
 _SUPERREPO_ROOT = REPO_ROOT.parent
 if (_SUPERREPO_ROOT / "tools").is_dir():
     sys.path.insert(1, str(_SUPERREPO_ROOT))
+
+import logging
+
+logger = logging.getLogger("fleet-nerve-mcp")
+
+# Audit trail (optional — graceful if not available)
+try:
+    from multifleet.audit import get_audit_trail
+except ImportError:
+    get_audit_trail = None  # type: ignore
+
+_audit_instance = None
+
+def _get_audit():
+    global _audit_instance
+    if _audit_instance is None and get_audit_trail is not None:
+        _audit_instance = get_audit_trail(node_id=NODE_ID)
+    return _audit_instance
+
+def _sanitize_args(args: dict) -> dict:
+    """Strip secret values from tool arguments for audit logging."""
+    if not args:
+        return {}
+    return {k: ("***" if any(s in k.lower() for s in ("secret", "token", "password", "key")) else v) for k, v in args.items()}
+
+# Error counting (for fleet_doctor and observability)
+_error_counts: dict[str, int] = {}
+
+def _count_error(tool: str):
+    _error_counts[tool] = _error_counts.get(tool, 0) + 1
 
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
 
@@ -944,6 +978,215 @@ def fleet_send_smart(target: str, type: str = "context", subject: str = "", body
     return result
 
 
+# ── Fleet Doctor ──
+
+FLEET_NERVE_PORT = int(os.environ.get("FLEET_NERVE_PORT", "8855"))
+NODE_ID = _get_node_id()
+
+# Keychain key names to probe (first match per group wins)
+_REQUIRED_KEY_GROUPS = [
+    ("OPENAI_API_KEY", "Context_DNA_OPENAI"),
+    ("DEEPSEEK_API_KEY", "Context_DNA_Deepseek"),
+]
+
+
+def _timed_check(code: str, name: str, critical: bool, fn):
+    """Run a check function, capture timing and exceptions."""
+    t0 = time.monotonic()
+    try:
+        passed, message = fn()
+        latency = round((time.monotonic() - t0) * 1000, 1)
+        return {"code": code, "name": name, "passed": passed, "message": message, "latency_ms": latency, "critical": critical}
+    except Exception as e:
+        latency = round((time.monotonic() - t0) * 1000, 1)
+        return {"code": code, "name": name, "passed": False, "message": f"Exception: {e}", "latency_ms": latency, "critical": critical}
+
+
+def _check_daemon_health() -> dict:
+    """FN-0001: Check fleet daemon HTTP health endpoint."""
+    def _run():
+        data = _daemon_get("/health", port=FLEET_NERVE_PORT, timeout=5)
+        if "error" in data:
+            return False, f"Daemon unreachable: {data['error']}"
+        status = data.get("status", "unknown")
+        uptime = data.get("uptime_s", 0)
+        transport = data.get("transport", "unknown")
+        if status == "ok":
+            return True, f"Daemon healthy (uptime: {int(uptime)}s, transport: {transport})"
+        return False, f"Daemon status: {status}"
+    return _timed_check("FN-0001", "daemon_health", True, _run)
+
+
+def _check_nats_connectivity() -> dict:
+    """FN-0002: Check NATS transport from daemon health response."""
+    def _run():
+        data = _daemon_get("/health", port=FLEET_NERVE_PORT, timeout=5)
+        if "error" in data:
+            return False, f"Cannot check NATS — daemon unreachable: {data['error']}"
+        transport = data.get("transport", "unknown")
+        nats_url = data.get("nats_url", "")
+        if transport == "nats":
+            msg = "NATS connected"
+            if nats_url:
+                msg += f" ({nats_url})"
+            return True, msg
+        return False, f"Transport is '{transport}', not NATS"
+    return _timed_check("FN-0002", "nats_connectivity", True, _run)
+
+
+def _check_peer_reachability() -> dict:
+    """FN-0003: Check per-peer channel health scores from daemon."""
+    def _run():
+        data = _daemon_get("/health", port=FLEET_NERVE_PORT, timeout=5)
+        if "error" in data:
+            return False, f"Cannot check peers — daemon unreachable: {data['error']}"
+        channel_health = data.get("channel_health", {})
+        if not channel_health:
+            # Try peers field as fallback
+            peers = data.get("peers", [])
+            if peers:
+                return True, f"{len(peers)} peer(s) known: {', '.join(str(p) for p in peers)}"
+            return False, "No peer data available"
+        scores = []
+        reachable = 0
+        for peer, health in channel_health.items():
+            if isinstance(health, dict):
+                up = health.get("up", 0)
+                total = health.get("total", 7)
+                scores.append(f"{peer}: {up}/{total}")
+                if up > 0:
+                    reachable += 1
+            else:
+                scores.append(f"{peer}: {health}")
+                reachable += 1  # assume reachable if reported
+        msg = ", ".join(scores) if scores else "no peers"
+        return reachable > 0, msg
+    return _timed_check("FN-0003", "peer_reachability", False, _run)
+
+
+def _check_keychain_secrets() -> dict:
+    """FN-0004: Check macOS Keychain for required API keys."""
+    def _run():
+        found = []
+        missing = []
+        for key_group in _REQUIRED_KEY_GROUPS:
+            group_found = False
+            for key_name in key_group:
+                try:
+                    result = subprocess.run(
+                        ["security", "find-generic-password", "-s", "fleet-nerve", "-a", key_name, "-w"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        found.append(key_name)
+                        group_found = True
+                        break
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+            if not group_found:
+                missing.append(" or ".join(key_group))
+        if found:
+            msg = f"Found: {', '.join(found)}"
+            if missing:
+                msg += f"; missing: {', '.join(missing)}"
+            return True, msg
+        return False, f"No API keys found. Missing: {', '.join(missing)}"
+    return _timed_check("FN-0004", "keychain_secrets", True, _run)
+
+
+def _check_message_store() -> dict:
+    """FN-0005: Check message store SQLite database integrity."""
+    def _run():
+        db_path = Path.home() / ".fleet-nerve" / "messages.db"
+        if not db_path.exists():
+            return False, f"Database not found: {db_path}"
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        try:
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()
+            if integrity[0] != "ok":
+                return False, f"Integrity check failed: {integrity[0]}"
+            # Count messages
+            try:
+                row_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            except sqlite3.OperationalError:
+                row_count = "unknown (table may not exist)"
+            return True, f"Store OK ({row_count} messages)"
+        finally:
+            conn.close()
+    return _timed_check("FN-0005", "message_store", True, _run)
+
+
+def _check_python_deps() -> dict:
+    """FN-0006: Check Python version and key dependencies."""
+    def _run():
+        parts = []
+        py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        py_ok = sys.version_info >= (3, 10)
+        parts.append(f"Python {py_ver} {'OK' if py_ok else 'NEED >=3.10'}")
+        # Check nats
+        try:
+            import nats as _nats
+            nats_ver = getattr(_nats, "__version__", "installed")
+            parts.append(f"nats: {nats_ver}")
+        except ImportError:
+            parts.append("nats: MISSING")
+        # Check mcp (optional)
+        try:
+            import mcp as _mcp
+            mcp_ver = getattr(_mcp, "__version__", "installed")
+            parts.append(f"mcp: {mcp_ver}")
+        except ImportError:
+            parts.append("mcp: not installed (optional)")
+        all_ok = py_ok  # nats/mcp are informational
+        return all_ok, "; ".join(parts)
+    return _timed_check("FN-0006", "python_deps", False, _run)
+
+
+def _make_recommendation(checks: list) -> str:
+    """Generate a human-readable recommendation from check results."""
+    critical_failed = [c for c in checks if not c["passed"] and c["critical"]]
+    non_critical_failed = [c for c in checks if not c["passed"] and not c["critical"]]
+    if critical_failed:
+        names = ", ".join(c["name"] for c in critical_failed)
+        return f"CRITICAL: {len(critical_failed)} critical check(s) failed ({names}). Fix before fleet operations."
+    if non_critical_failed:
+        names = ", ".join(c["name"] for c in non_critical_failed)
+        return f"All critical checks passed. {len(non_critical_failed)} non-critical issue(s): {names}."
+    return "All checks passed. Fleet node is healthy."
+
+
+def fleet_doctor() -> dict:
+    """Run diagnostic health checks on this fleet node.
+
+    Runs 6 sequential checks (daemon, NATS, peers, keychain, store, deps)
+    and returns a structured health report with pass/fail per check.
+    """
+    checks = []
+    checks.append(_check_daemon_health())
+    checks.append(_check_nats_connectivity())
+    checks.append(_check_peer_reachability())
+    checks.append(_check_keychain_secrets())
+    checks.append(_check_message_store())
+    checks.append(_check_python_deps())
+
+    passed = sum(1 for c in checks if c["passed"])
+    failed = len(checks) - passed
+    critical_failed = sum(1 for c in checks if not c["passed"] and c["critical"])
+
+    return {
+        "doctor": "fleet-nerve",
+        "version": "2.0.0",
+        "node_id": NODE_ID,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "passed": passed,
+        "failed": failed,
+        "total": len(checks),
+        "critical_failures": critical_failed,
+        "checks": checks,
+        "recommendation": _make_recommendation(checks),
+    }
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -1154,6 +1397,12 @@ TOOLS = [
         },
         "fn": fleet_send_smart,
     },
+    {
+        "name": "fleet_doctor",
+        "description": "Run diagnostic health checks on this fleet node. Returns structured report with 6 checks: daemon health, NATS connectivity, peer reachability, keychain secrets, message store integrity, and Python dependencies.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": fleet_doctor,
+    },
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
@@ -1184,11 +1433,23 @@ def handle_request(request: dict) -> dict:
         tool = TOOLS_BY_NAME.get(tool_name)
         if not tool:
             return {"content": [{"type": "text", "text": json.dumps({"error": f"Unknown tool: {tool_name}"})}], "isError": True}
+        t0 = time.monotonic()
         try:
             result = tool["fn"](**args)
+            latency = round((time.monotonic() - t0) * 1000, 1)
+            logger.info("tool=%s latency=%.1fms status=ok", tool_name, latency)
+            audit = _get_audit()
+            if audit:
+                audit.record("tool_call", tool_name, args.get("target", ""), "ok", latency, metadata=_sanitize_args(args))
             text = json.dumps(result, indent=2) if not isinstance(result, str) else result
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
+            latency = round((time.monotonic() - t0) * 1000, 1)
+            logger.error("tool=%s latency=%.1fms error=%s", tool_name, latency, e)
+            _count_error(tool_name)
+            audit = _get_audit()
+            if audit:
+                audit.record("error", tool_name, args.get("target", ""), "error", latency, error=str(e))
             error_payload = {"error": str(e), "traceback": traceback.format_exc()}
             return {"content": [{"type": "text", "text": json.dumps(error_payload, indent=2)}], "isError": True}
 
@@ -1200,6 +1461,12 @@ def handle_request(request: dict) -> dict:
 
 def main():
     """Run as MCP server on stdin/stdout (JSON-RPC)."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [fleet-mcp/%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,  # MCP uses stdout for JSON-RPC
+    )
     import io
     reader = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8")
     writer = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")

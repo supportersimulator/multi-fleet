@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("fleet-nerve.store")
 
 DEFAULT_DB = Path.home() / ".fleet-nerve" / "messages.db"
 
@@ -357,7 +357,8 @@ class FleetNerveStore:
                 try:
                     return json.loads(row[0])
                 except Exception as e:
-                    logger.warning(f"Failed to parse stored stats for {node_id}: {e}")
+                    logger.warning("Failed to parse stored stats JSON for node %s: %s", node_id, e)
+                    pass
             return {}
 
     # ── WAL: Write-Ahead Log — durable before processing ──

@@ -24,10 +24,10 @@ import sys
 import time
 import socket
 import subprocess
+
+logger = logging.getLogger("fleet-nerve.coordinator")
 from datetime import datetime, timezone
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent.parent
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
@@ -75,13 +75,15 @@ def surgeon_status():
         if req.status == 200:
             status["neurologist"] = True
     except Exception as e:
+        logger.debug("Ollama neurologist check failed: %s", e)
         # Try MLX fallback
         try:
             req = urllib.request.urlopen("http://127.0.0.1:5044/v1/models", timeout=2)
             if req.status == 200:
                 status["neurologist"] = True
         except Exception as e2:
-            logger.warning(f"Neurologist probe failed: ollama={e}, mlx={e2}")
+            logger.debug("MLX neurologist fallback also failed: %s", e2)
+            pass
     return status
 
 
@@ -97,7 +99,8 @@ def build_heartbeat(config):
         if result.returncode == 0:
             branch = result.stdout.strip()
     except Exception as e:
-        logger.warning(f"Failed to detect git branch: {e}")
+        logger.debug("Git branch detection failed, defaulting to 'unknown': %s", e)
+        pass
 
     return {
         "type": "heartbeat",

@@ -36,7 +36,8 @@ def detect_node_id() -> str:
             for nid, node in cfg.get("nodes", {}).items():
                 if node.get("host") == my_ip:
                     return nid
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug("Config JSON parse failed during node ID detection: %s", e)
             pass
 
     return socket.gethostname().split(".")[0].lower()
@@ -50,7 +51,8 @@ def _get_local_ip() -> Optional[str]:
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
+    except Exception as e:
+        logger.debug("Local IP detection failed: %s", e)
         return None
 
 
@@ -67,7 +69,8 @@ def load_peers(conf_path=None, include_discovered: bool = True) -> Tuple[dict, O
             if include_discovered:
                 peers = _merge_discovered(peers)
             return peers, chief
-        except Exception:
+        except Exception as e:
+            logger.debug("JSON config load failed, falling through to shell conf: %s", e)
             pass
 
     shell_path = Path(conf_path) if conf_path else SHELL_CONF

@@ -95,7 +95,8 @@ class FleetSecurity:
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.warning("Keychain read unavailable (%s) — HMAC key not loaded from keychain", type(e).__name__)
             pass
         return None
 
@@ -109,7 +110,8 @@ class FleetSecurity:
                  "-s", HMAC_KEYCHAIN_SERVICE],
                 capture_output=True, timeout=5,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Keychain delete of existing HMAC key failed (%s) — continuing with key generation", type(e).__name__)
             pass
         try:
             user = os.environ.get("USER", "fleet")

@@ -20,12 +20,15 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("fleet-nerve.worker")
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -210,7 +213,8 @@ class FleetWorkerManager:
         for f in sorted(self._results_dir.glob("*.json"), reverse=True)[:limit]:
             try:
                 results.append(json.loads(f.read_text()))
-            except Exception:
+            except Exception as e:
+                logger.warning("Failed to parse worker result file %s: %s", f.name, e)
                 pass
         return results
 
