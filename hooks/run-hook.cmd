@@ -295,23 +295,40 @@ send_session_notification() {
 }
 
 ensure_api_keys() {
-  # Load keys from keychain -> fleet env fallback -> AWS SM refresh
+  # Load keys: Keychain (fleet-nerve svc) -> Keychain (legacy) -> env file -> AWS SM
   # Never logs key values. Startup-only refresh.
   local needs_refresh=0
+  local repo_root
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
   for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
-    local val
-    val=$(security find-generic-password -s "$key_name" -w 2>/dev/null) || true
+    local val=""
+
+    # 1. Keychain — fleet-nerve service (canonical)
+    val=$(security find-generic-password -s "fleet-nerve" -a "$key_name" -w 2>/dev/null) || true
+    if [ -n "$val" ]; then export "$key_name=$val"; continue; fi
+
+    # 2. Keychain — legacy (key name as service)
+    val=$(security find-generic-password -s "$key_name" -a "$USER" -w 2>/dev/null) || true
+    if [ -z "$val" ]; then
+      val=$(security find-generic-password -s "$key_name" -a "atlas" -w 2>/dev/null) || true
+    fi
     if [ -n "$val" ]; then
       export "$key_name=$val"
+      # Migrate to canonical keychain location
+      security delete-generic-password -s "fleet-nerve" -a "$key_name" 2>/dev/null || true
+      security add-generic-password -s "fleet-nerve" -a "$key_name" -w "$val" 2>/dev/null || true
       continue
     fi
 
+    # 3. Env file fallback
     if [ -f "$HOME/.fleet-nerve/env" ]; then
       val=$(grep "^${key_name}=" "$HOME/.fleet-nerve/env" 2>/dev/null | cut -d= -f2-) || true
       if [ -n "$val" ]; then
         export "$key_name=$val"
-        security add-generic-password -s "$key_name" -a "atlas" -w "$val" 2>/dev/null || true
+        # Promote to Keychain so env file can be cleaned
+        security delete-generic-password -s "fleet-nerve" -a "$key_name" 2>/dev/null || true
+        security add-generic-password -s "fleet-nerve" -a "$key_name" -w "$val" 2>/dev/null || true
         continue
       fi
     fi
@@ -322,16 +339,16 @@ ensure_api_keys() {
   if [ "$needs_refresh" = "1" ] && command -v aws &>/dev/null; then
     for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
       local existing
-      existing=$(security find-generic-password -s "$key_name" -w 2>/dev/null) || true
+      existing=$(security find-generic-password -s "fleet-nerve" -a "$key_name" -w 2>/dev/null) || true
       [ -n "$existing" ] && continue
 
       local aws_val
       aws_val=$(aws secretsmanager get-secret-value --secret-id "$key_name" --query 'SecretString' --output text 2>/dev/null) || true
       if [ -n "$aws_val" ]; then
-        security delete-generic-password -s "$key_name" 2>/dev/null || true
-        security add-generic-password -s "$key_name" -a "atlas" -w "$aws_val" 2>/dev/null || true
+        security delete-generic-password -s "fleet-nerve" -a "$key_name" 2>/dev/null || true
+        security add-generic-password -s "fleet-nerve" -a "$key_name" -w "$aws_val" 2>/dev/null || true
         export "$key_name=$aws_val"
-        emit "[FLEET] Refreshed ${key_name} from AWS Secrets Manager"
+        emit "[FLEET] Refreshed ${key_name} from AWS Secrets Manager → Keychain"
       fi
     done
   fi
