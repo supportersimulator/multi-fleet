@@ -2,6 +2,7 @@
 Tests for watchdog logic — peer staleness, health building, self-heal triggers.
 """
 
+import asyncio
 import json
 import os
 import time

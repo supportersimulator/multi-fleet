@@ -116,20 +116,24 @@ class TestP4SeedFile:
     """P4 seed file delivery — local file write."""
 
     @pytest.mark.asyncio
-    async def test_seed_local_writes_file(self, mock_nerve, tmp_path):
-        """P4 writes a seed file for local delivery."""
-        with patch("tools.fleet_nerve_nats.SEED_DIR", str(tmp_path)):
-            # Override node_id to match target (local delivery)
-            mock_nerve.node_id = "testnode"
-            result = await mock_nerve._send_p4_seed("testnode", {
-                "from": "mac2",
-                "payload": {"subject": "test seed", "body": "seed body"},
-            })
-            assert result["delivered"] is True
-            seed_file = tmp_path / "fleet-seed-testnode.md"
-            assert seed_file.exists()
-            content = seed_file.read_text()
-            assert "test seed" in content
+    async def test_seed_local_writes_file(self, mock_nerve):
+        """P4 writes a seed file to /tmp for local delivery."""
+        import pathlib
+        mock_nerve.node_id = "testnode"
+        seed_path = pathlib.Path("/tmp/fleet-seed-testnode.md")
+        # Clean up before test
+        seed_path.unlink(missing_ok=True)
+
+        result = await mock_nerve._send_p4_seed("testnode", {
+            "from": "mac2",
+            "payload": {"subject": "test seed", "body": "seed body"},
+        })
+        assert result["delivered"] is True
+        assert seed_path.exists()
+        content = seed_path.read_text()
+        assert "test seed" in content
+        # Clean up
+        seed_path.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_seed_remote_returns_false(self, mock_nerve):

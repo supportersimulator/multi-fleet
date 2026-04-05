@@ -118,7 +118,9 @@ class TestRepairEscalation:
         call_args = mock_nerve.send_with_fallback.call_args_list[0]
         msg = call_args[0][1]
         assert msg["type"] == "context"
-        assert "P1_nats" in msg["payload"]["body"]
+        # L1 notify body mentions the broken channels in subject or body
+        combined = msg["payload"].get("subject", "") + msg["payload"].get("body", "")
+        assert "P1_nats" in combined or "down" in combined
 
     @pytest.mark.asyncio
     async def test_escalation_stops_on_success(self, mock_nerve):

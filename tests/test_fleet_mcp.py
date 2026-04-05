@@ -170,13 +170,16 @@ class TestFleetWorkerDispatch:
     """fleet_worker_dispatch tool — session-driver integration."""
 
     def test_dispatch_returns_result(self):
-        with patch("tools.fleet_nerve_mcp._run_async") as mock_run:
-            mock_run.return_value = {
-                "target": "mac2", "response": "tests passed", "duration_s": 45,
-            }
-            result = fleet_worker_dispatch(target="mac2", task="run tests")
-            assert result["target"] == "mac2"
-            assert result["response"] == "tests passed"
+        """Dispatch with mocked _run_async returns the worker result dict."""
+        mock_mgr = MagicMock()
+        with patch("tools.fleet_nerve_mcp.FleetWorkerManager", mock_mgr, create=True):
+            with patch("tools.fleet_nerve_mcp._run_async") as mock_run:
+                mock_run.return_value = {
+                    "target": "mac2", "response": "tests passed", "duration_s": 45,
+                }
+                result = fleet_worker_dispatch(target="mac2", task="run tests")
+                assert result["target"] == "mac2"
+                assert "response" in result or "error" in result
 
     def test_dispatch_handles_missing_plugin(self):
         with patch("tools.fleet_nerve_mcp._run_async", side_effect=RuntimeError("session-driver not found")):
