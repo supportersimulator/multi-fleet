@@ -79,9 +79,17 @@ class TestRepairMessageHandler:
         mock_nerve._repair_restart_nats.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_unknown_action_injects_alert(self, mock_nerve):
-        """Unknown repair action falls through to alert injection (human review)."""
+    async def test_unknown_action_silently_drops(self, mock_nerve):
+        """Unknown repair action is silently dropped (no handler, no alert).
+
+        The repair handler only executes SAFE_ACTIONS. Unknown actions are
+        ignored — this prevents arbitrary commands from being run via fleet
+        messages. The notification still fires (via _notify) on first sight,
+        but _inject_alert is NOT called.
+        """
         mock_nerve._inject_alert = MagicMock()
+        mock_nerve._notify = MagicMock()
+        mock_nerve._find_claude = MagicMock(return_value=None)  # no agent spawning
 
         msg = MagicMock()
         msg.subject = "fleet.mac1.message"
@@ -99,7 +107,10 @@ class TestRepairMessageHandler:
         }).encode()
 
         await mock_nerve._handle_message(msg)
-        mock_nerve._inject_alert.assert_called_once()
+        # Unknown actions do NOT trigger _inject_alert — they are silently
+        # dropped after the initial _notify (macOS notification) fires once.
+        mock_nerve._inject_alert.assert_not_called()
+        mock_nerve._notify.assert_called_once()
 
 
 class TestRepairEscalation:
@@ -114,10 +125,11 @@ class TestRepairEscalation:
         result = await mock_nerve.repair_with_escalation("mac2", ["P1_nats"], action="restart_nats")
         assert result["repaired"] is True
         assert result["level"] == 1
-        # Verify send_with_fallback was called with context message
+        # Verify send_with_fallback was called with repair message
+        # (type:"repair" avoids seed file writes and keystroke injection spam)
         call_args = mock_nerve.send_with_fallback.call_args_list[0]
         msg = call_args[0][1]
-        assert msg["type"] == "context"
+        assert msg["type"] == "repair"
         # L1 notify body mentions the broken channels in subject or body
         combined = msg["payload"].get("subject", "") + msg["payload"].get("body", "")
         assert "P1_nats" in combined or "down" in combined
