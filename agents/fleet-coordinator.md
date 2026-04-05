@@ -273,6 +273,69 @@ When a dedicated Fleet Comms Agent is running (check `/tmp/fleet-comms-agent.pid
 ### Fallback (no comms agent)
 If comms agent PID is missing or stale, coordinator reverts to direct inbox/health/delivery operations. Zero functionality lost — just higher context cost.
 
+## 6. Verdict / Rebuttal Protocol (3x3x3 Core)
+
+The coordinator orchestrates the 4-phase cross-machine rebuttal cycle — the multi-machine analogue of 3-Surgeons cross-examination.
+
+### When to Use
+
+- Any task that benefits from multiple independent approaches
+- Architecture decisions affecting the whole fleet
+- When Aaron says "fleet surgery", "cross-machine review", "3x3x3", or "rebuttal cycle"
+
+### The 4-Phase Cycle
+
+**Phase 1 — Assign task brief** (coordinator sends):
+```bash
+# Broadcast task_brief to all machines with identical objective + constraints
+# Use fleet-send type: task_brief (see fleet-rebuttal skill)
+# Each machine works independently in its own worktree/branch
+```
+
+**Phase 2 — Collect verdicts** (coordinator waits):
+```bash
+# Poll inbox for verdict messages matching the task_id
+# Minimum 2 verdicts required to proceed
+# Late verdicts accepted but marked late: true
+curl -sf http://127.0.0.1:8855/inbox | python3 -c "
+import json,sys
+v=[m for m in json.load(sys.stdin) if m.get('type')=='verdict']
+print(f'{len(v)} verdicts received')
+for x in v:
+    b=x.get('payload',{}).get('body',{})
+    print(f'  {b.get(\"machine\",\"?\")} conf={b.get(\"confidence\",\"?\")}')
+"
+```
+
+**Phase 3 — Distribute critiques** (coordinator routes):
+- Send each machine's verdict to the OTHER machines for critique
+- mac1's verdict goes to mac2+mac3, mac2's to mac1+mac3, etc.
+- Use fleet-send type: critique_request
+
+**Phase 4 — Synthesize chief decision** (coordinator produces):
+- Compare confidence scores, identify assumption conflicts
+- Weight critiques by evidence quality (measurements > opinions)
+- Risks flagged by 2+ machines are HIGH priority
+- Produce chief_decision packet with: recommended plan, strongest alternative, risks, unresolved dissent
+- Broadcast decision to all machines with next_steps per machine
+
+### Verdict Packet (schema reference)
+
+Every machine produces the same structured JSON:
+```json
+{"protocol":"3s-lan/v1","message_type":"local_verdict","task_id":"...","machine":"...","summary":"...","proposed_changes":[],"assumptions":[],"risks":[],"confidence":0.78,"dissent":[],"questions_for_chief":[]}
+```
+
+Full schema: see **fleet-verdict** skill. Critique schema: see **fleet-rebuttal** skill.
+
+### Key Rules
+
+- Dissent is NEVER suppressed — if any surgeon on any machine disagreed, it surfaces
+- Evidence outweighs confidence — measurements beat opinions
+- Chief NEVER overrides without stating why
+- Human has final authority over the Chief at all times
+- No machine critiques its own verdict
+
 ## Rules
 
 - Never hardcode IPs, secrets, or node names — use `$MULTIFLEET_NODE_ID` and fleet discovery
