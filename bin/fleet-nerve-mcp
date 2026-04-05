@@ -2,6 +2,13 @@
 # Fleet Nerve MCP launcher — resolves Python and starts the MCP server
 set -euo pipefail
 
+# Load API keys from macOS Keychain if available (values never logged)
+if command -v security &>/dev/null; then
+  _k=$(security find-generic-password -s fleet-nerve-openai -w 2>/dev/null) && export Context_DNA_OPENAI="$_k"
+  _k=$(security find-generic-password -s fleet-nerve-deepseek -w 2>/dev/null) && export Context_DNA_Deepseek="$_k"
+  unset _k
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$PLUGIN_ROOT/.." && pwd)"

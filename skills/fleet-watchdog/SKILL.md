@@ -135,11 +135,13 @@ Watchdog enforces the fleet-wide invariant: **the fleet is not healthy until ALL
 - Idle sessions are conscripted for repair work before anything else
 - 5-minute cooldown between repair attempts per peer prevents storms
 - Repair success is verified by re-testing the channel immediately after fix
+
 ## Idle Proactivity Protocol
 
-When a node has no NATS messages sent or received for >5 minutes, the watchdog activates idle proactivity:
+When a node has no NATS messages sent or received for >5 minutes, the watchdog activates idle proactivity.
 
-**Self-idle detection:**
+### Self-Idle Detection
+
 1. Scans `.fleet-messages/<node>/` for unprocessed `.md` files
 2. Checks `/tmp/fleet-seed-<node>.md` for pending seed messages
 3. Broadcasts idle status to the fleet (`fleet.all.message` with type `idle`)
@@ -147,13 +149,15 @@ When a node has no NATS messages sent or received for >5 minutes, the watchdog a
 5. Logs the idle event at `info` level for observability
 6. Resets the activity timer after firing (prevents 30s spam)
 
-**Peer-idle detection:**
+### Peer-Idle Detection
+
 - Peers with `sessions: 0` in heartbeat data or last heartbeat >10 minutes old are considered idle
 - Sends a direct `idle-wake` message: "You've been idle for Xmin. Any pending fleet work? Check plans."
 - Rate-limited: maximum 1 idle-wake per peer per 30 minutes
 - Uses `self.node_id` and heartbeat data only — no hardcoded node names
 
-**Activity tracking:**
+### Activity Tracking
+
 - `_touch_activity()` is called on every message send and receive
 - The idle timer only fires when there is genuinely no NATS traffic
 ## Idle Detection Protocol
@@ -171,6 +175,7 @@ The watchdog detects idle peers and converts downtime into productive work. Buil
 4. **Fleet-wide idle** — if ALL peers are idle simultaneously, propose coordinated productive work: test suites, documentation passes, dependency upgrades, or technical debt reduction
 
 **Implementation reference:** Extends the existing heartbeat check in the watchdog loop. The idle state is derived from heartbeat metadata fields (`lastTaskCompleted`, `activeTask`). Nudges are sent via the same NATS/HTTP channels used for fleet messaging.
+
 
 ```bash
 # Check idle status of all peers
