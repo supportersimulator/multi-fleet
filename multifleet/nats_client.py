@@ -84,8 +84,8 @@ def _default_nats_url():
         out = _sp.check_output(["lsof", "-i", ":4222", "-sTCP:LISTEN"], text=True, timeout=3, stderr=_sp.DEVNULL)
         if "ssh" in out.lower():
             return "nats://127.0.0.1:4222"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"SSH tunnel check for NATS failed: {e}")
 
     # Try config file for chief IP
     conf = REPO_ROOT / "scripts" / "3s-network.local.conf"
@@ -104,8 +104,8 @@ def _default_nats_url():
             chief_host = c.get("chief", {}).get("host", "")
             if chief_host:
                 return f"nats://{chief_host}:4222"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to read NATS URL from multifleet config: {e}")
 
     return "nats://localhost:4222"
 
@@ -540,8 +540,9 @@ class CommunicationProtocol:
             if resp.status == 200:
                 p2_ok = True
                 self.channel_state.record_success(peer_id, CHANNEL_P2_HTTP, elapsed_ms)
-        except Exception:
+        except Exception as e:
             elapsed_ms = int((time.time() - t0) * 1000)
+            logger.debug(f"P2 health probe failed for {peer_id}: {e}")
             self.channel_state.record_failure(peer_id, CHANNEL_P2_HTTP, "health probe failed")
 
         # Probe P1 NATS (check heartbeat recency)
@@ -625,7 +626,8 @@ class CommunicationProtocol:
                 if result.get("delivered"):
                     logger.info(f"Self-heal repair sent to {peer_id} via {ch_name}")
                     return
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Self-heal repair channel {ch_name} failed for {peer_id}: {e}")
                 continue
 
         logger.warning(f"Self-heal: could not deliver repair to {peer_id} -- all channels failed")
@@ -687,7 +689,8 @@ class FleetNerveNATS:
         try:
             from .config import load_peers
             self._peers_config, self._chief = load_peers()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to load peer config: {e}")
             self._peers_config, self._chief = {}, None
         # Broadcast scaling: track last git broadcast timestamp for rate limiting
         self._last_git_broadcast_ts = 0.0
@@ -730,8 +733,8 @@ class FleetNerveNATS:
                 if cfg_path.exists():
                     cfg = json.loads(cfg_path.read_text())
                     nats_token = cfg.get("protocol", {}).get("natsToken")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to read NATS token from config: {e}")
         if nats_token:
             connect_kwargs["token"] = nats_token
             logger.info("NATS auth: using token")
@@ -746,7 +749,8 @@ class FleetNerveNATS:
         try:
             await self.js.find_stream_name_by_subject("fleet.>")
             logger.info("JetStream stream FLEET found")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"JetStream stream lookup failed (will create): {e}")
             try:
                 await self.js.add_stream(
                     name=STREAM_NAME,
@@ -869,8 +873,8 @@ class FleetNerveNATS:
                                             old_pid = int(open(pid_file).read().strip())
                                             os.kill(old_pid, 0)  # check alive
                                             continue  # agent already running
-                                        except (OSError, ValueError):
-                                            pass  # stale pid
+                                        except (OSError, ValueError) as e:
+                                            logger.debug(f"Stale repair PID for {ch}: {e}")
                                     prompt = (f"Fleet channel {ch} is broken on {self.node_id}. "
                                               f"Diagnose and fix. Check daemon, NATS, SSH tunnel, config. "
                                               f"Report result to fleet when fixed.")
@@ -952,8 +956,8 @@ class FleetNerveNATS:
                     peer_ip = data.get("ip", "")
                     peer_port = data.get("port", 8855)
                     self._discovery.add_nats_peer(node, ip=peer_ip, port=peer_port)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Heartbeat handler error: {e}")
 
     async def _ssh_repair_peer(self, ip: str, user: str, action: str):
         """L3 escalation: SSH into peer and fix their broken channel after 2min timeout."""
@@ -989,8 +993,8 @@ class FleetNerveNATS:
             if ref in self._pending_acks:
                 self._pending_acks[ref]["acked"] = True
                 logger.info(f"ACK: {ref[:8]} from {data.get('node','?')} via {data.get('channel','?')}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"ACK handler error: {e}")
 
     async def _send_ack(self, sender: str, msg_id: str, status: str, channel: str):
         """Publish ACK back to the original sender."""
@@ -999,8 +1003,8 @@ class FleetNerveNATS:
         ack = {"ref": msg_id, "status": status, "node": self.node_id, "channel": channel}
         try:
             await self.nc.publish(_sub_ack(sender), json.dumps(ack).encode())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to send ACK to {sender}: {e}")
 
     # ── Injection (last mile) ──
 
@@ -1046,8 +1050,8 @@ class FleetNerveNATS:
                         if mtime > best_mtime:
                             best_mtime = mtime
                             best_sid = sid
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
+                except (OSError, ValueError, json.JSONDecodeError) as e:
+                    logger.debug(f"Session PID file parse error: {e}")
 
         # Method 2: Recently modified JSONL (full UUID in filename)
         projects_dir = Path.home() / ".claude" / "projects"
@@ -1415,8 +1419,8 @@ class FleetNerveNATS:
                 ["osascript", "-e", f'display notification "{message}" with title "Fleet Nerve" sound name "Glass"'],
                 capture_output=True, timeout=3,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"macOS notification failed: {e}")
 
     def _find_claude(self) -> Optional[str]:
         for path in ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"]:
@@ -1470,7 +1474,8 @@ class FleetNerveNATS:
             req = urllib.request.Request("http://127.0.0.1:5044/v1/models", method="GET")
             resp = urllib.request.urlopen(req, timeout=2)
             result["neurologist"] = "ok"
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Neurologist probe failed: {e}")
             result["neurologist"] = "down"
         # Cardiologist (OpenAI) -- check key availability (never log the key)
         # Priority: env var -> macOS Keychain -> AWS Secrets Manager
@@ -1488,8 +1493,8 @@ class FleetNerveNATS:
                 if r.returncode == 0 and r.stdout.strip():
                     key = r.stdout.strip()
                     key_source = "keychain"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Keychain lookup for OPENAI_API_KEY failed: {e}")
         if not key:
             # Try AWS Secrets Manager (fallback -- requires network + credentials)
             try:
@@ -1501,8 +1506,8 @@ class FleetNerveNATS:
                 if r.returncode == 0 and r.stdout.strip():
                     key = r.stdout.strip()
                     key_source = "aws"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"AWS Secrets Manager lookup for OPENAI_API_KEY failed: {e}")
         has_key = bool(key and key.startswith("sk-"))
         result["cardiologist"] = "ok" if has_key else "no-key"
         result["cardiologist_key_source"] = key_source
@@ -1525,7 +1530,8 @@ class FleetNerveNATS:
                 cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=3,
             ).stdout.strip()
             return {"branch": branch, "commit": commit}
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Git context detection failed: {e}")
             return {"branch": "unknown", "commit": "unknown"}
 
     def _detect_vscode_state(self) -> str:
@@ -1541,7 +1547,8 @@ class FleetNerveNATS:
             if "Code" in result.stdout:
                 return "active"
             return "open"
-        except Exception:
+        except Exception as e:
+            logger.debug(f"VS Code state detection failed: {e}")
             return "unknown"
 
     def _detect_sessions(self) -> list:
@@ -1560,8 +1567,8 @@ class FleetNerveNATS:
                         "kind": data.get("kind", "?"),
                         "entrypoint": data.get("entrypoint", "?"),
                     })
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
+                except (OSError, ValueError, json.JSONDecodeError) as e:
+                    logger.debug(f"Session PID file parse error: {e}")
         # Method 2: JSONL mtime for idle_s
         projects_dir = Path.home() / ".claude" / "projects"
         if projects_dir.exists():
@@ -1588,8 +1595,8 @@ class FleetNerveNATS:
                                     "idle_s": int(time.time() - mtime),
                                     "kind": "interactive",
                                 })
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.debug(f"JSONL session stat error: {e}")
         return sessions
 
     # ── Publish ──
@@ -1650,8 +1657,8 @@ class FleetNerveNATS:
         if self.nc:
             try:
                 await self.nc.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"NATS close during repair failed: {e}")
         await asyncio.sleep(1)
         await self.connect()
         await self._subscribe_all()
@@ -1718,7 +1725,8 @@ class FleetNerveNATS:
                     headers={"Content-Type": "application/json"}, method="POST")
                 resp = urllib.request.urlopen(req, timeout=3)
                 return {"delivered": True, "url": url}
-            except Exception:
+            except Exception as e:
+                logger.debug(f"P2 HTTP send to {url} failed: {e}")
                 continue
         return {"delivered": False}
 
@@ -1742,7 +1750,8 @@ class FleetNerveNATS:
                     headers={"Content-Type": "application/json"}, method="POST")
                 urllib.request.urlopen(req, timeout=3)
                 return {"delivered": True, "url": url}
-            except Exception:
+            except Exception as e:
+                logger.debug(f"P3 chief relay to {url} failed: {e}")
                 continue
         return {"delivered": False}
 
@@ -1788,8 +1797,8 @@ class FleetNerveNATS:
                 input=payload_bytes, capture_output=True, timeout=8)
             if result.returncode == 0:
                 return {"delivered": True, "method": "ssh_direct"}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"P5 SSH direct to {ip} failed: {e}")
         # Try via tunnel port (HTTP through SSH tunnel)
         if tunnel_port:
             try:
@@ -1800,8 +1809,8 @@ class FleetNerveNATS:
                     headers={"Content-Type": "application/json"}, method="POST")
                 urllib.request.urlopen(req, timeout=3)
                 return {"delivered": True, "method": "ssh_tunnel"}
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"P5 SSH tunnel via port {tunnel_port} failed: {e}")
         # Fallback: write seed file via SSH using base64 to prevent injection
         # Session-aware: use _target_session if set, otherwise per-node fallback
         try:
@@ -1821,7 +1830,8 @@ class FleetNerveNATS:
                  f"echo '{b64}' | base64 -d > /tmp/{seed_name}"],
                 capture_output=True, timeout=8)
             return {"delivered": True, "method": "seed_via_ssh", "seedFile": seed_name}
-        except Exception:
+        except Exception as e:
+            logger.debug(f"P5 SSH seed file to {ip} failed: {e}")
             return {"delivered": False}
 
     async def _send_p6_wol(self, target: str, message: dict) -> dict:
@@ -1839,7 +1849,8 @@ class FleetNerveNATS:
             sock.close()
             logger.info(f"WoL sent to {target} ({mac_addr})")
             return {"delivered": False, "wol_sent": True}
-        except Exception:
+        except Exception as e:
+            logger.warning(f"P6 WoL failed for {target}: {e}")
             return {"delivered": False}
 
     # ── P7 Git rate limiting constants ──
@@ -2293,7 +2304,8 @@ class FleetNerveNATS:
         try:
             result = await asyncio.wait_for(sender(target, probe_msg), timeout=5)
             return bool(result.get("delivered"))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Channel probe {channel} for {target} failed: {e}")
             return False
 
     async def repair_with_escalation(self, target: str, broken_channels: list, action: str = "restart_nats"):
@@ -2448,7 +2460,8 @@ class FleetNerveNATS:
                     results.append({"node": data["nodeId"], "status": 200, "data": data})
             except asyncio.TimeoutError:
                 continue
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Health collect reply parse error: {e}")
                 break
 
         await sub.unsubscribe()

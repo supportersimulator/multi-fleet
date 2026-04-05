@@ -6,10 +6,13 @@ Pattern follows multifleet_packet_store.py — proven in production.
 """
 
 import json
+import logging
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DB = Path.home() / ".fleet-nerve" / "messages.db"
 
@@ -353,8 +356,8 @@ class FleetNerveStore:
             if row:
                 try:
                     return json.loads(row[0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to parse stored stats for {node_id}: {e}")
             return {}
 
     # ── WAL: Write-Ahead Log — durable before processing ──

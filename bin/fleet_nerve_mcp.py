@@ -31,6 +31,7 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import sys
@@ -38,6 +39,8 @@ import time
 import traceback
 import urllib.request
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -72,8 +75,8 @@ def _get_node_id() -> str:
         try:
             from tools.fleet_nerve_config import detect_node_id
             return detect_node_id()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Node ID detection fallback failed: {e}")
     return socket.gethostname().split(".")[0].lower()
 
 
@@ -131,8 +134,8 @@ def _resolve_host(target: str) -> tuple:
             peer = peers.get(target, {})
             host = peer.get("ip", "")
             port = peer.get("port", 8855)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Peer config lookup failed for {target}: {e}")
     return (host, port) if host else ("", 8855)
 
 
@@ -427,7 +430,8 @@ def fleet_status() -> dict:
             from tools.multifleet_packet_store import PacketStore
         store = PacketStore()
         packet_summary = store.fleet_summary()
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Packet store unavailable: {e}")
         packet_summary = {"note": "packet store only available on chief"}
 
     return {
@@ -487,8 +491,8 @@ def fleet_dashboard() -> dict:
         nodes_list = [{"name": n, **info} for n, info in nodes_data.items()]
         dashboard["formatted_table"] = fleet_status_table(nodes_list)
         dashboard["formatted_summary"] = fleet_activity_summary(nodes_list)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Dashboard visual formatting unavailable: {e}")
 
     return dashboard
 
@@ -634,8 +638,8 @@ def fleet_wake(target: str) -> dict:
                 }
             return {"status": "ssh_reachable_daemon_failed", "target": target,
                     "hint": f"ssh {user}@{ip} 'tail /tmp/fleet-nerve.log'"}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"SSH wake attempt for {target} failed: {e}")
 
     # Strategy 3: WoL magic packet
     mac_addr = peer.get("mac_address")
@@ -649,8 +653,8 @@ def fleet_wake(target: str) -> dict:
                         if ":" in p and len(p) >= 11:
                             mac_addr = p
                             break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"ARP lookup for MAC address failed: {e}")
 
     wol_sent = False
     if mac_addr:
@@ -857,8 +861,8 @@ def fleet_discover() -> dict:
                     "user": peer.get("user", ""),
                     "reachable": None,
                 }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Peer config load for discovery failed: {e}")
 
     # Source 3: Live daemon peers (heartbeat-discovered)
     live_peers = _daemon_get("/peers")
