@@ -94,7 +94,7 @@ Every message tries all 7 channels in priority order. First success wins.
 - **No hardcoded values** — all from config.json or environment variables
 - **Open-source ready** — template config, no IP leaks, clean separation
 
-## Plugin Skills (16)
+## Plugin Skills (21)
 
 | Skill | Description |
 |-------|-------------|
@@ -113,6 +113,11 @@ Every message tries all 7 channels in priority order. First success wins.
 | fleet-config-gate | Configuration validation before fleet operations |
 | fleet-dispatch-gate | Pre-dispatch validation for cross-machine task routing |
 | fleet-post-verification | Post-task verification — confirms work completed correctly |
+| fleet-chain | Multi-step task dependencies across nodes |
+| fleet-dispatch | Remote worker dispatch with result tracking |
+| fleet-ack | Delivery confirmation with retry protocol |
+| fleet-idle | Productive work discovery when idle |
+| fleet-security | HMAC signing, replay prevention, sanitization |
 | productivity-view | Live fleet-wide dashboard of nodes, agents, and backlog |
 
 ## SSH Tunnels (for restricted networks)
