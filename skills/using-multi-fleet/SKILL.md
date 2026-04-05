@@ -12,21 +12,53 @@ Multi-Fleet is a cross-machine coordination layer for Claude Code. It enables mu
 ## Architecture
 
 ```
-Layer 5: ContextDNA Chief --- authoritative memory, evidence synthesis
+Layer 5: ContextDNA Chief --- authoritative memory, evidence synthesis, merge adjudication
 Layer 4: Multi-Fleet -------- cross-machine coordination (THIS PLUGIN)
-Layer 3: Superset ----------- local parallel execution
-Layer 2: 3-Surgeons --------- local truth protocol
-Layer 1: Superpowers -------- local captain
+Layer 3: Superset ----------- local parallel execution (worktrees, parallel agents)
+Layer 2: 3-Surgeons --------- local truth protocol (3 LLMs cross-examine)
+Layer 1: Superpowers -------- local captain (discipline, workflow invariance)
 ```
 
 **Operating rule:** Every machine stays independently capable. The chief machine is preferred for synthesis, not required for basic operation.
+
+### 3x3x3 Model
+
+The fleet operates as **3 machines x 3 surgeons x 3 phases**:
+
+- **3 Machines:** Each MacBook runs an identical local surgeon cell (Head + Cardiologist + Neurologist). Same protocol, different worktree/branch/implementation direction.
+- **3 Surgeons per machine:** Each cell runs the full 3-Surgeons protocol locally — independent analysis, cross-exam, local verdict with confidence and dissent.
+- **3 Phases cross-machine:** Assign (chief sends briefs) → Surgery (local cells produce verdicts) → Rebuttal (heads critique each other) → Synthesis (chief merges with evidence).
+
+**Discipline invariant:** This is 3 disciplined cells + 1 chief, NOT 27 peers chatting freely. Only Head Surgeons speak cross-machine. Local surgeons stay local.
 
 ## Fleet Roles
 
 | Role | What it does | Example |
 |------|-------------|---------|
-| **Chief** | Runs Redis, MLX LLM, synthesis. Authoritative memory. Message relay for offline nodes. | mac1 |
-| **Worker** | Executes tasks, reports back. Full local capability. Independent when chief is down. | mac2, mac3 |
+| **Chief** | Runs ContextDNA, Redis, MLX LLM. Authoritative memory. Collects verdicts, requests rebuttals, synthesizes merge decisions with evidence. | mac1 |
+| **Worker** | Runs local 3-Surgeons cell, produces verdicts, critiques other machines' work. Full local capability. Independent when chief is down. | mac2, mac3 |
+| **Head Surgeon** | Per-machine authority. Only role that emits cross-machine packets. Produces `local_verdict` with confidence + dissent. | One per machine |
+| **Coordinator Agent** | Dedicated spawned agent per machine for LAN packet handling. Never edits code. Only relays, summarizes, compares, escalates. | One per machine |
+
+### Verdict and Rebuttal Protocol
+
+The fleet uses structured JSON packets (protocol `3s-lan/v1`) for all cross-machine communication:
+
+**Outbound from each machine:**
+- `local_verdict` — summary, confidence, files touched, risks, dissent from local surgeons
+- `branch_status` — branch name, commit, goal, changed files, status
+- `critique` — review of another machine's verdict with blocking concerns
+
+**From Chief:**
+- `task_brief` — role-specific assignment to each machine
+- `rebuttal_request` — asks a head to critique another machine's verdict
+- `chief_decision` — winner branch, cherry-picks, followups, unresolved dissent
+
+**Phase flow:**
+1. **Assign** — Chief sends `task_brief` to each machine with the same objective but freedom to pursue different approaches
+2. **Surgery** — Each machine runs local 3-Surgeons, produces `local_verdict` + `branch_status`
+3. **Rebuttal** — Chief distributes verdicts cross-machine via `rebuttal_request`. Each head returns `critique`
+4. **Synthesis** — Chief compares verdicts against ContextDNA memory (prior failures, invariants, architecture decisions), produces `chief_decision`
 
 ## <HARD-GATE> Communication Protocol Invariants
 
