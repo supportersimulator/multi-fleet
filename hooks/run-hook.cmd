@@ -59,10 +59,61 @@ check_daemon_inbox() {
   fi
 }
 
+ensure_api_keys() {
+  # Load keys from keychain → fleet env fallback → AWS SM refresh
+  # Never logs key values. Startup-only refresh (3-surgeon consensus 2026-04-05).
+  local needs_refresh=0
+
+  for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
+    # Try keychain first
+    local val
+    val=$(security find-generic-password -s "$key_name" -w 2>/dev/null)
+    if [ -n "$val" ]; then
+      export "$key_name=$val"
+      continue
+    fi
+
+    # Try fleet env fallback
+    if [ -f "$HOME/.fleet-nerve/env" ]; then
+      val=$(grep "^${key_name}=" "$HOME/.fleet-nerve/env" 2>/dev/null | cut -d= -f2-)
+      if [ -n "$val" ]; then
+        export "$key_name=$val"
+        # Store in keychain for next time
+        security add-generic-password -s "$key_name" -a "atlas" -w "$val" 2>/dev/null
+        continue
+      fi
+    fi
+
+    # Neither source has it — need AWS refresh
+    needs_refresh=1
+  done
+
+  if [ "$needs_refresh" = "1" ]; then
+    # Pull from AWS Secrets Manager (startup-only, never on probe failure)
+    if command -v aws &>/dev/null; then
+      for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
+        local existing
+        existing=$(security find-generic-password -s "$key_name" -w 2>/dev/null)
+        [ -n "$existing" ] && continue
+
+        local aws_val
+        aws_val=$(aws secretsmanager get-secret-value --secret-id "$key_name" --query 'SecretString' --output text 2>/dev/null)
+        if [ -n "$aws_val" ]; then
+          security delete-generic-password -s "$key_name" 2>/dev/null
+          security add-generic-password -s "$key_name" -a "atlas" -w "$aws_val" 2>/dev/null
+          export "$key_name=$aws_val"
+          echo "[FLEET] Refreshed $key_name from AWS Secrets Manager → Keychain"
+        fi
+      done
+    fi
+  fi
+}
+
 # --- Hook handlers ---
 
 case "$HOOK_TYPE" in
   session-start)
+    ensure_api_keys
     check_daemon_health
     check_daemon_inbox
     check_seed_inbox
