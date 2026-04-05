@@ -19,6 +19,8 @@ description: Proactive fleet health monitoring — channel checks, threshold ale
 | Tunnel health | 60s | autossh dead or latency >5s | Restart tunnel |
 | Disk space | 300s | `/tmp/atlas-agent-results/` >1GB | Prune old results |
 | Task timeout | 30s | Running >600s | Kill + report failure |
+| Self idle | 30s | No NATS activity >5min | Check inbox/seed, broadcast idle, git pull |
+| Peer idle | 30s | Heartbeat >10min or 0 sessions | Send idle-wake (max 1 per peer per 30min) |
 
 ## Reading Watchdog Status
 
@@ -85,6 +87,9 @@ In `.multifleet/config.json`:
 | `diskLimitMb` | `1024` | Prune agent results above this size |
 | `autoRepairLevel` | `"assist"` | Maximum auto-repair level (notify/guide/assist) |
 | `logRetentionHours` | `48` | How long to keep watchdog logs |
+| `idleThresholdSeconds` | `300` | Mark self idle after this many seconds without NATS activity |
+| `peerIdleThresholdSeconds` | `600` | Consider peer idle after this many seconds |
+| `idleWakeCooldownSeconds` | `1800` | Min interval between idle-wake messages to same peer |
 
 ## Environment Variables
 
@@ -130,6 +135,27 @@ Watchdog enforces the fleet-wide invariant: **the fleet is not healthy until ALL
 - Idle sessions are conscripted for repair work before anything else
 - 5-minute cooldown between repair attempts per peer prevents storms
 - Repair success is verified by re-testing the channel immediately after fix
+## Idle Proactivity Protocol
+
+When a node has no NATS messages sent or received for >5 minutes, the watchdog activates idle proactivity:
+
+**Self-idle detection:**
+1. Scans `.fleet-messages/<node>/` for unprocessed `.md` files
+2. Checks `/tmp/fleet-seed-<node>.md` for pending seed messages
+3. Broadcasts idle status to the fleet (`fleet.all.message` with type `idle`)
+4. Triggers git pull if behind origin (reuses git check cooldown)
+5. Logs the idle event at `info` level for observability
+6. Resets the activity timer after firing (prevents 30s spam)
+
+**Peer-idle detection:**
+- Peers with `sessions: 0` in heartbeat data or last heartbeat >10 minutes old are considered idle
+- Sends a direct `idle-wake` message: "You've been idle for Xmin. Any pending fleet work? Check plans."
+- Rate-limited: maximum 1 idle-wake per peer per 30 minutes
+- Uses `self.node_id` and heartbeat data only — no hardcoded node names
+
+**Activity tracking:**
+- `_touch_activity()` is called on every message send and receive
+- The idle timer only fires when there is genuinely no NATS traffic
 
 ## When to Use This Skill
 
