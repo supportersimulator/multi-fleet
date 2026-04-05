@@ -27,7 +27,9 @@ import traceback
 import urllib.request
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).parent.parent
+_PLUGIN_ROOT = Path(__file__).parent.parent
+# When running from multi-fleet/bin/, we need the superrepo root for tools/ imports
+REPO_ROOT = _PLUGIN_ROOT.parent if not (_PLUGIN_ROOT / "tools").exists() else _PLUGIN_ROOT
 sys.path.insert(0, str(REPO_ROOT))
 
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"

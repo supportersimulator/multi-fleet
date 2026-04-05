@@ -4,7 +4,7 @@
       "command": "python3",
       "args": ["${CLAUDE_PLUGIN_ROOT}/bin/fleet_nerve_mcp.py"],
       "env": {
-        "MULTIFLEET_NODE_ID": "",
+        "MULTIFLEET_NODE_ID": "mac1",
         "FLEET_NERVE_PORT": "8855"
       }
     }
