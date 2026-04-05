@@ -9,16 +9,21 @@
     {
       "name": "multi-fleet",
       "description": "Cross-machine AI collaboration — real-time messaging, task agents, productivity visibility",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "source": "./",
-      "author": { "name": "Aaron Tjomsland", "email": "multifleet@example.com" },
+      "author": { "name": "Multi-Fleet Contributors", "email": "multifleet@example.com" },
       "skills": [
         "./skills/using-multi-fleet",
-        "./skills/productivity-view",
         "./skills/fleet-send",
         "./skills/fleet-status",
+        "./skills/fleet-task",
         "./skills/fleet-wake",
-        "./skills/fleet-task"
+        "./skills/fleet-repair",
+        "./skills/fleet-tunnel",
+        "./skills/fleet-watchdog",
+        "./skills/fleet-check",
+        "./skills/fleet-worker",
+        "./skills/productivity-view"
       ]
     }
   ]
