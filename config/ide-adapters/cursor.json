@@ -1,0 +1,21 @@
+{
+  "ide": "Cursor",
+  "transport": "mcp",
+  "mcp_server": "fleet-nerve",
+  "config_path": "~/.cursor/mcp.json",
+  "setup": "multi-fleet/scripts/install.sh --ide cursor",
+  "features": ["mcp_native", "tool_discovery"],
+  "mcp_config": {
+    "mcpServers": {
+      "fleet-nerve": {
+        "command": "python3",
+        "args": ["${workspaceFolder}/multi-fleet/tools/fleet_nerve_mcp.py"],
+        "env": {
+          "MULTIFLEET_NODE_ID": "",
+          "FLEET_NERVE_PORT": "8855"
+        }
+      }
+    }
+  },
+  "notes": "Add mcp_config block to ~/.cursor/mcp.json. Set MULTIFLEET_NODE_ID to this machine's identifier."
+}

@@ -1,0 +1,28 @@
+{
+  "node_id": "CHANGE_ME",
+  "fleet_nerve_port": 8855,
+  "nats": {
+    "server": "nats://NATS_HOST:4222",
+    "credentials_file": "",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": [
+      {
+        "name": "example-peer",
+        "host": "PEER_HOSTNAME_OR_IP",
+        "user": "PEER_USERNAME",
+        "ssh_port": 22,
+        "remote_nats_port": 4222,
+        "local_bind_port": 4223
+      }
+    ]
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}
