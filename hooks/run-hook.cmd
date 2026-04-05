@@ -22,6 +22,14 @@ WORKER_RESULTS="/tmp/fleet-worker-results"
 OUTBOX="/tmp/fleet-outbox-${NODE_ID}"
 DAEMON_URL="http://127.0.0.1:8855"
 GIT_INBOX="/tmp/fleet-git-inbox-${NODE_ID}"
+REPAIR_PID_FILE="/tmp/fleet-repair-agent.pid"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"
+FLEET_CONFIG="${REPO_ROOT}/.multifleet/config.json"
+FLEET_MSG_DIR="${REPO_ROOT}/.fleet-messages"
+
+# Channel health state (set by check_channel_health)
+FLEET_CHANNELS_BROKEN=""
+FLEET_CHANNELS_OK=1
 
 # --- Output buffer (collect lines, emit as single JSON at end) ---
 MSG_LINES=()
@@ -329,6 +337,200 @@ ensure_api_keys() {
   fi
 }
 
+check_channel_health() {
+  # Quick probe of P1 (NATS), P2 (HTTP), P5 (SSH) channels -- max 5s total
+  local p1="SKIP" p2="SKIP" p5="SKIP"
+  local broken=""
+
+  # P2 HTTP: daemon health
+  if daemon_is_running; then
+    p2="OK"
+  else
+    p2="FAIL"
+    broken="${broken} P2_http"
+  fi
+
+  # P1 NATS: ask daemon for NATS connection status
+  if [ "$p2" = "OK" ]; then
+    local nats_status
+    nats_status=$(curl -sf --max-time 2 "$DAEMON_URL/health" 2>/dev/null \
+      | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('nats','unknown'))" 2>/dev/null) || true
+    if [ "$nats_status" = "connected" ] || [ "$nats_status" = "ok" ]; then
+      p1="OK"
+    else
+      p1="FAIL"
+      broken="${broken} P1_nats"
+    fi
+  else
+    p1="FAIL"
+    broken="${broken} P1_nats"
+  fi
+
+  # P5 SSH: quick probe to peers from config (max 2s per peer)
+  if [ -f "$FLEET_CONFIG" ]; then
+    local peers
+    peers=$(python3 -c "
+import json,sys
+try:
+    cfg=json.load(open('$FLEET_CONFIG'))
+    for t in cfg.get('ssh_tunnels',{}).get('targets',[]):
+        h=t.get('host','')
+        u=t.get('user','')
+        p=t.get('ssh_port',22)
+        if h and h != 'PEER_HOSTNAME_OR_IP':
+            print(f'{u}@{h}:{p}' if u else f'{h}:{p}')
+except: pass
+" 2>/dev/null) || true
+    if [ -n "$peers" ]; then
+      local ssh_ok=0
+      while IFS= read -r peer; do
+        local host port user_host
+        host="${peer##*@}"
+        port="${host##*:}"
+        host="${host%%:*}"
+        user_host="${peer%%:*}"
+        if ssh -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no \
+             -p "$port" "$user_host" "echo ok" &>/dev/null; then
+          ssh_ok=1
+          break
+        fi
+      done <<< "$peers"
+      if [ "$ssh_ok" = "1" ]; then
+        p5="OK"
+      else
+        p5="FAIL"
+        broken="${broken} P5_ssh"
+      fi
+    fi
+  fi
+
+  emit "[FLEET] Channels: P1=${p1} P2=${p2} P5=${p5}"
+
+  FLEET_CHANNELS_BROKEN="$(echo "$broken" | xargs)"
+  if [ -z "$FLEET_CHANNELS_BROKEN" ]; then
+    FLEET_CHANNELS_OK=1
+  else
+    FLEET_CHANNELS_OK=0
+  fi
+}
+
+maybe_spawn_repair_agent() {
+  # Only spawn if P1 or P2 is broken and no repair agent already running
+  [ "$FLEET_CHANNELS_OK" = "1" ] && return 0
+
+  # Check for P1/P2 specifically -- P5 alone doesn't warrant auto-repair
+  local needs_repair=0
+  for ch in $FLEET_CHANNELS_BROKEN; do
+    case "$ch" in
+      P1_nats|P2_http) needs_repair=1 ;;
+    esac
+  done
+  [ "$needs_repair" = "0" ] && return 0
+
+  # Check if repair agent already running
+  if [ -f "$REPAIR_PID_FILE" ]; then
+    local old_pid
+    old_pid=$(cat "$REPAIR_PID_FILE" 2>/dev/null) || true
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      emit "[FLEET] Repair agent already running (PID ${old_pid})"
+      return 0
+    fi
+    rm -f "$REPAIR_PID_FILE"
+  fi
+
+  emit "[FLEET] Spawning repair agent for broken channels: ${FLEET_CHANNELS_BROKEN}"
+  claude -p "Fleet channel repair: broken channels [${FLEET_CHANNELS_BROKEN}] on node ${NODE_ID}. Diagnose and fix. Check NATS server status, daemon config at ${FLEET_CONFIG}, network connectivity. Restart services as needed. Report to fleet when fixed." </dev/null &>/dev/null &
+  local repair_pid=$!
+  echo "$repair_pid" > "$REPAIR_PID_FILE"
+  emit "[FLEET] Repair agent spawned (PID ${repair_pid})"
+}
+
+check_fleet_inbox_deep() {
+  # Fetch latest fleet messages from git and report unprocessed count
+  if [ -d "$REPO_ROOT/.git" ] || [ -f "$REPO_ROOT/.git" ]; then
+    git -C "$REPO_ROOT" fetch origin main --quiet 2>/dev/null &
+    local fetch_pid=$!
+
+    # Check for unprocessed messages while fetch runs
+    local msg_count=0
+    local subjects=""
+    if [ -d "$FLEET_MSG_DIR" ]; then
+      for node_dir in "$FLEET_MSG_DIR"/*/; do
+        [ -d "$node_dir" ] || continue
+        for msg in "$node_dir"*.md "$node_dir"*.json; do
+          [ -f "$msg" ] || continue
+          msg_count=$((msg_count + 1))
+          local subj
+          subj=$(head -1 "$msg" 2>/dev/null | sed 's/^#* *//' | cut -c1-60) || true
+          [ -z "$subj" ] && subj="$(basename "$msg")"
+          subjects="${subjects}\n  - ${subj}"
+        done
+      done
+    fi
+
+    # Wait for fetch (max 3s, then move on)
+    local waited=0
+    while kill -0 "$fetch_pid" 2>/dev/null && [ "$waited" -lt 3 ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill "$fetch_pid" 2>/dev/null || true
+    wait "$fetch_pid" 2>/dev/null || true
+
+    if [ "$msg_count" -gt 0 ]; then
+      emit "[FLEET INBOX] ${msg_count} unprocessed message(s):$(echo -e "$subjects")"
+    fi
+  fi
+}
+
+maybe_seed_idle_repair() {
+  # If this is the only active session and channels are broken,
+  # write a seed file encouraging proactive repair
+  [ "$FLEET_CHANNELS_OK" = "1" ] && return 0
+
+  # Check if other sessions are active (via daemon fleet/live endpoint)
+  local live_count=0
+  local live_data
+  live_data=$(curl -sf --max-time 2 "$DAEMON_URL/fleet/live" 2>/dev/null) || true
+  if [ -n "$live_data" ]; then
+    live_count=$(echo "$live_data" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    nodes=d.get('nodes',[])
+    print(len([n for n in nodes if n.get('status')=='online']))
+except: print(0)
+" 2>/dev/null) || true
+  fi
+
+  # Only seed if we appear to be the sole active node
+  if [ "${live_count:-0}" -le 1 ]; then
+    local seed_path="/tmp/fleet-idle-repair-seed-${NODE_ID}.md"
+    local repair_actions=""
+    for ch in $FLEET_CHANNELS_BROKEN; do
+      case "$ch" in
+        P1_nats) repair_actions="${repair_actions}\n- **P1 NATS**: Check nats-server process, verify config in ${FLEET_CONFIG}" ;;
+        P2_http) repair_actions="${repair_actions}\n- **P2 HTTP**: Fleet daemon not responding on port 8855, check process/logs" ;;
+        P5_ssh)  repair_actions="${repair_actions}\n- **P5 SSH**: SSH connectivity to peers failed, check keys/network" ;;
+      esac
+    done
+    cat > "$seed_path" <<SEED_EOF
+# Fleet Idle Repair Opportunity
+
+**Node**: ${NODE_ID}
+**Broken channels**: ${FLEET_CHANNELS_BROKEN}
+**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+This node is the only active session. Broken fleet channels detected.
+Proactive repair recommended before other nodes come online.
+
+## Suggested actions
+$(echo -e "$repair_actions")
+SEED_EOF
+    emit "[FLEET] Idle repair seed written to ${seed_path}"
+  fi
+}
+
 # --- Hook handlers ---
 
 case "$HOOK_TYPE" in
@@ -347,7 +549,19 @@ case "$HOOK_TYPE" in
     # 4. Fleet health summary
     fleet_health_summary || true
 
-    # 5. Auto-pull if behind origin
+    # 5. Channel health check (P1/P2/P5, max 5s)
+    check_channel_health || true
+
+    # 6. Auto-spawn repair agent if P1/P2 broken
+    maybe_spawn_repair_agent || true
+
+    # 7. Deep inbox check -- fetch latest git messages
+    check_fleet_inbox_deep || true
+
+    # 8. Idle protocol -- seed repair if sole active node
+    maybe_seed_idle_repair || true
+
+    # 9. Auto-pull if behind origin
     auto_pull_if_behind
 
     # Always emit something on session start so user knows fleet is active
