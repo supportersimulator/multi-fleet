@@ -4,7 +4,13 @@
 # Uses MULTIFLEET_NODE_ID env var — works on any machine without hardcoding
 
 HOOK_TYPE="${1:-session-start}"
-NODE_ID="${MULTIFLEET_NODE_ID:-$(hostname -s)}"
+_RAW_NODE_ID="${MULTIFLEET_NODE_ID:-$(hostname -s)}"
+# CV-001: Sanitize node ID — alphanumeric, dash, underscore only
+NODE_ID=$(echo "$_RAW_NODE_ID" | tr -cd 'a-zA-Z0-9_-')
+if [ -z "$NODE_ID" ]; then
+  echo "[FLEET] ERROR: invalid node ID"
+  exit 1
+fi
 SEED_FILE="/tmp/fleet-seed-${NODE_ID}.md"
 SEED_ARCHIVE="/tmp/fleet-seed-archive"
 WORKER_RESULTS="/tmp/fleet-worker-results"
@@ -149,7 +155,7 @@ case "$HOOK_TYPE" in
     if [ -d "$OUTBOX" ] && [ "$(ls -A "$OUTBOX" 2>/dev/null)" ]; then
       echo "[FLEET] Flushing $(ls -1 "$OUTBOX" | wc -l | tr -d ' ') unsent message(s)..."
       for msg in "$OUTBOX"/*; do
-        TARGET=$(basename "$msg" | sed 's/\.md$//')
+        TARGET=$(basename "$msg" | sed 's/\.md$//' | tr -cd 'a-zA-Z0-9_-')
         curl -sf --max-time 3 -X POST "$DAEMON_URL/message" \
           -H "Content-Type: application/json" \
           -d "{\"type\":\"seed\",\"target\":\"${TARGET}\",\"payload\":$(python3 -c "import json,sys;print(json.dumps(open(sys.argv[1]).read()))" "$msg")}" 2>/dev/null \
