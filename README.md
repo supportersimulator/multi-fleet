@@ -94,16 +94,21 @@ Every message tries all 7 channels in priority order. First success wins.
 - **No hardcoded values** — all from config.json or environment variables
 - **Open-source ready** — template config, no IP leaks, clean separation
 
-## Plugin Skills
+## Plugin Skills (11)
 
 | Skill | Description |
 |-------|-------------|
-| productivity-view | Live dashboard of fleet activity |
-| fleet-send | Send messages to peers |
-| fleet-status | Fleet health check |
-| fleet-task | Dispatch autonomous work |
-| fleet-wake | Wake sleeping machines |
-| using-multi-fleet | Architecture overview |
+| using-multi-fleet | Bootstrap — architecture overview, role guide, skill index |
+| fleet-send | Send messages (context, task, alert, broadcast) to peers |
+| fleet-task | Dispatch autonomous session-aware work to another machine |
+| fleet-status | Quick health check — who's online, idle, working |
+| fleet-check | Run full 7-channel communication test to a target |
+| fleet-repair | 4-level repair escalation for broken channels |
+| fleet-wake | Wake sleeping machines via health check, SSH, or WoL |
+| fleet-tunnel | SSH tunnel management for restricted networks |
+| fleet-worker | tmux-isolated worker pool — no interactive session disruption |
+| fleet-watchdog | Continuous health monitoring with auto-repair triggers |
+| productivity-view | Live fleet-wide dashboard of nodes, agents, and backlog |
 
 ## SSH Tunnels (for restricted networks)
 
