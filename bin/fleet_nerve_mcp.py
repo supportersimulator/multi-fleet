@@ -12,6 +12,18 @@ Tools:
   fleet_broadcast        — send to all nodes
   fleet_worker_dispatch  — launch session-driver worker, send task, return result
   fleet_status           — fleet-wide dashboard data
+  fleet_dashboard        — visual fleet status (formatted for display)
+  fleet_work             — view work backlog for this node
+  fleet_work_next        — get next unclaimed work item
+  fleet_tasks            — active Claude sessions / agents across fleet
+  fleet_wake             — wake a sleeping fleet node
+  fleet_historian        — trigger session historian on a node
+  fleet_channels         — channel state for all peers
+  fleet_sessions         — session gold from a node (historian peer sessions)
+  fleet_inject           — inject message into active Claude session via --resume
+  fleet_relay            — queue a message for chief store-and-forward relay
+  fleet_discover         — discover fleet peers from config + heartbeats
+  fleet_send_smart       — session-aware smart routing to a peer
 
 Usage:
   python3 tools/fleet_nerve_mcp.py
@@ -27,9 +39,7 @@ import traceback
 import urllib.request
 from pathlib import Path
 
-_PLUGIN_ROOT = Path(__file__).parent.parent
-# When running from multi-fleet/bin/, we need the superrepo root for tools/ imports
-REPO_ROOT = _PLUGIN_ROOT.parent if not (_PLUGIN_ROOT / "tools").exists() else _PLUGIN_ROOT
+REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
@@ -65,6 +75,51 @@ def _http_probe(url: str, timeout: int = 3) -> dict:
         return {"reachable": True, "latency_ms": int((time.time() - start) * 1000), "data": data}
     except Exception as e:
         return {"reachable": False, "latency_ms": int((time.time() - start) * 1000), "error": str(e)}
+
+
+def _daemon_get(path: str, host: str = "127.0.0.1", port: int = 8855, timeout: int = 5) -> dict:
+    """GET from fleet daemon HTTP endpoint. Returns parsed JSON or error dict."""
+    try:
+        url = f"http://{host}:{port}{path}"
+        resp = urllib.request.urlopen(url, timeout=timeout)
+        return json.loads(resp.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _daemon_post(path: str, body: dict, host: str = "127.0.0.1", port: int = 8855, timeout: int = 10) -> dict:
+    """POST JSON to fleet daemon HTTP endpoint. Returns parsed JSON or error dict."""
+    try:
+        url = f"http://{host}:{port}{path}"
+        req_body = json.dumps(body).encode()
+        req = urllib.request.Request(url, data=req_body, headers={"Content-Type": "application/json"})
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        return json.loads(resp.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _resolve_host(target: str) -> tuple:
+    """Resolve target node to (host, port). Returns ('127.0.0.1', 8855) for self."""
+    node_id = _get_node_id()
+    if target == node_id or target == "local" or target == "self":
+        return ("127.0.0.1", 8855)
+    config = _load_config()
+    nodes = config.get("nodes", {})
+    node_cfg = nodes.get(target, {})
+    host = node_cfg.get("host", "")
+    port = config.get("protocol", {}).get("tunnelReversePortBase", 8855)
+    if not host:
+        # Try load_peers fallback
+        try:
+            from tools.fleet_nerve_config import load_peers
+            peers, _ = load_peers()
+            peer = peers.get(target, {})
+            host = peer.get("ip", "")
+            port = peer.get("port", 8855)
+        except Exception:
+            pass
+    return (host, port) if host else ("", 8855)
 
 
 def _surgeon_status() -> dict:
@@ -359,6 +414,494 @@ def fleet_status() -> dict:
     }
 
 
+def fleet_dashboard() -> dict:
+    """Visual fleet status — formatted dashboard with node table, activity summary.
+
+    Returns structured data suitable for display including per-node status rows,
+    online/offline counts, active session counts, and activity summary.
+    """
+    probe_data = fleet_probe()
+    nodes_data = probe_data.get("nodes", {})
+
+    dashboard = {
+        "fleet_id": probe_data.get("fleet_id", "unknown"),
+        "this_node": probe_data.get("this_node", "unknown"),
+        "timestamp": probe_data.get("timestamp", ""),
+        "summary": {
+            "total": len(nodes_data),
+            "online": sum(1 for n in nodes_data.values() if n.get("reachable")),
+            "offline": sum(1 for n in nodes_data.values() if not n.get("reachable")),
+            "total_sessions": sum(len(n.get("sessions", [])) for n in nodes_data.values()),
+        },
+        "nodes": [],
+    }
+
+    for name, info in nodes_data.items():
+        row = {
+            "node": name,
+            "role": info.get("role", "?"),
+            "status": "ONLINE" if info.get("reachable") else "OFFLINE",
+            "latency_ms": info.get("latency_ms", 0),
+            "sessions": len(info.get("sessions", [])),
+            "uptime_s": info.get("uptime_s", 0),
+        }
+        if info.get("error"):
+            row["error"] = info["error"]
+        dashboard["nodes"].append(row)
+
+    # Try visual formatter if available
+    try:
+        from tools.fleet_nerve_visual import fleet_status_table, fleet_activity_summary
+        nodes_list = [{"name": n, **info} for n, info in nodes_data.items()]
+        dashboard["formatted_table"] = fleet_status_table(nodes_list)
+        dashboard["formatted_summary"] = fleet_activity_summary(nodes_list)
+    except Exception:
+        pass
+
+    return dashboard
+
+
+def fleet_work(node: str = "") -> dict:
+    """View work backlog — active and pending work items for a node.
+
+    Args:
+        node: node ID to check (default: this node). Use 'all' for fleet-wide.
+    """
+    if node == "all":
+        return _daemon_get("/work/all")
+    host, port = ("127.0.0.1", 8855)
+    if node and node != _get_node_id():
+        host, port = _resolve_host(node)
+        if not host:
+            return {"error": f"Cannot resolve host for node: {node}"}
+    return _daemon_get("/work", host=host, port=port)
+
+
+def fleet_work_next(node: str = "") -> dict:
+    """Get the next unclaimed work item from the backlog.
+
+    Args:
+        node: node to query (default: this node)
+    """
+    host, port = ("127.0.0.1", 8855)
+    if node and node != _get_node_id():
+        host, port = _resolve_host(node)
+        if not host:
+            return {"error": f"Cannot resolve host for node: {node}"}
+    return _daemon_get("/work/next", host=host, port=port)
+
+
+def fleet_tasks() -> dict:
+    """Active Claude sessions / agents across the fleet.
+
+    Probes all fleet nodes and returns their active sessions with idle times,
+    branches, and session IDs. Useful for understanding what work is happening.
+    """
+    config = _load_config()
+    nodes = config.get("nodes", {})
+    node_id = _get_node_id()
+    all_tasks = []
+
+    for name in nodes:
+        host, port = _resolve_host(name)
+        if not host:
+            all_tasks.append({"node": name, "error": "unresolvable"})
+            continue
+        health = _daemon_get("/health", host=host, port=port, timeout=3)
+        if "error" in health:
+            all_tasks.append({"node": name, "error": health["error"]})
+            continue
+        sessions = health.get("sessions", [])
+        for s in sessions:
+            all_tasks.append({
+                "node": name,
+                "session_id": s.get("sessionId", s.get("id", "?"))[:12],
+                "idle_s": s.get("idle_s", 0),
+                "cwd": s.get("cwd", ""),
+                "branch": s.get("branch", ""),
+            })
+
+    return {
+        "this_node": node_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "total_sessions": len([t for t in all_tasks if "session_id" in t]),
+        "tasks": all_tasks,
+    }
+
+
+def fleet_wake(target: str) -> dict:
+    """Wake a sleeping fleet node using multi-strategy approach.
+
+    Strategies tried in order:
+    1. Health check — already awake?
+    2. SSH ping — machine awake but daemon stopped? Start it.
+    3. WoL magic packet — machine sleeping? Send wake-on-LAN.
+
+    Args:
+        target: node ID to wake (e.g. "mac2")
+    """
+    import subprocess
+
+    try:
+        from tools.fleet_nerve_config import load_peers
+        peers, _ = load_peers()
+    except Exception as e:
+        return {"error": f"Cannot load peer config: {e}"}
+
+    peer = peers.get(target)
+    if not peer:
+        return {"error": f"Unknown peer: {target}", "known": list(peers.keys())}
+
+    ip = peer["ip"]
+    port = peer.get("port", 8855)
+    user = peer.get("user", os.environ.get("FLEET_SSH_USER", os.environ.get("USER", "")))
+
+    # Strategy 1: Health check — already awake?
+    health = _daemon_get("/health", host=ip, port=port, timeout=3)
+    if "error" not in health:
+        return {
+            "status": "already_awake",
+            "target": target,
+            "uptime_s": health.get("uptime_s", 0),
+            "sessions": health.get("activeSessions", 0),
+        }
+
+    # Strategy 2: SSH ping
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             "-o", "BatchMode=yes", f"{user}@{ip}", "echo ALIVE"],
+            capture_output=True, text=True, timeout=8,
+        )
+        if "ALIVE" in result.stdout:
+            # Machine awake, start daemon
+            subprocess.run(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+                 f"{user}@{ip}",
+                 "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; source ~/.zshrc 2>/dev/null; "
+                 "cd ~/dev/er-simulator-superrepo && bash scripts/fleet-nerve-setup.sh 2>&1 | tail -2"],
+                capture_output=True, text=True, timeout=15,
+            )
+            # Caffeinate to prevent re-sleep
+            subprocess.Popen(
+                ["ssh", "-o", "BatchMode=yes", f"{user}@{ip}", "caffeinate -dims -t 10800 &"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(3)
+            # Verify daemon
+            health2 = _daemon_get("/health", host=ip, port=port, timeout=3)
+            if "error" not in health2:
+                return {
+                    "status": "woke_via_ssh",
+                    "target": target,
+                    "sessions": health2.get("activeSessions", 0),
+                    "caffeinate": "3hr",
+                }
+            return {"status": "ssh_reachable_daemon_failed", "target": target,
+                    "hint": f"ssh {user}@{ip} 'tail /tmp/fleet-nerve.log'"}
+    except Exception:
+        pass
+
+    # Strategy 3: WoL magic packet
+    mac_addr = peer.get("mac_address")
+    if not mac_addr:
+        try:
+            arp = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=5)
+            for line in arp.stdout.split("\n"):
+                if ip in line:
+                    parts = line.split()
+                    for p in parts:
+                        if ":" in p and len(p) >= 11:
+                            mac_addr = p
+                            break
+        except Exception:
+            pass
+
+    wol_sent = False
+    if mac_addr:
+        try:
+            mac_bytes = bytes.fromhex(mac_addr.replace(":", "").replace("-", ""))
+            magic = b'\xff' * 6 + mac_bytes * 16
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(magic, ('<broadcast>', 9))
+            sock.close()
+            wol_sent = True
+        except Exception as e:
+            return {"status": "wol_failed", "target": target, "error": str(e)}
+
+    # Brief poll (15s) for the node to come up
+    for _ in range(3):
+        time.sleep(5)
+        health3 = _daemon_get("/health", host=ip, port=port, timeout=3)
+        if "error" not in health3:
+            return {
+                "status": "woke_via_wol",
+                "target": target,
+                "sessions": health3.get("activeSessions", 0),
+            }
+
+    return {
+        "status": "wake_pending",
+        "target": target,
+        "wol_sent": wol_sent,
+        "mac_address": mac_addr or "unknown",
+        "hint": "Node may take up to 60s to wake. Re-probe after.",
+    }
+
+
+def fleet_historian(target: str = "", mode: str = "full") -> dict:
+    """Trigger session historian on a fleet node.
+
+    Extracts session gold, cleans cache, feeds the memory pipeline.
+
+    Args:
+        target: node to run historian on (default: this node)
+        mode: 'full' (extract+analyze+cleanup), 'fast' (extract+clean dead), 'cleanup' (cleanup only)
+    """
+    host, port = ("127.0.0.1", 8855)
+    if target and target != _get_node_id() and target not in ("local", "self"):
+        host, port = _resolve_host(target)
+        if not host:
+            return {"error": f"Cannot resolve host for node: {target}"}
+
+    endpoint = f"/historian/{mode}" if mode in ("full", "fast", "cleanup") else "/historian/full"
+    result = _daemon_get(endpoint, host=host, port=port, timeout=60)
+    result["target"] = target or _get_node_id()
+    result["mode"] = mode
+    return result
+
+
+def fleet_channels(target: str = "") -> dict:
+    """Channel state for all peers — shows which communication channels are up/down per peer.
+
+    Returns per-peer channel health (P1_nats, P2_http, P5_ssh, etc.) with
+    latency, last success/failure timestamps.
+
+    Args:
+        target: node to query (default: this node)
+    """
+    host, port = ("127.0.0.1", 8855)
+    if target and target != _get_node_id() and target not in ("local", "self"):
+        host, port = _resolve_host(target)
+        if not host:
+            return {"error": f"Cannot resolve host for node: {target}"}
+    return _daemon_get("/channels", host=host, port=port)
+
+
+def fleet_sessions(target: str = "") -> dict:
+    """Session gold from a node — active sessions with extracted context.
+
+    Returns active sessions and their accumulated gold (context extracted
+    by the session historian). Useful for understanding what each session
+    has been working on.
+
+    Args:
+        target: node to query (default: this node)
+    """
+    host, port = ("127.0.0.1", 8855)
+    if target and target != _get_node_id() and target not in ("local", "self"):
+        host, port = _resolve_host(target)
+        if not host:
+            return {"error": f"Cannot resolve host for node: {target}"}
+    return _daemon_get("/sessions/gold", host=host, port=port)
+
+
+def fleet_inject(message: str, target: str = "", session_id: str = "") -> dict:
+    """Inject a message into an active Claude session via --resume.
+
+    Uses the daemon's /inject endpoint which auto-detects the active session
+    if no session_id is provided. Falls back to seed file if --resume fails.
+
+    Args:
+        message: the message to inject into the session
+        target: node to inject on (default: this node)
+        session_id: specific session ID (optional — auto-detects if omitted)
+    """
+    if not message:
+        return {"error": "message is required"}
+
+    host, port = ("127.0.0.1", 8855)
+    if target and target != _get_node_id() and target not in ("local", "self"):
+        host, port = _resolve_host(target)
+        if not host:
+            return {"error": f"Cannot resolve host for node: {target}"}
+
+    body = {"message": message}
+    if session_id:
+        body["session_id"] = session_id
+
+    result = _daemon_post("/inject", body, host=host, port=port)
+    result["target"] = target or _get_node_id()
+    return result
+
+
+def fleet_relay(target: str, type: str = "context", subject: str = "", body: str = "",
+                priority: int = 2) -> dict:
+    """Queue a message for chief store-and-forward relay.
+
+    Messages are queued on the chief node and delivered when the target
+    comes online. The chief flushes pending relay messages on heartbeat.
+
+    Args:
+        target: destination node ID
+        type: message type — context, task, repair, etc.
+        subject: short subject line
+        body: message body
+        priority: message priority (1=highest, 5=lowest, default 2)
+    """
+    import uuid
+
+    node_id = _get_node_id()
+    config = _load_config()
+    chief_id = config.get("chief", {}).get("nodeId", "")
+
+    message = {
+        "id": str(uuid.uuid4()),
+        "type": type,
+        "from": node_id,
+        "to": target,
+        "priority": priority,
+        "payload": {"subject": subject or body[:60], "body": body},
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    # Route to chief for relay
+    chief_host, chief_port = _resolve_host(chief_id) if chief_id else ("127.0.0.1", 8855)
+    if not chief_host:
+        # Fallback: post to local daemon which may be chief
+        chief_host, chief_port = "127.0.0.1", 8855
+
+    result = _daemon_post("/relay/queue", message, host=chief_host, port=chief_port)
+    result["relay_via"] = chief_id or "local"
+    result["target"] = target
+    return result
+
+
+def fleet_discover() -> dict:
+    """Discover fleet peers from config, heartbeat registry, and live probing.
+
+    Combines:
+    1. Static config from .multifleet/config.json
+    2. Peer registry from fleet_nerve_config.py
+    3. Live daemon /peers endpoint (heartbeat-discovered peers)
+
+    Returns merged peer list with reachability status.
+    """
+    discovered = {}
+
+    # Source 1: Static config
+    config = _load_config()
+    nodes = config.get("nodes", {})
+    for name, cfg in nodes.items():
+        discovered[name] = {
+            "source": "config",
+            "host": cfg.get("host", ""),
+            "role": cfg.get("role", "unknown"),
+            "reachable": None,
+        }
+
+    # Source 2: Peer registry
+    try:
+        from tools.fleet_nerve_config import load_peers
+        peers, chief = load_peers()
+        for name, peer in peers.items():
+            if name in discovered:
+                discovered[name]["ip"] = peer.get("ip", "")
+                discovered[name]["port"] = peer.get("port", 8855)
+                discovered[name]["user"] = peer.get("user", "")
+                discovered[name]["source"] = "config+peers"
+            else:
+                discovered[name] = {
+                    "source": "peers",
+                    "ip": peer.get("ip", ""),
+                    "port": peer.get("port", 8855),
+                    "user": peer.get("user", ""),
+                    "reachable": None,
+                }
+    except Exception:
+        pass
+
+    # Source 3: Live daemon peers (heartbeat-discovered)
+    live_peers = _daemon_get("/peers")
+    if "peers" in live_peers:
+        for peer_info in live_peers["peers"]:
+            name = peer_info.get("node_id", peer_info.get("name", ""))
+            if name and name not in discovered:
+                discovered[name] = {
+                    "source": "heartbeat",
+                    "reachable": None,
+                }
+            if name and name in discovered:
+                discovered[name]["last_heartbeat"] = peer_info.get("last_seen", peer_info.get("timestamp"))
+
+    # Probe reachability for all discovered peers
+    node_id = _get_node_id()
+    for name, info in discovered.items():
+        host = info.get("ip") or info.get("host", "")
+        if name == node_id:
+            host = "127.0.0.1"
+        if not host:
+            info["reachable"] = False
+            continue
+        port = info.get("port", 8855)
+        probe = _http_probe(f"http://{host}:{port}/health", timeout=2)
+        info["reachable"] = probe["reachable"]
+        info["latency_ms"] = probe.get("latency_ms", 0)
+
+    return {
+        "this_node": node_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "peer_count": len(discovered),
+        "online": sum(1 for d in discovered.values() if d.get("reachable")),
+        "peers": discovered,
+    }
+
+
+def fleet_send_smart(target: str, type: str = "context", subject: str = "", body: str = "",
+                     priority: int = 2) -> dict:
+    """Session-aware smart routing — picks best delivery method based on target state.
+
+    Unlike fleet_send (brute-force fallback chain), send_smart probes the target
+    first and routes based on session state:
+    - Active session → --resume injection (instant)
+    - Idle session → seed file + notification
+    - No session → spawn background agent or queue for relay
+
+    Args:
+        target: destination node ID
+        type: message type — context, task, alert, etc.
+        subject: short subject line
+        body: message body
+        priority: message priority (1=highest, 5=lowest, default 2)
+    """
+    import uuid
+
+    node_id = _get_node_id()
+    message = {
+        "id": str(uuid.uuid4()),
+        "type": type,
+        "from": node_id,
+        "to": target,
+        "priority": priority,
+        "payload": {"subject": subject or body[:60], "body": body},
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    # Route through local daemon's /send-smart endpoint
+    result = _daemon_post("/send-smart", {
+        "target": target,
+        "type": type,
+        "from": node_id,
+        "priority": priority,
+        "payload": message["payload"],
+        "id": message["id"],
+    })
+    result["target"] = target
+    result["type"] = type
+    return result
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -431,6 +974,143 @@ TOOLS = [
         "description": "Fleet-wide dashboard — all nodes with roles, connectivity, sessions, git state, surgeon status, packet store summary. Comprehensive fleet overview.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": fleet_status,
+    },
+    {
+        "name": "fleet_dashboard",
+        "description": "Visual fleet status with formatted node table and activity summary. Returns structured data with online/offline counts, session totals, and per-node status rows.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": fleet_dashboard,
+    },
+    {
+        "name": "fleet_work",
+        "description": "View work backlog — active and pending work items for a node. Use node='all' for fleet-wide backlog.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string", "description": "Node ID to check (default: this node). Use 'all' for fleet-wide.", "default": ""},
+            },
+            "required": [],
+        },
+        "fn": fleet_work,
+    },
+    {
+        "name": "fleet_work_next",
+        "description": "Get the next unclaimed work item from the backlog. Returns the highest-priority pending item.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string", "description": "Node to query (default: this node)", "default": ""},
+            },
+            "required": [],
+        },
+        "fn": fleet_work_next,
+    },
+    {
+        "name": "fleet_tasks",
+        "description": "Active Claude sessions / agents across the entire fleet. Shows session IDs, idle times, branches, and working directories for all nodes.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": fleet_tasks,
+    },
+    {
+        "name": "fleet_wake",
+        "description": "Wake a sleeping fleet node. Tries: (1) health check, (2) SSH + start daemon, (3) WoL magic packet. Returns wake status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Node ID to wake (e.g. mac2, mac3)"},
+            },
+            "required": ["target"],
+        },
+        "fn": fleet_wake,
+    },
+    {
+        "name": "fleet_historian",
+        "description": "Trigger session historian on a fleet node. Extracts session gold, analyzes with LLM, cleans dead session cache.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Node to run historian on (default: this node)", "default": ""},
+                "mode": {"type": "string", "description": "Mode: 'full' (extract+analyze+cleanup), 'fast' (extract+clean), 'cleanup' (cleanup only)", "default": "full"},
+            },
+            "required": [],
+        },
+        "fn": fleet_historian,
+    },
+    {
+        "name": "fleet_channels",
+        "description": "Channel state for all peers — shows which communication channels (NATS, HTTP, SSH, etc.) are up or down per peer, with latency and timestamps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Node to query (default: this node)", "default": ""},
+            },
+            "required": [],
+        },
+        "fn": fleet_channels,
+    },
+    {
+        "name": "fleet_sessions",
+        "description": "Session gold from a node — active sessions with their extracted context from the historian. Shows what each session has been working on.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Node to query (default: this node)", "default": ""},
+            },
+            "required": [],
+        },
+        "fn": fleet_sessions,
+    },
+    {
+        "name": "fleet_inject",
+        "description": "Inject a message into an active Claude session via --resume. Auto-detects session if no ID given. Falls back to seed file if --resume fails.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Message to inject into the session"},
+                "target": {"type": "string", "description": "Node to inject on (default: this node)", "default": ""},
+                "session_id": {"type": "string", "description": "Specific session ID (optional — auto-detects if omitted)", "default": ""},
+            },
+            "required": ["message"],
+        },
+        "fn": fleet_inject,
+    },
+    {
+        "name": "fleet_relay",
+        "description": "Queue a message for chief store-and-forward relay. Message is held on the chief and delivered when the target node comes online (via heartbeat flush).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Destination node ID"},
+                "type": {"type": "string", "description": "Message type: context, task, repair, etc.", "default": "context"},
+                "subject": {"type": "string", "description": "Short subject line"},
+                "body": {"type": "string", "description": "Full message body"},
+                "priority": {"type": "integer", "description": "Priority 1-5 (1=highest, default 2)", "default": 2},
+            },
+            "required": ["target", "body"],
+        },
+        "fn": fleet_relay,
+    },
+    {
+        "name": "fleet_discover",
+        "description": "Discover fleet peers from config, peer registry, and heartbeat data. Probes reachability for all discovered nodes. Like a fleet-wide peer scan.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": fleet_discover,
+    },
+    {
+        "name": "fleet_send_smart",
+        "description": "Session-aware smart routing. Unlike fleet_send (brute-force fallback), this probes the target first and picks the best delivery: --resume for active sessions, seed file for idle, background agent spawn, or relay queue.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Destination node ID"},
+                "type": {"type": "string", "description": "Message type: context, task, alert, etc.", "default": "context"},
+                "subject": {"type": "string", "description": "Short subject line"},
+                "body": {"type": "string", "description": "Full message body"},
+                "priority": {"type": "integer", "description": "Priority 1-5 (1=highest, default 2)", "default": 2},
+            },
+            "required": ["target", "body"],
+        },
+        "fn": fleet_send_smart,
     },
 ]
 
