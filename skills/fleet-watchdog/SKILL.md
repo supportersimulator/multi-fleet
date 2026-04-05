@@ -13,6 +13,7 @@ Continuous background monitor that checks fleet health and triggers repairs befo
 |-------|----------|-----------|-------------------|
 | Peer heartbeat | 10s | Missing >60s | Mark offline, trigger wake |
 | NATS connectivity | 30s | 2 consecutive failures | Trigger L1 repair |
+| API key sources | 300s | Key using fallback (aws/none) | Notify fleet, recommend keychain setup |
 | HTTP reachability | 30s | 3 consecutive failures | Trigger L2 repair |
 | Daemon process | 60s | Not running | Restart via LaunchAgent |
 | Tunnel health | 60s | autossh dead or latency >5s | Restart tunnel |
