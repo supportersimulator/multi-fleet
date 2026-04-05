@@ -117,23 +117,28 @@ class TestP4SeedFile:
 
     @pytest.mark.asyncio
     async def test_seed_local_writes_file(self, mock_nerve):
-        """P4 writes a seed file to /tmp for local delivery."""
+        """P4 writes a seed file to /tmp for local delivery.
+
+        The seed path is now session-aware (_resolve_seed_path). When no
+        session is detected (or daemon is down), it falls back to
+        /tmp/fleet-seed-{node_id}.md. We verify the file exists at
+        whatever path the method chose (returned in result['seedPath']).
+        """
         import pathlib
         mock_nerve.node_id = "testnode"
-        seed_path = pathlib.Path("/tmp/fleet-seed-testnode.md")
-        # Clean up before test
-        seed_path.unlink(missing_ok=True)
 
         result = await mock_nerve._send_p4_seed("testnode", {
             "from": "mac2",
             "payload": {"subject": "test seed", "body": "seed body"},
         })
         assert result["delivered"] is True
-        assert seed_path.exists()
-        content = seed_path.read_text()
+        # Use the actual path returned by the session-aware resolver
+        actual_path = pathlib.Path(result["seedPath"])
+        assert actual_path.exists()
+        content = actual_path.read_text()
         assert "test seed" in content
         # Clean up
-        seed_path.unlink(missing_ok=True)
+        actual_path.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_seed_remote_returns_false(self, mock_nerve):

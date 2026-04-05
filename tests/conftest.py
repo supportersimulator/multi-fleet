@@ -13,10 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Ensure tools/ is importable
+# Ensure tools/ and multifleet package are importable
 REPO_ROOT = Path(__file__).parent.parent.parent
+FLEET_ROOT = Path(__file__).parent.parent  # multi-fleet/
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
+sys.path.insert(0, str(FLEET_ROOT))
 
 
 # ── Pytest markers ──

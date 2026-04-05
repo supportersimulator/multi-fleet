@@ -45,9 +45,14 @@ class TestCascadeOrder:
 
     @pytest.mark.asyncio
     async def test_p3_tried_when_p1_and_p2_fail(self, mock_nerve, mock_nats_client):
-        """P1+P2 failure causes P3 chief relay attempt."""
+        """P1+P2 failure causes P3 chief relay attempt.
+
+        Note: P3 is only included in the cascade when node_id != chief
+        (can't relay through self). Set chief to a different node.
+        """
         mock_nats_client.is_connected = False
         mock_nerve.nc = mock_nats_client
+        mock_nerve._chief = "mac3"  # Not self — enables P3 in cascade
         mock_nerve._send_p2_http = AsyncMock(return_value={"delivered": False, "error": "refused"})
 
         mock_nerve._send_p3_chief = AsyncMock(return_value={"delivered": True})
@@ -120,6 +125,7 @@ class TestCascadeErrorCollection:
         """A channel that times out still gets recorded in the error list."""
         mock_nats_client.is_connected = False
         mock_nerve.nc = mock_nats_client
+        mock_nerve._chief = "mac3"  # Not self — enables P3 in cascade
 
         # P2 times out
         async def slow_p2(*args, **kwargs):
@@ -145,6 +151,7 @@ class TestCascadeSelfHeal:
         """When P3 succeeds (meaning P1+P2 failed), self-heal fires."""
         mock_nats_client.is_connected = False
         mock_nerve.nc = mock_nats_client
+        mock_nerve._chief = "mac3"  # Not self — enables P3 in cascade
         mock_nerve._send_p2_http = AsyncMock(return_value={"delivered": False, "error": "refused"})
         mock_nerve._send_p3_chief = AsyncMock(return_value={"delivered": True})
         mock_nerve._attempt_self_heal = MagicMock()

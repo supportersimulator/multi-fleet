@@ -103,24 +103,22 @@ class TestSelfHealTrigger:
         """Successful delivery on P3+ triggers _attempt_self_heal."""
         mock_nats_client.is_connected = False  # P1 fails
         mock_nerve.nc = mock_nats_client
-        mock_nerve._attempt_self_heal = AsyncMock()
+        mock_nerve._chief = "mac3"  # Not self — enables P3 in cascade
+        mock_nerve._attempt_self_heal = MagicMock()
 
         # P2 HTTP also fails
-        with patch("urllib.request.urlopen", side_effect=Exception("no http")):
-            # P3 chief succeeds (mock chief relay)
-            async def mock_p3(target, message):
-                return {"delivered": True, "url": "http://chief:8844/message"}
-            mock_nerve._send_p3_chief = mock_p3
+        mock_nerve._send_p2_http = AsyncMock(return_value={"delivered": False, "error": "refused"})
+        # P3 chief succeeds
+        mock_nerve._send_p3_chief = AsyncMock(return_value={"delivered": True, "url": "http://chief:8844/message"})
 
-            result = await mock_nerve.send_with_fallback("mac2", {
-                "type": "context", "payload": {"subject": "x", "body": "y"}
-            })
+        result = await mock_nerve.send_with_fallback("mac2", {
+            "type": "context", "payload": {"subject": "x", "body": "y"}
+        })
 
-            assert result["delivered"] is True
-            assert result["channel"] == "P3_chief"
-            # self-heal should have been triggered
-            await asyncio.sleep(0.1)
-            mock_nerve._attempt_self_heal.assert_called_once()
+        assert result["delivered"] is True
+        assert result["channel"] == "P3_chief"
+        # self-heal should have been triggered (called synchronously, not awaited)
+        mock_nerve._attempt_self_heal.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_no_self_heal_on_p1_p2(self, mock_nerve, mock_nats_client):

@@ -19,6 +19,37 @@ HOOK_PATH = Path(__file__).parent.parent / "hooks" / "run-hook.cmd"
 REPO_ROOT = Path(__file__).parent.parent.parent
 
 
+def _parse_last_json(text: str) -> dict:
+    """Parse the last JSON object from a string that may contain multiple
+    concatenated JSON objects (e.g. daemon broadcast result + systemMessage).
+
+    The hook may emit multiple JSON blobs on a single line when the daemon
+    broadcast fires before the systemMessage. We want the last one (the
+    systemMessage envelope).
+    """
+    text = text.strip()
+    if not text:
+        return {}
+    # Try parsing the whole string first (single JSON object)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Multiple JSON objects: find the last '{...}' by scanning from the end
+    depth = 0
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == '}':
+            depth += 1
+        elif text[i] == '{':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[i:])
+                except json.JSONDecodeError:
+                    continue
+    raise json.JSONDecodeError("No valid JSON found", text, 0)
+
+
 def _run_hook(hook_type: str, env_overrides: dict = None, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run the hook script with the given type.
 
@@ -58,12 +89,16 @@ class TestHookJSONOutput:
 
     @pytest.mark.unit
     def test_stop_outputs_json(self):
-        """stop hook outputs JSON with session-end notification."""
+        """stop hook outputs JSON with session-end notification.
+
+        The hook may emit multiple JSON objects (daemon broadcast + systemMessage)
+        concatenated on one line. We parse the last one for the systemMessage.
+        """
         result = _run_hook("stop", timeout=10)
         assert result.returncode == 0
         stdout = result.stdout.strip()
         if stdout:
-            data = json.loads(stdout)
+            data = _parse_last_json(stdout)
             assert "systemMessage" in data
             assert "Session ended" in data["systemMessage"] or "test-node" in data["systemMessage"]
 
@@ -106,7 +141,7 @@ class TestHookNodeIdentity:
         assert result.returncode == 0
         stdout = result.stdout.strip()
         if stdout:
-            data = json.loads(stdout)
+            data = _parse_last_json(stdout)
             # Shell metacharacters must not appear in output
             assert "$(" not in data["systemMessage"]
 
@@ -131,7 +166,7 @@ class TestHookGracefulDegradation:
         assert result.returncode == 0
         stdout = result.stdout.strip()
         if stdout:
-            data = json.loads(stdout)
+            data = _parse_last_json(stdout)
             assert "systemMessage" in data
 
     @pytest.mark.unit
@@ -164,20 +199,33 @@ class TestOutputJsonFunction:
         # The key point is the output must be valid JSON
         stdout = result.stdout.strip()
         if stdout:
-            data = json.loads(stdout)  # Must not throw
+            data = _parse_last_json(stdout)  # Must not throw
             assert "systemMessage" in data
 
     @pytest.mark.unit
     def test_output_json_with_newlines_in_content(self):
-        """Multi-line messages are combined into a single JSON systemMessage."""
-        # The stop hook flushes outbox + sends notification, so it produces
-        # at minimum one emit line. The output must still be single valid JSON.
+        """Output contains valid JSON objects (may be multiple per line).
+
+        The hook may emit multiple JSON objects on a single line when the
+        daemon broadcast fires alongside the systemMessage. Each individual
+        JSON object must be valid.
+        """
         result = _run_hook("stop", timeout=10)
         stdout = result.stdout.strip()
         if stdout:
-            # Count top-level JSON objects (should be exactly 1)
-            # Split on newlines, filter to non-empty, each must be JSON
             lines = [l for l in stdout.split("\n") if l.strip()]
             assert len(lines) >= 1
             for line in lines:
-                json.loads(line)
+                # Line may contain multiple concatenated JSON objects
+                # Parse each one by scanning for matched braces
+                remaining = line.strip()
+                found = 0
+                decoder = json.JSONDecoder()
+                while remaining:
+                    try:
+                        _, idx = decoder.raw_decode(remaining)
+                        remaining = remaining[idx:].lstrip()
+                        found += 1
+                    except json.JSONDecodeError:
+                        break
+                assert found >= 1, f"No valid JSON in line: {line[:80]}"

@@ -122,7 +122,9 @@ class TestRepairEscalation:
         mock_nerve.send_with_fallback = AsyncMock(return_value={"delivered": True, "channel": "P1_nats"})
         mock_nerve._send_p1_nats = AsyncMock(return_value={"delivered": True})
 
-        result = await mock_nerve.repair_with_escalation("mac2", ["P1_nats"], action="restart_nats")
+        # Patch asyncio.sleep to avoid 120s wait in repair escalation
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mock_nerve.repair_with_escalation("mac2", ["P1_nats"], action="restart_nats")
         assert result["repaired"] is True
         assert result["level"] == 1
         # Verify send_with_fallback was called with repair message
@@ -140,7 +142,9 @@ class TestRepairEscalation:
         mock_nerve.send_with_fallback = AsyncMock(return_value={"delivered": True, "channel": "P1_nats"})
         mock_nerve._send_p1_nats = AsyncMock(return_value={"delivered": True})
 
-        result = await mock_nerve.repair_with_escalation("mac2", ["P1_nats"])
+        # Patch asyncio.sleep to avoid 120s wait in repair escalation
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mock_nerve.repair_with_escalation("mac2", ["P1_nats"])
         assert result["repaired"] is True
         assert result["level"] == 1
         # send_with_fallback should only be called once (L1 notify)
