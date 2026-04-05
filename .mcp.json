@@ -7,6 +7,11 @@
         "MULTIFLEET_NODE_ID": "",
         "FLEET_NERVE_PORT": "8855"
       }
+    },
+    "superset": {
+      "type": "http",
+      "url": "https://api.superset.sh/api/agent/mcp",
+      "_description": "Superset local execution runtime — workspace, task, and agent session management"
     }
   }
 }
