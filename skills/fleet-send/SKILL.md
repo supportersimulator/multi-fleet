@@ -7,13 +7,31 @@ description: Send a message to another machine in the fleet — context, task, a
 
 Send a message to one or more machines in the fleet. Messages are routed by type — each type has different delivery semantics. The 7-priority fallback chain ensures delivery even on hostile networks.
 
+## Protocol Awareness (INVARIANT)
+
+**Always try channels in order. Never skip to P8.**
+
+The send system follows the P0-P8 cascade strictly. Each channel gets a 30-second timeout before falling through to the next. The order is: P1 NATS, P2 HTTP, P3 Chief relay, P4 Seed file, P5 SSH, P6 WoL, P7 Git, P8 Direct text (last resort only).
+
+**If your message used P3+, also trigger repair for the broken channels.** A P3+ delivery is a success AND a signal that P1/P2 need fixing. The daemon handles this automatically, but if you're sending manually, check channel state and invoke repair:
+
+```bash
+# Check channel state before/after sending
+curl -s http://127.0.0.1:8855/channels | python3 -m json.tool
+
+# If channels are broken, trigger repair
+curl -sf -X POST http://127.0.0.1:8855/repair -H "Content-Type: application/json" \
+  -d '{"target": "<node-id>", "channel": "nats"}'
+```
+
 ## How It Works
 
 1. You compose a message with a type, target, and payload
-2. The daemon tries all 7 delivery channels in priority order (NATS, HTTP, Chief relay, Seed file, SSH, WoL, Git)
+2. The daemon tries all channels in priority order (P1 NATS through P7 Git, 30s timeout each)
 3. First successful delivery wins — the channel used is logged
 4. If P1-P2 fail and a lower channel succeeds, a self-healing repair request is sent automatically
 5. Target processes the message based on type (seed file, agent spawn, notification, etc.)
+6. **P8 (direct text/copy-paste) is NEVER used by the daemon** — it exists only as a human last resort
 
 ## Sending Messages
 
@@ -200,3 +218,10 @@ curl -sf -X POST http://<target-ip>:8855/message -H "Content-Type: application/j
 - Alerting a human on another machine about something urgent
 - Broadcasting fleet-wide announcements (pull main, restart daemons)
 - Sending results back from a task agent to the original requester
+
+## Self-Healing Reminder
+
+After every send, check the delivery channel in the response. If the channel was P3 or higher:
+1. The daemon already triggered automatic repair for P1/P2
+2. Verify repair is progressing: `curl -s http://127.0.0.1:8855/repair/status | python3 -m json.tool`
+3. The fleet is not healthy until ALL nodes have P1+P2 operational

@@ -86,10 +86,10 @@ Every message tries all 7 channels in priority order. First success wins.
 
 ## Features
 
-- **7-priority fallback** — messages always deliver, even on hostile networks
+- **8-priority fallback (P1-P8)** — messages always deliver, even on hostile networks. P8 (direct text) is last resort only
+- **Self-healing communication protocol** — when P3+ channels are used, broken P1/P2 channels are automatically repaired. The fleet is not healthy until ALL nodes have P1+P2 operational. Idle sessions (>5min) are redirected to channel repair first. 5-minute cooldown between repair attempts prevents storms
 - **VS Code detection** — knows if target has active session, idle, or closed
 - **Session historian** — task agents inherit context from target's active session
-- **Self-healing** — broken channels are automatically repaired via working ones
 - **Scales to 100+** — peers discovered dynamically from config + heartbeats
 - **No hardcoded values** — all from config.json or environment variables
 - **Open-source ready** — template config, no IP leaks, clean separation

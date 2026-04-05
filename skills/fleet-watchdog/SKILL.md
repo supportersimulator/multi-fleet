@@ -5,7 +5,7 @@ description: Proactive fleet health monitoring — channel checks, threshold ale
 
 # Fleet Watchdog
 
-Continuous background monitor that checks fleet health and triggers repairs before humans notice problems. Runs as part of the Fleet Nerve daemon.
+**Watchdog doesn't just monitor — it heals.** Continuous background monitor that checks fleet health, triggers repairs before humans notice problems, and redirects idle sessions to channel repair work. Runs as part of the Fleet Nerve daemon.
 
 ## What It Monitors
 
@@ -93,6 +93,23 @@ In `.multifleet/config.json`:
 | `FLEET_WATCHDOG_DISABLED` | Set to `1` to disable watchdog entirely |
 | `FLEET_WATCHDOG_INTERVAL` | Override base check interval (seconds) |
 
+## Idle Session Redirection
+
+**Idle sessions are redirected to channel repair first.** When watchdog detects a session idle >5 minutes:
+
+1. Check channel health to all peers (`/channels` endpoint)
+2. If any P1/P2 channels are broken, send a repair task to the idle session
+3. If all channels healthy, check for pending fleet tasks in the inbox
+4. If no tasks, session remains available for dispatch
+
+**5-minute cooldown between repair attempts** per peer. This prevents repair storms when a peer is genuinely unreachable. The cooldown resets when a channel state changes.
+
+```bash
+# Check idle session redirection state
+curl -s http://127.0.0.1:8855/watchdog/idle | python3 -m json.tool
+# Shows: which sessions are idle, what repair work they've been assigned, cooldown timers
+```
+
 ## Interaction with Fleet Repair
 
 Watchdog is the **trigger source** for the repair escalation system. When a check crosses its failure threshold:
@@ -103,6 +120,16 @@ Watchdog is the **trigger source** for the repair escalation system. When a chec
 4. If repair fails and threshold is hit again, watchdog escalates one level higher
 
 The `autoRepairLevel` cap prevents watchdog from executing remote commands without human oversight. Set to `"notify"` for monitoring-only mode.
+
+## Self-Healing Protocol Integration
+
+Watchdog enforces the fleet-wide invariant: **the fleet is not healthy until ALL nodes have P1+P2 operational.**
+
+- Every 30s, watchdog checks P1 (NATS) and P2 (HTTP) to all peers
+- Broken channels are logged and repair is triggered automatically
+- Idle sessions are conscripted for repair work before anything else
+- 5-minute cooldown between repair attempts per peer prevents storms
+- Repair success is verified by re-testing the channel immediately after fix
 
 ## When to Use This Skill
 

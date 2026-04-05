@@ -5,7 +5,7 @@ description: Run the full 7-channel communication test — verifies every delive
 
 # Fleet Check
 
-End-to-end verification of all 7 communication channels to a target node. Identifies exactly which channels work and which are broken, so you know your fallback coverage.
+End-to-end verification of all 8 communication channels (P1-P8) to a target node. Tests each channel in sequence with a 30-second per-channel timeout, reports state, and identifies exactly which channels work and which are broken.
 
 ## Running the Full Test
 
@@ -26,19 +26,22 @@ curl -sf -X POST http://127.0.0.1:8855/check -H "Content-Type: application/json"
   -d '{"target": "<node-id>", "channel": "nats"}' | python3 -m json.tool
 ```
 
-## The 7-Channel Test Sequence
+## The 8-Channel Test Sequence
 
-Each channel is tested in priority order. The test sends a probe message and waits for acknowledgment.
+Tests all 8 channels in sequence, reports state. Each channel gets a 30-second timeout (configurable per-channel below). The test sends a probe message and waits for acknowledgment.
 
-| Step | Channel | What it tests | Pass criteria |
-|------|---------|--------------|---------------|
-| P1 | NATS pub/sub | NATS server reachable, subscription active | ACK within 2s |
-| P2 | HTTP direct | Target daemon port 8855 responding | HTTP 200 within 3s |
-| P3 | Chief relay | Chief ingest + relay to target | ACK within 5s |
-| P4 | Seed file | SSH write to target's seed directory | File exists within 5s |
-| P5 | SSH direct | SSH command execution on target | Exit code 0 within 10s |
-| P6 | Wake-on-LAN | Magic packet delivery (LAN only) | Health responds within 60s |
-| P7 | Git push | Async message via git commit + push | Commit lands within 30s |
+| Step | Channel | What it tests | Pass criteria | Default timeout |
+|------|---------|--------------|---------------|-----------------|
+| P1 | NATS pub/sub | NATS server reachable, subscription active | ACK received | 2s |
+| P2 | HTTP direct | Target daemon port 8855 responding | HTTP 200 | 3s |
+| P3 | Chief relay | Chief ingest + relay to target | ACK received | 5s |
+| P4 | Seed file | SSH write to target's seed directory | File exists | 5s |
+| P5 | SSH direct | SSH command execution on target | Exit code 0 | 10s |
+| P6 | Wake-on-LAN | Magic packet delivery (LAN only) | Health responds | 60s |
+| P7 | Git push | Async message via git commit + push | Commit lands | 30s |
+| P8 | Direct text | Manual copy-paste (LAST RESORT) | N/A — human-only | N/A |
+
+**30-second per-channel timeout guidance:** For automated checks, cap each channel at 30s maximum even if the default is lower. This prevents a single broken channel from blocking the entire test suite. P8 is never tested automatically — it exists only as a human last resort.
 
 ## Interpreting Results
 
@@ -112,6 +115,29 @@ The test uses timeouts from `.multifleet/config.json`:
 }
 ```
 
+## Protocol Verification
+
+Fleet check is the diagnostic tool for the self-healing protocol. After running:
+
+1. **All P1+P2 pass** — fleet is healthy, no action needed
+2. **P1 or P2 fail** — trigger `fleet-repair` immediately. The fleet is not healthy until ALL nodes have P1+P2 operational
+3. **Only P3+ pass** — communication works but is degraded. Repair is mandatory, not optional
+4. **All fail** — target is truly unreachable. Try `fleet-wake` first
+
+```bash
+# Quick protocol health: just check P1+P2 for all peers
+for node in $(python3 -c "
+import json
+cfg = json.load(open('.multifleet/config.json'))
+for n in cfg['nodes']: print(n)
+"); do
+  echo -n "$node: "
+  curl -sf -X POST http://127.0.0.1:8855/check -H "Content-Type: application/json" \
+    -d "{\"target\": \"$node\", \"channels\": [\"nats\", \"http\"]}" 2>/dev/null | \
+    python3 -c "import sys,json;d=json.load(sys.stdin);ch=d.get('channels',{});print(f'P1={ch.get(\"p1_nats\",{}).get(\"status\",\"?\")} P2={ch.get(\"p2_http\",{}).get(\"status\",\"?\")}')" 2>/dev/null || echo "unreachable"
+done
+```
+
 ## When to Use This Skill
 
 - After setting up a new node — verify all channels work
@@ -120,3 +146,4 @@ The test uses timeouts from `.multifleet/config.json`:
 - Before relying on fleet for critical work — confirm redundancy
 - Debugging: "why did my message fall back to P5?"
 - Periodic health audit of fleet connectivity
+- **Self-healing verification**: confirm P1+P2 are restored after repair
