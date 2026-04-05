@@ -90,6 +90,36 @@ Forbidden in logs:
 
 Violation of this invariant is a security incident. `except Exception: pass` near credential handling is forbidden — failures MUST be logged with channel/status only, never with credential content.
 
+### 4.1 Message Authentication (HMAC)
+
+All NATS messages are signed with HMAC-SHA256 using a fleet-wide shared secret. Implementation: `tools/fleet_nerve_security.py`.
+
+**Signing**: Every outgoing message gets `_hmac` (hex digest) and `_signed_ts` (unix timestamp) fields. The HMAC covers the canonical JSON of the entire message (sorted keys, no whitespace, `_hmac` field excluded).
+
+**Verification** (on every inbound message):
+1. **Peer identity** — `from` field must match a known node ID from config. Unknown senders are rejected.
+2. **HMAC signature** — recompute and compare (constant-time). Bad signatures are rejected.
+3. **Replay prevention** — `_signed_ts` must be within 5 minutes of current time. Stale messages are rejected.
+
+**Key management**:
+- Stored in macOS Keychain as `fleet_nerve_hmac_key`
+- On first run: auto-generates 32-byte random key and stores in keychain
+- Override via `FLEET_NERVE_HMAC_KEY` env var (for CI/testing)
+- Distribute to fleet: `security find-generic-password -s fleet_nerve_hmac_key -w | pbcopy`
+
+**Graceful degradation**: If no HMAC key is available, messages are sent unsigned and unsigned messages are accepted. This prevents breaking existing fleet during key rollout. Once all nodes have the key, unsigned messages generate a log warning but are still accepted.
+
+**Logging invariant**: Never log HMAC key or message content. Only log: message ID (first 8 chars), sender node ID, message type, and signature status (pass/fail/missing).
+
+### 4.2 Session Gold Privacy
+
+Session gold published on NATS (`fleet.sessions.*.gold`) is sanitized before publish. Only safe metadata is transmitted:
+- `node_id`, `session_count`, `topic_keywords` (max 10, truncated to 50 chars each), `idle_s`, `session_id` (truncated to 8 chars), `timestamp`
+
+Never published: full conversation text, file contents, code artifacts, API responses, error tracebacks, environment variables, credentials.
+
+Implementation: `FleetSecurity.sanitize_gold_for_publish()` in `tools/fleet_nerve_security.py`.
+
 ---
 
 ## 5. Direct Text Input Rules (P8)
