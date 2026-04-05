@@ -94,7 +94,7 @@ Every message tries all 7 channels in priority order. First success wins.
 - **No hardcoded values** — all from config.json or environment variables
 - **Open-source ready** — template config, no IP leaks, clean separation
 
-## Plugin Skills (11)
+## Plugin Skills (16)
 
 | Skill | Description |
 |-------|-------------|
@@ -108,6 +108,11 @@ Every message tries all 7 channels in priority order. First success wins.
 | fleet-tunnel | SSH tunnel management for restricted networks |
 | fleet-worker | tmux-isolated worker pool — no interactive session disruption |
 | fleet-watchdog | Continuous health monitoring with auto-repair triggers |
+| fleet-healer | Background healing agents — 5 agent types for convergence repair |
+| fleet-protocol | Core self-healing communication invariant — 8-channel cascade |
+| fleet-config-gate | Configuration validation before fleet operations |
+| fleet-dispatch-gate | Pre-dispatch validation for cross-machine task routing |
+| fleet-post-verification | Post-task verification — confirms work completed correctly |
 | productivity-view | Live fleet-wide dashboard of nodes, agents, and backlog |
 
 ## SSH Tunnels (for restricted networks)
@@ -124,6 +129,26 @@ This creates persistent autossh tunnels through port 22. NATS, HTTP, everything 
 ## Requirements
 
 - Python 3.10+
-- `nats-py` (`pip install nats-py`)
 - SSH key access between nodes
 - NATS server on chief node (`brew install nats-server` or `apt install nats-server`)
+
+### Python Dependencies
+
+```bash
+pip install nats-py        # NATS pub/sub client
+pip install aiohttp        # Async HTTP (optional, for P2 channel)
+```
+
+### Optional
+
+- `autossh` — persistent SSH tunnels for restricted networks (`brew install autossh`)
+- macOS Keychain — secure API key storage for 3-Surgeons integration
+
+## Plugin Ecosystem
+
+Multi-Fleet integrates with two companion plugins:
+
+- **[Superpowers](https://github.com/obra/superpowers-marketplace)** — process invariance (brainstorming, plans, TDD, debugging)
+- **[3-Surgeons](./3-surgeons/)** — epistemological invariance (multi-model consensus, cross-examination)
+
+All three plugins can run simultaneously. No tool name collisions. Fleet daemon probes surgeon health and includes it in status reports.
