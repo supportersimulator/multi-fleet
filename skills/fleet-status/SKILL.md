@@ -126,6 +126,38 @@ def fleet_status():
 }
 ```
 
+## Channel Health Display
+
+Fleet status includes per-peer channel state. Check which channels are operational:
+
+```bash
+# Per-peer channel state table
+curl -s http://127.0.0.1:8855/channels | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(f'{'Peer':<10} {'P1 NATS':<10} {'P2 HTTP':<10} {'P3 Chief':<10} {'P4 Seed':<10} {'P5 SSH':<10}')
+print('-' * 60)
+for peer, ch in data.get('peers', {}).items():
+    row = f'{peer:<10}'
+    for p in ['p1_nats','p2_http','p3_chief','p4_seed','p5_ssh']:
+        st = ch.get(p, {}).get('status', '?')
+        marker = 'OK' if st == 'pass' else 'BROKEN' if st == 'fail' else st.upper()
+        row += f' {marker:<10}'
+    print(row)
+"
+```
+
+### Interpreting Channel Health
+
+| State | Meaning | Action |
+|-------|---------|--------|
+| All P1+P2 OK | Healthy fleet | None needed |
+| P1 BROKEN, P2 OK | NATS down | Check NATS server on chief, use `fleet-repair` |
+| P1+P2 BROKEN | Direct channels down | Trigger `fleet-repair`, check firewall/tunnels |
+| Only P5+ working | Network severely degraded | Use `fleet-tunnel` to establish SSH tunnels |
+
+**BROKEN channels require repair.** The fleet is not healthy until ALL nodes have P1+P2 operational. When you see BROKEN channels in status output, recommend `fleet-repair` to the user or trigger it automatically.
+
 ## Data Sources
 
 | Source | Freshness | How |
@@ -200,3 +232,4 @@ for name, info in cfg.get('nodes', {}).items():
 - Situational awareness — what is everyone working on right now?
 - After network changes — did all nodes reconnect?
 - Verifying fleet health after a wake or repair operation
+- **Idle protocol**: if your session is idle >5min, run fleet-status to find work or broken channels to repair

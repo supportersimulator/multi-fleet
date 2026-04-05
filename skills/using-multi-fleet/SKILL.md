@@ -28,7 +28,6 @@ Layer 1: Superpowers -------- local captain
 | **Chief** | Runs Redis, MLX LLM, synthesis. Authoritative memory. Message relay for offline nodes. | mac1 |
 | **Worker** | Executes tasks, reports back. Full local capability. Independent when chief is down. | mac2, mac3 |
 
-<<<<<<< Updated upstream
 ## <HARD-GATE> Communication Protocol Invariants
 
 **These are non-negotiable for ANY multi-fleet installation. Violating any invariant is a system failure.**
@@ -49,7 +48,6 @@ P6: Wake-on-LAN    (3s budget)   -- wake sleeping machines
 P7: Git push        (10s budget)  -- guaranteed delivery (eventual)
 P8: Direct text injection (LAST RESORT ONLY) -- into user's typing space
 ```
-=======
 ## Communication Protocol (8-Priority Fallback)
 
 Every message tries all channels in order. First success wins. 30s timeout per channel.
@@ -68,7 +66,6 @@ Every message tries all channels in order. First success wins. 30s timeout per c
 **User input injection is LAST PRIORITY ONLY** — the system exhausts all automated channels before falling back to human-visible seed files or git.
 
 **Secrets**: Keychain/AWS/env vars only. Never hardcode credentials in config or messages. SSH keys via `~/.ssh/`, API keys via env.
->>>>>>> Stashed changes
 
 **Total budget: 30 seconds.** P8 (direct text injection into a user's active typing space) is ALWAYS last priority — it disrupts flow and is only acceptable when P1-P7 have all failed.
 
@@ -244,6 +241,54 @@ This handles wake, dispatch, monitoring, and result collection automatically.
 | Task agent spawned but no results | Agent may be stuck or timed out | Check `/tasks/live`, read `/tmp/atlas-agent-results/` |
 | All nodes show `offline` except self | Network issue or config wrong | Check `.multifleet/config.json` peer entries |
 
+## Communication Protocol (INVARIANT)
+
+The fleet uses a P0-P8 channel cascade with self-healing. Every session MUST follow this protocol.
+
+### Channel Cascade
+
+Messages try channels in strict priority order. 30-second timeout per channel. First success wins.
+
+```
+P0: In-process (same machine)     -- instant
+P1: NATS pub/sub    (<100ms)      -- real-time, bidirectional
+P2: HTTP direct     (<1s)         -- peer-to-peer, no central dependency
+P3: Chief relay     (1-2s)        -- queues for offline nodes
+P4: Seed file       (next prompt) -- SSH write to target's seed dir
+P5: SSH direct      (2-5s)        -- reliable, works through firewalls
+P6: Wake-on-LAN    (10-60s)      -- wake sleeping machines
+P7: Git push        (async)       -- guaranteed delivery (eventual)
+P8: Direct text     (manual)      -- LAST RESORT — copy/paste between sessions
+```
+
+**P8 direct text is LAST RESORT.** Never skip to P8. Always try P1-P7 first.
+
+### Self-Healing Protocol
+
+When a message succeeds on P3+, it means P1 and/or P2 are broken. The system MUST:
+
+1. Deliver the message via the working channel (immediate)
+2. Trigger repair for the broken P1/P2 channels (automatic)
+3. Spawn background repair agents if needed (via `fleet-repair`)
+
+**The fleet is not healthy until ALL nodes have P1+P2 operational.** A message that delivers via P5 is a success AND a symptom. Treat both.
+
+### Idle Protocol
+
+Any session idle for >5 minutes MUST pick up fleet work:
+1. Check for pending fleet tasks in the inbox
+2. If no tasks, check channel health to all peers
+3. If any channels are broken, run repair
+4. If everything is healthy, remain available for dispatch
+
+### Channel State Inspection
+
+```bash
+# Check channel state for all peers
+curl -s http://127.0.0.1:8855/channels | python3 -m json.tool
+
+# Check specific peer
+curl -s http://127.0.0.1:8855/channels/<peer-id> | python3 -m json.tool
 ## Idle Protocol
 
 **When peers are idle**: suggest productive work from `docs/plans/`. Check backlog, propose next tasks, dispatch low-priority work to idle nodes.
@@ -319,17 +364,19 @@ curl -s http://127.0.0.1:8855/fleet/live | python3 -m json.tool
 ## Key Principles
 
 1. **Additive, not dependent** — fleet communication enriches what each machine can do independently. If the network goes down, every node continues working on its own.
-<<<<<<< Updated upstream
+2. **Always deliver** — the P0-P8 channel cascade ensures messages reach their target. Even if it takes git push as a last resort. P8 (direct text) only when everything else fails.
+3. **Session awareness** — task agents inherit context from the target's active session. They don't work blind.
+4. **Self-healing** — broken channels are detected and repaired automatically. When P3+ is used, repair of P1/P2 triggers immediately. The fleet is not healthy until ALL nodes have P1+P2.
+5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session.
+6. **Idle sessions work** — sessions idle >5min pick up fleet tasks and channel repairs. No wasted compute.
 2. **Always deliver** — the 8-priority fallback chain ensures messages reach their target. Direct text injection is always last resort. See HARD-GATE section.
 3. **Session awareness** — task agents inherit context from the target's active session. They don't work blind.
 4. **Self-healing is mandatory** — broken channels are detected and repaired automatically. Not best-effort — invariant. See HARD-GATE section.
 5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session. P8 (text injection) only when P1-P7 exhausted.
 6. **Idle = explore** — no node sits silent when there is discoverable work. See HARD-GATE Idle Protocol.
 7. **Secrets never in code** — env var → Keychain → AWS. Fallbacks flagged. See HARD-GATE Secrets Invariant.
-=======
 2. **Always deliver** — the 8-priority fallback chain ensures messages reach their target. Even if it takes git push as a last resort.
 3. **Session awareness** — task agents inherit context from the target's active session. They don't work blind.
 4. **Self-healing** — broken channels are detected and repaired automatically. The fleet MUST converge to all-channels-working state.
 5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session.
 6. **Never idle** — idle machines study plans, check health, propose improvements. Idle is wasted capacity.
->>>>>>> Stashed changes

@@ -5,7 +5,9 @@ description: 4-level repair escalation for broken fleet channels — notify, gui
 
 # Fleet Repair
 
-When a message falls back to P3+ channels, it means P1-P2 are broken. The repair system diagnoses and fixes connectivity issues through a 4-level escalation chain.
+**Repair is not optional — it is triggered automatically when P3+ channels are used for delivery.** When a message falls back to P3+ channels, it means P1-P2 are broken. The repair system diagnoses and fixes connectivity issues through a 4-level escalation chain.
+
+**Goal: get every peer to P1+P2 operational.** The fleet is not healthy until all nodes can communicate via P1 (NATS) and P2 (HTTP direct). Every other channel is a fallback, and relying on fallbacks means degraded performance and reliability.
 
 ## Escalation Levels
 
@@ -116,9 +118,39 @@ In `.multifleet/config.json`:
 | `l4RequiresApproval` | `true` | Require human approval for remote execution |
 | `maxRetriesPerHour` | `3` | Rate limit to prevent repair storms |
 
+## Background Repair Agents
+
+For fleet-wide repair, spawn background agents to fix broken channels across all peers:
+
+```bash
+# Check which peers have broken channels
+curl -s http://127.0.0.1:8855/channels | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for peer, ch in data.get('peers', {}).items():
+    broken = [p for p, v in ch.items() if v.get('status') == 'fail' and p in ('p1_nats','p2_http')]
+    if broken:
+        print(f'{peer}: {broken} — needs repair')
+"
+
+# Trigger repair for all broken peers
+for node in $(curl -s http://127.0.0.1:8855/channels | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for peer, ch in data.get('peers', {}).items():
+    if any(v.get('status') == 'fail' for p, v in ch.items() if p in ('p1_nats','p2_http')):
+        print(peer)
+"); do
+  curl -sf -X POST http://127.0.0.1:8855/repair -H "Content-Type: application/json" \
+    -d "{\"target\": \"$node\", \"level\": \"assist\"}"
+done
+```
+
 ## When to Use This Skill
 
 - A node shows as `degraded` in the fleet dashboard
 - Messages are consistently falling back to P3+ channels
 - After network changes (new router, VPN, IP change)
 - After a node reboot when daemon didn't auto-start
+- **Automatically**: any time a message delivers via P3+ (self-healing protocol)
+- **Idle sessions**: when idle >5min and channel health shows broken P1/P2
