@@ -23,6 +23,11 @@
         "./skills/fleet-watchdog",
         "./skills/fleet-check",
         "./skills/fleet-worker",
+        "./skills/fleet-config-gate",
+        "./skills/fleet-dispatch-gate",
+        "./skills/fleet-healer",
+        "./skills/fleet-post-verification",
+        "./skills/fleet-protocol",
         "./skills/productivity-view"
       ]
     }
