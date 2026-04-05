@@ -1,0 +1,33 @@
+{
+  "fleetId": "home-office",
+  "nodes": {
+    "desktop": {
+      "host": "192.168.1.10",
+      "port": 8855,
+      "user": "alice",
+      "role": "chief",
+      "mac_address": "AA:BB:CC:DD:EE:01"
+    },
+    "laptop": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "alice",
+      "role": "worker"
+    }
+  },
+  "nats": {
+    "server": "nats://192.168.1.10:4222",
+    "credentials_file": "",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": []
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}

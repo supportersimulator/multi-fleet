@@ -1,0 +1,55 @@
+{
+  "fleetId": "ssh-fleet",
+  "nodes": {
+    "mac1": {
+      "host": "mac1.local",
+      "port": 8855,
+      "user": "alice",
+      "role": "chief"
+    },
+    "mac2": {
+      "host": "mac2.local",
+      "port": 8855,
+      "user": "bob",
+      "role": "worker"
+    },
+    "mac3": {
+      "host": "mac3.local",
+      "port": 8855,
+      "user": "carol",
+      "role": "worker"
+    }
+  },
+  "nats": {
+    "server": "nats://127.0.0.1:4222",
+    "credentials_file": "",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": true,
+    "targets": [
+      {
+        "name": "mac2",
+        "host": "mac2.local",
+        "user": "bob",
+        "ssh_port": 22,
+        "remote_nats_port": 4222,
+        "local_bind_port": 4223
+      },
+      {
+        "name": "mac3",
+        "host": "mac3.local",
+        "user": "carol",
+        "ssh_port": 22,
+        "remote_nats_port": 4222,
+        "local_bind_port": 4224
+      }
+    ]
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Fleet Nerve MCP launcher — resolves Python and starts the MCP server
+# Fleet Nerve MCP launcher — resolves Python and starts the MCP server.
+# Resolution order:
+#   1. Plugin-local .venv/
+#   2. System python with plugin on PYTHONPATH
+#   3. Auto-bootstrap: create .venv and pip install
+#   4. Superrepo fallback (tools/ path) when running inside er-simulator-superrepo
+
 set -euo pipefail
 
 # Load API keys from macOS Keychain if available (values never logged)
@@ -9,23 +15,94 @@ if command -v security &>/dev/null; then
   unset _k
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$PLUGIN_ROOT/.." && pwd)"
 
-# Find Python
-PYTHON=""
-for p in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
-    if command -v "$p" &>/dev/null; then
-        PYTHON="$p"
-        break
+MCP_MODULE="$PLUGIN_ROOT/bin/fleet_nerve_mcp.py"
+
+# Verify Python has >=3.10 and can import the MCP server module
+has_mcp_runtime() {
+    local py="$1"
+    "$py" - <<'PY' >/dev/null 2>&1
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit(1)
+PY
+}
+
+# Find a suitable Python >=3.10
+find_python() {
+    for p in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+        if command -v "$p" &>/dev/null && has_mcp_runtime "$p"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 1. Plugin-local venv
+if [ -f "${PLUGIN_ROOT}/.venv/bin/python" ]; then
+    if has_mcp_runtime "${PLUGIN_ROOT}/.venv/bin/python"; then
+        export PYTHONPATH="${PLUGIN_ROOT}:${PYTHONPATH:-}"
+        exec "${PLUGIN_ROOT}/.venv/bin/python" "$MCP_MODULE" "$@"
+    fi
+fi
+
+# 2. System python with plugin root on PYTHONPATH
+PYTHON=$(find_python) || PYTHON=""
+if [ -n "$PYTHON" ]; then
+    # Add plugin root so bin/fleet_nerve_mcp.py can resolve local imports
+    export PYTHONPATH="${PLUGIN_ROOT}:${PYTHONPATH:-}"
+    # Also add superrepo tools/ path if running inside the superrepo
+    if [ -d "$REPO_ROOT/tools" ] && [ -f "$REPO_ROOT/tools/fleet_nerve_nats.py" ]; then
+        export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+    fi
+    # Quick check: can we actually run the MCP module?
+    if "$PYTHON" -c "import sys; sys.path.insert(0,'${PLUGIN_ROOT}'); exec(open('${MCP_MODULE}').read().split('\n')[0])" >/dev/null 2>&1 || true; then
+        exec "$PYTHON" "$MCP_MODULE" "$@"
+    fi
+fi
+
+# 3. Auto-bootstrap: create venv and install deps
+echo "Fleet Nerve: No runtime found. Attempting auto-bootstrap..." >&2
+for PY in python3 python; do
+    if command -v "$PY" >/dev/null 2>&1 && has_mcp_runtime "$PY"; then
+        BOOTSTRAP_VENV="${PLUGIN_ROOT}/.venv"
+        echo "  Creating venv at ${BOOTSTRAP_VENV} ..." >&2
+        if "$PY" -m venv "$BOOTSTRAP_VENV" 2>/dev/null; then
+            echo "  Installing dependencies ..." >&2
+            if "${BOOTSTRAP_VENV}/bin/pip" install -q nats-py mcp 2>/dev/null; then
+                echo "  Bootstrap complete." >&2
+                export PYTHONPATH="${PLUGIN_ROOT}:${PYTHONPATH:-}"
+                if [ -d "$REPO_ROOT/tools" ] && [ -f "$REPO_ROOT/tools/fleet_nerve_nats.py" ]; then
+                    export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+                fi
+                exec "${BOOTSTRAP_VENV}/bin/python" "$MCP_MODULE" "$@"
+            fi
+        fi
+        echo "  Bootstrap failed for $PY" >&2
     fi
 done
 
-if [ -z "$PYTHON" ]; then
-    echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Python3 not found"}}' >&2
-    exit 1
+# 4. Superrepo fallback — try the old tools/ path directly
+if [ -f "$REPO_ROOT/tools/fleet_nerve_mcp.py" ]; then
+    PYTHON=$(find_python) || PYTHON=""
+    if [ -n "$PYTHON" ]; then
+        export PYTHONPATH="$REPO_ROOT"
+        echo "Fleet Nerve: Falling back to superrepo tools/fleet_nerve_mcp.py" >&2
+        exec "$PYTHON" "$REPO_ROOT/tools/fleet_nerve_mcp.py" "$@"
+    fi
 fi
 
-export PYTHONPATH="$REPO_ROOT"
-exec "$PYTHON" "$REPO_ROOT/tools/fleet_nerve_mcp.py"
+# --- No runtime found — structured error output ---
+cat >&2 <<DIAG
+{
+  "code": "FLEET-MCP-MISS",
+  "passed": false,
+  "message": "Cannot find Python >=3.10 with required dependencies",
+  "fix": "cd ${PLUGIN_ROOT} && python3 -m venv .venv && .venv/bin/pip install nats-py mcp"
+}
+DIAG
+exit 1

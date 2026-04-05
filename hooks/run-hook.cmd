@@ -143,9 +143,31 @@ validate_seed_file() {
 }
 
 sanitize_seed_content() {
-  # Strip ANSI escape sequences and null bytes from seed file content
-  # Prevents terminal injection when content is displayed
-  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x00//g'
+  # Strip ANSI escape sequences, null bytes, LLM role markers, and prompt injection patterns
+  # from seed file content before it gets injected into Claude sessions via systemMessage.
+  #
+  # Defense layers:
+  # 1. ANSI escapes — prevents terminal injection
+  # 2. Null bytes — prevents string truncation attacks
+  # 3. LLM role markers — prevents model role confusion (<|system|>, [INST], <<SYS>>, etc.)
+  # 4. Prompt injection patterns — blocks override attempts (IGNORE ALL PREVIOUS, etc.)
+  #
+  # If Python sanitizer is available, use it (comprehensive regex-based). Otherwise,
+  # fall back to sed-based stripping of the most critical patterns.
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if python3 -c "from multifleet.sanitize import sanitize_message" 2>/dev/null; then
+    PYTHONPATH="$script_dir" python3 -c "
+import sys
+from multifleet.sanitize import sanitize_message
+print(sanitize_message(sys.stdin.read()))
+"
+  else
+    # Fallback: sed-based stripping of ANSI, null bytes, and critical LLM markers
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x00//g' \
+    | sed 's/<|system|>//gI; s/<|user|>//gI; s/<|assistant|>//gI; s/<|im_start|>//gI; s/<|im_end|>//gI' \
+    | sed 's/\[INST\]//gI; s/\[\/INST\]//gI; s/<<SYS>>//gI; s/<\/SYS>>//gI'
+  fi
 }
 
 check_seed_inbox() {
@@ -297,36 +319,60 @@ send_session_notification() {
 ensure_api_keys() {
   # Load keys: Keychain (fleet-nerve svc) -> Keychain (legacy) -> env file -> AWS SM
   # Never logs key values. Startup-only refresh.
+  #
+  # Key name mapping: generic names for open-source, with backward compatibility
+  # for legacy Context_DNA_* names used in existing deployments.
   local needs_refresh=0
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-  for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
+  # Generic name -> legacy name mapping for backward compatibility.
+  # We export the generic name (FLEET_OPENAI_API_KEY) and also set the legacy
+  # name (Context_DNA_OPENAI) so existing code that reads the old name still works.
+  local -a GENERIC_NAMES=(FLEET_OPENAI_API_KEY FLEET_DEEPSEEK_API_KEY)
+  local -a LEGACY_NAMES=(Context_DNA_OPENAI Context_DNA_Deepseek)
+
+  for i in 0 1; do
+    local key_name="${GENERIC_NAMES[$i]}"
+    local legacy_name="${LEGACY_NAMES[$i]}"
     local val=""
 
-    # 1. Keychain — fleet-nerve service (canonical)
+    # 1. Keychain — fleet-nerve service (canonical, try generic name first)
     val=$(security find-generic-password -s "fleet-nerve" -a "$key_name" -w 2>/dev/null) || true
-    if [ -n "$val" ]; then export "$key_name=$val"; continue; fi
-
-    # 2. Keychain — legacy (key name as service)
-    val=$(security find-generic-password -s "$key_name" -a "$USER" -w 2>/dev/null) || true
     if [ -z "$val" ]; then
-      val=$(security find-generic-password -s "$key_name" -a "atlas" -w 2>/dev/null) || true
+      # Try legacy name in keychain for backward compatibility
+      val=$(security find-generic-password -s "fleet-nerve" -a "$legacy_name" -w 2>/dev/null) || true
     fi
     if [ -n "$val" ]; then
       export "$key_name=$val"
-      # Migrate to canonical keychain location
+      export "$legacy_name=$val"  # backward compat
+      continue
+    fi
+
+    # 2. Keychain — legacy (key name as service)
+    val=$(security find-generic-password -s "$legacy_name" -a "$USER" -w 2>/dev/null) || true
+    if [ -z "$val" ]; then
+      val=$(security find-generic-password -s "$legacy_name" -a "atlas" -w 2>/dev/null) || true
+    fi
+    if [ -n "$val" ]; then
+      export "$key_name=$val"
+      export "$legacy_name=$val"  # backward compat
+      # Migrate to canonical keychain location under generic name
       security delete-generic-password -s "fleet-nerve" -a "$key_name" 2>/dev/null || true
       security add-generic-password -s "fleet-nerve" -a "$key_name" -w "$val" 2>/dev/null || true
       continue
     fi
 
-    # 3. Env file fallback
+    # 3. Env file fallback — check both generic and legacy names
     if [ -f "$HOME/.fleet-nerve/env" ]; then
       val=$(grep "^${key_name}=" "$HOME/.fleet-nerve/env" 2>/dev/null | cut -d= -f2-) || true
+      if [ -z "$val" ]; then
+        val=$(grep "^${legacy_name}=" "$HOME/.fleet-nerve/env" 2>/dev/null | cut -d= -f2-) || true
+      fi
       if [ -n "$val" ]; then
         export "$key_name=$val"
-        # Promote to Keychain so env file can be cleaned
+        export "$legacy_name=$val"  # backward compat
+        # Promote to Keychain under generic name
         security delete-generic-password -s "fleet-nerve" -a "$key_name" 2>/dev/null || true
         security add-generic-password -s "fleet-nerve" -a "$key_name" -w "$val" 2>/dev/null || true
         continue
@@ -337,17 +383,24 @@ ensure_api_keys() {
   done
 
   if [ "$needs_refresh" = "1" ] && command -v aws &>/dev/null; then
-    for key_name in Context_DNA_OPENAI Context_DNA_Deepseek; do
+    for i in 0 1; do
+      local key_name="${GENERIC_NAMES[$i]}"
+      local legacy_name="${LEGACY_NAMES[$i]}"
       local existing
       existing=$(security find-generic-password -s "fleet-nerve" -a "$key_name" -w 2>/dev/null) || true
       [ -n "$existing" ] && continue
 
-      local aws_val
+      # Try AWS SM with both generic and legacy secret names
+      local aws_val=""
       aws_val=$(aws secretsmanager get-secret-value --secret-id "$key_name" --query 'SecretString' --output text 2>/dev/null) || true
+      if [ -z "$aws_val" ]; then
+        aws_val=$(aws secretsmanager get-secret-value --secret-id "$legacy_name" --query 'SecretString' --output text 2>/dev/null) || true
+      fi
       if [ -n "$aws_val" ]; then
         security delete-generic-password -s "fleet-nerve" -a "$key_name" 2>/dev/null || true
         security add-generic-password -s "fleet-nerve" -a "$key_name" -w "$aws_val" 2>/dev/null || true
         export "$key_name=$aws_val"
+        export "$legacy_name=$aws_val"  # backward compat
         emit "[FLEET] Refreshed ${key_name} from AWS Secrets Manager → Keychain"
       fi
     done
@@ -406,7 +459,9 @@ except: pass
         port="${host##*:}"
         host="${host%%:*}"
         user_host="${peer%%:*}"
-        if ssh -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no \
+        # accept-new: trusts first connection (TOFU), rejects changed keys (MITM defense).
+        # Override with FLEET_SSH_STRICT=no if host keys rotate frequently.
+        if ssh -o ConnectTimeout=2 -o BatchMode=yes -o "StrictHostKeyChecking=${FLEET_SSH_STRICT:-accept-new}" \
              -p "$port" "$user_host" "echo ok" &>/dev/null; then
           ssh_ok=1
           break

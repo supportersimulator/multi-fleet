@@ -19,6 +19,14 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 
+# ── Pytest markers ──
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "unit: fast, isolated unit tests (no I/O, no network)")
+    config.addinivalue_line("markers", "integration: tests that require running services (daemon, NATS, etc.)")
+    config.addinivalue_line("markers", "security: security-focused tests (HMAC, validation, sanitization)")
+
+
 # ── Sample config data ──
 
 SAMPLE_JSON_CONFIG = {

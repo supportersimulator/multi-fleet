@@ -1,0 +1,42 @@
+{
+  "fleetId": "cloud-fleet",
+  "nodes": {
+    "home-mac": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "alice",
+      "role": "worker"
+    },
+    "office-mac": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "bob",
+      "role": "worker"
+    },
+    "cloud-chief": {
+      "host": "chief.example.com",
+      "port": 8844,
+      "user": "deploy",
+      "role": "chief"
+    }
+  },
+  "nats": {
+    "server": "nats://chief.example.com:4222",
+    "credentials_file": "~/.multifleet/nats.creds",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": []
+  },
+  "chief": {
+    "url": "http://chief.example.com:8844",
+    "api_key_env": "FLEET_CHIEF_API_KEY"
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}

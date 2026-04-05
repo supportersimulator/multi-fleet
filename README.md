@@ -30,15 +30,17 @@ Multi-Fleet is the first LLM-native fleet coordination system. Every node is ind
 
 ```bash
 # 1. Configure your fleet
-cp multi-fleet/config/config.template.json .multifleet/config.json
+cp config/config.template.json .multifleet/config.json
 # Edit config.json -- add one entry per machine
 
 # 2. Set your node identity and start
 export MULTIFLEET_NODE_ID=mac2
-python3 tools/fleet_nerve_nats.py serve
+python3 bin/fleet_nerve_mcp.py
 
-# 3. Send a message
-python3 tools/fleet_nerve_send.py mac1 "Hello from mac2"
+# 3. Send a message (via MCP tools or direct HTTP)
+curl -X POST http://127.0.0.1:8855/message \
+  -H "Content-Type: application/json" \
+  -d '{"type":"context","to":"mac1","payload":{"body":"Hello from mac2"}}'
 ```
 
 That's it. The plugin auto-discovers skills, commands, hooks, and agents from `plugin.json`. Self-healing starts immediately.

@@ -1,0 +1,32 @@
+{
+  "fleetId": "home-lan",
+  "nodes": {
+    "mac1": {
+      "host": "192.168.1.10",
+      "port": 8855,
+      "user": "alice",
+      "role": "chief"
+    },
+    "mac2": {
+      "host": "192.168.1.11",
+      "port": 8855,
+      "user": "bob",
+      "role": "worker"
+    }
+  },
+  "nats": {
+    "server": "nats://192.168.1.10:4222",
+    "credentials_file": "",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": []
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}

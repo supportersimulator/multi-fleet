@@ -42,6 +42,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# Superrepo fallback: if running inside the superrepo, also add its root
+# so that `tools.*` imports work for modules not yet in the multifleet package.
+_SUPERREPO_ROOT = REPO_ROOT.parent
+if (_SUPERREPO_ROOT / "tools").is_dir():
+    sys.path.insert(1, str(_SUPERREPO_ROOT))
+
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
 
 
@@ -60,10 +66,15 @@ def _get_node_id() -> str:
     if env:
         return env
     try:
-        from tools.fleet_nerve_config import detect_node_id
+        from multifleet.config import detect_node_id
         return detect_node_id()
-    except Exception:
-        return socket.gethostname().split(".")[0].lower()
+    except ImportError:
+        try:
+            from tools.fleet_nerve_config import detect_node_id
+            return detect_node_id()
+        except Exception:
+            pass
+    return socket.gethostname().split(".")[0].lower()
 
 
 def _http_probe(url: str, timeout: int = 3) -> dict:
@@ -112,7 +123,10 @@ def _resolve_host(target: str) -> tuple:
     if not host:
         # Try load_peers fallback
         try:
-            from tools.fleet_nerve_config import load_peers
+            try:
+                from multifleet.config import load_peers
+            except ImportError:
+                from tools.fleet_nerve_config import load_peers
             peers, _ = load_peers()
             peer = peers.get(target, {})
             host = peer.get("ip", "")
@@ -125,7 +139,10 @@ def _resolve_host(target: str) -> tuple:
 def _surgeon_status() -> dict:
     """Check surgeon availability on this node."""
     try:
-        from tools.multifleet_coordinator import surgeon_status
+        try:
+            from multifleet.coordinator import surgeon_status
+        except ImportError:
+            from tools.multifleet_coordinator import surgeon_status
         return surgeon_status()
     except Exception as e:
         return {"error": str(e)}
@@ -133,7 +150,10 @@ def _surgeon_status() -> dict:
 
 def _get_nats_instance():
     """Get or create a FleetNerveNATS instance for async operations."""
-    from tools.fleet_nerve_nats import FleetNerveNATS
+    try:
+        from multifleet.nats_client import FleetNerveNATS
+    except ImportError:
+        from tools.fleet_nerve_nats import FleetNerveNATS
     return FleetNerveNATS(node_id=_get_node_id())
 
 
@@ -251,7 +271,10 @@ def fleet_send(target: str, type: str = "context", subject: str = "", body: str 
     except Exception as e:
         # Fallback: try direct HTTP if NATS unavailable
         try:
-            from tools.fleet_nerve_config import load_peers
+            try:
+                from multifleet.config import load_peers
+            except ImportError:
+                from tools.fleet_nerve_config import load_peers
             peers, _ = load_peers()
             peer = peers.get(target)
             if not peer:
@@ -337,7 +360,10 @@ def fleet_worker_dispatch(target: str, task: str, timeout: str = "300") -> dict:
     timeout_int = int(timeout)
 
     try:
-        from tools.fleet_remote_worker import FleetWorkerManager
+        try:
+            from multifleet.worker import FleetWorkerManager
+        except ImportError:
+            from tools.fleet_remote_worker import FleetWorkerManager
         mgr = FleetWorkerManager()
         actual_target = target if target != "local" else mgr.node_id
         result = _run_async(mgr.dispatch(actual_target, task, timeout=timeout_int))
@@ -395,7 +421,10 @@ def fleet_status() -> dict:
     # Packet store summary (chief only)
     packet_summary = {}
     try:
-        from tools.multifleet_packet_store import PacketStore
+        try:
+            from multifleet.packet_store import PacketStore
+        except ImportError:
+            from tools.multifleet_packet_store import PacketStore
         store = PacketStore()
         packet_summary = store.fleet_summary()
     except Exception:
@@ -451,7 +480,10 @@ def fleet_dashboard() -> dict:
 
     # Try visual formatter if available
     try:
-        from tools.fleet_nerve_visual import fleet_status_table, fleet_activity_summary
+        try:
+            from multifleet.visual import fleet_status_table, fleet_activity_summary
+        except ImportError:
+            from tools.fleet_nerve_visual import fleet_status_table, fleet_activity_summary
         nodes_list = [{"name": n, **info} for n, info in nodes_data.items()]
         dashboard["formatted_table"] = fleet_status_table(nodes_list)
         dashboard["formatted_summary"] = fleet_activity_summary(nodes_list)
@@ -543,7 +575,10 @@ def fleet_wake(target: str) -> dict:
     import subprocess
 
     try:
-        from tools.fleet_nerve_config import load_peers
+        try:
+            from multifleet.config import load_peers
+        except ImportError:
+            from tools.fleet_nerve_config import load_peers
         peers, _ = load_peers()
     except Exception as e:
         return {"error": f"Cannot load peer config: {e}"}
@@ -803,7 +838,10 @@ def fleet_discover() -> dict:
 
     # Source 2: Peer registry
     try:
-        from tools.fleet_nerve_config import load_peers
+        try:
+            from multifleet.config import load_peers
+        except ImportError:
+            from tools.fleet_nerve_config import load_peers
         peers, chief = load_peers()
         for name, peer in peers.items():
             if name in discovered:

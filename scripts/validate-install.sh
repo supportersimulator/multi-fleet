@@ -182,8 +182,8 @@ separator "Secrets"
 SECRET_FOUND=""
 SECRET_SOURCE=""
 
-# Check env vars (common names)
-for var in OPENAI_API_KEY Context_DNA_OPENAI; do
+# Check env vars (generic names first, then legacy names for backward compat)
+for var in FLEET_OPENAI_API_KEY OPENAI_API_KEY Context_DNA_OPENAI; do
   if [ -n "${!var:-}" ]; then
     SECRET_FOUND="yes"
     SECRET_SOURCE="env ($var)"
@@ -191,9 +191,9 @@ for var in OPENAI_API_KEY Context_DNA_OPENAI; do
   fi
 done
 
-# Check macOS Keychain
+# Check macOS Keychain (generic + legacy names)
 if [ -z "$SECRET_FOUND" ] && command -v security &>/dev/null; then
-  for keyname in Context_DNA_OPENAI fleet-nerve-openai OPENAI_API_KEY; do
+  for keyname in FLEET_OPENAI_API_KEY fleet-nerve-openai Context_DNA_OPENAI OPENAI_API_KEY; do
     if security find-generic-password -s "$keyname" -w &>/dev/null; then
       SECRET_FOUND="yes"
       SECRET_SOURCE="keychain ($keyname)"
@@ -202,18 +202,21 @@ if [ -z "$SECRET_FOUND" ] && command -v security &>/dev/null; then
   done
 fi
 
-# Check AWS Secrets Manager (existence only, no fetch)
+# Check AWS Secrets Manager (existence only, no fetch — try generic then legacy)
 if [ -z "$SECRET_FOUND" ] && command -v aws &>/dev/null; then
-  if aws secretsmanager describe-secret --secret-id Context_DNA_OPENAI &>/dev/null 2>&1; then
-    SECRET_FOUND="yes"
-    SECRET_SOURCE="AWS Secrets Manager"
-  fi
+  for secret_id in FLEET_OPENAI_API_KEY Context_DNA_OPENAI; do
+    if aws secretsmanager describe-secret --secret-id "$secret_id" &>/dev/null 2>&1; then
+      SECRET_FOUND="yes"
+      SECRET_SOURCE="AWS Secrets Manager ($secret_id)"
+      break
+    fi
+  done
 fi
 
 if [ -n "$SECRET_FOUND" ]; then
   pass "OpenAI API key available via ${SECRET_SOURCE}"
 else
-  fail "No OpenAI API key found -- set OPENAI_API_KEY, add to keychain, or configure AWS SM"
+  fail "No OpenAI API key found -- set FLEET_OPENAI_API_KEY (or OPENAI_API_KEY), add to keychain, or configure AWS SM"
 fi
 
 # ----------------------------------------------------------
