@@ -12,24 +12,55 @@ if [ -z "$NODE_ID" ]; then
   exit 1
 fi
 SEED_FILE="/tmp/fleet-seed-${NODE_ID}.md"
+# Session-specific seed file — CLAUDE_SESSION_ID is set by Claude Code runtime
+SESSION_SEED_FILE=""
+if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+  # Sanitize session ID — alphanumeric, dash, underscore only
+  _SAFE_SID=$(echo "$CLAUDE_SESSION_ID" | tr -cd 'a-zA-Z0-9_-')
+  if [ -n "$_SAFE_SID" ]; then
+    SESSION_SEED_FILE="/tmp/fleet-seed-${_SAFE_SID}.md"
+  fi
+fi
 SEED_ARCHIVE="/tmp/fleet-seed-archive"
 WORKER_RESULTS="/tmp/fleet-worker-results"
 DAEMON_URL="http://127.0.0.1:8855"
 
 # --- Shared helpers ---
 
-check_seed_inbox() {
-  if [ -f "$SEED_FILE" ] && [ -s "$SEED_FILE" ]; then
-    echo "[FLEET INBOX] Messages for ${NODE_ID}:"
+_read_and_archive_seed() {
+  # Helper: read a seed file, print contents, archive it.
+  # Args: $1 = seed file path, $2 = label for log output
+  local seed_path="$1"
+  local label="${2:-seed}"
+  if [ -f "$seed_path" ] && [ -s "$seed_path" ]; then
+    echo "[FLEET INBOX] Messages for ${label}:"
     echo "---"
-    cat "$SEED_FILE"
+    cat "$seed_path"
     echo "---"
     # Archive the seed file
     mkdir -p "$SEED_ARCHIVE"
-    mv "$SEED_FILE" "${SEED_ARCHIVE}/fleet-seed-${NODE_ID}-$(date +%s).md"
+    mv "$seed_path" "${SEED_ARCHIVE}/$(basename "$seed_path" .md)-$(date +%s).md"
     return 0
   fi
   return 1
+}
+
+check_seed_inbox() {
+  local found=1
+
+  # Priority 1: Session-specific seed file (per-session targeting)
+  if [ -n "$SESSION_SEED_FILE" ]; then
+    if _read_and_archive_seed "$SESSION_SEED_FILE" "session ${_SAFE_SID:-unknown}"; then
+      found=0
+    fi
+  fi
+
+  # Priority 2: Node-level seed file (legacy fallback / broadcasts)
+  if _read_and_archive_seed "$SEED_FILE" "node ${NODE_ID}"; then
+    found=0
+  fi
+
+  return $found
 }
 
 check_worker_results() {

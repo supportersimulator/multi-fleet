@@ -1,0 +1,67 @@
+{
+  "name": "multi-fleet",
+  "displayName": "Multi-Fleet",
+  "description": "Cross-machine AI collaboration \u2014 real-time peer-to-peer messaging, session-aware task agents, and fleet-wide productivity visibility across multiple Claude Code instances",
+  "version": "2.0.0",
+  "ide": "cursor",
+  "mcpServers": {
+    "fleet-nerve": {
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/multi-fleet/tools/fleet_nerve_mcp.py"
+      ],
+      "env": {
+        "MULTIFLEET_NODE_ID": "",
+        "FLEET_NERVE_PORT": "8855"
+      }
+    }
+  },
+  "tools": [
+    "using_multi_fleet",
+    "fleet_send",
+    "fleet_status",
+    "fleet_task",
+    "fleet_wake",
+    "fleet_repair",
+    "fleet_tunnel",
+    "fleet_watchdog",
+    "fleet_check",
+    "fleet_worker",
+    "productivity_view",
+    "cmd_fleet_check",
+    "cmd_fleet_dashboard",
+    "cmd_fleet_repair",
+    "cmd_fleet_send",
+    "cmd_fleet_status",
+    "cmd_fleet_task",
+    "cmd_fleet_tunnel",
+    "cmd_fleet_wake",
+    "cmd_fleet_watchdog",
+    "cmd_fleet_worker"
+  ],
+  "skills": [
+    "using-multi-fleet",
+    "fleet-send",
+    "fleet-status",
+    "fleet-task",
+    "fleet-wake",
+    "fleet-repair",
+    "fleet-tunnel",
+    "fleet-watchdog",
+    "fleet-check",
+    "fleet-worker",
+    "productivity-view"
+  ],
+  "commands": [
+    "fleet-check",
+    "fleet-dashboard",
+    "fleet-repair",
+    "fleet-send",
+    "fleet-status",
+    "fleet-task",
+    "fleet-tunnel",
+    "fleet-wake",
+    "fleet-watchdog",
+    "fleet-worker"
+  ]
+}
