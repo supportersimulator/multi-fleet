@@ -67,16 +67,32 @@ start_daemon_if_needed() {
   done
 
   if [ -n "$daemon_script" ]; then
+    # Load API keys + fleet env before starting daemon
+    if [ -f "$HOME/.fleet-nerve/env" ]; then
+      export $(grep -v '^#' "$HOME/.fleet-nerve/env" | grep '=' | xargs) 2>/dev/null
+    fi
+    # Auto-detect NATS URL (SSH tunnel or direct)
+    if lsof -i :4222 -sTCP:LISTEN >/dev/null 2>&1; then
+      export NATS_URL="nats://127.0.0.1:4222"
+    fi
+    # Set node ID
+    export MULTIFLEET_NODE_ID="${NODE_ID}"
+    # Start daemon with full env
     nohup python3 "$daemon_script" serve >/tmp/fleet-daemon-${NODE_ID}.log 2>&1 &
-    # Give it a moment to bind
+    # Give it a moment to bind + connect NATS
+    sleep 2
+    if daemon_is_running; then
+      emit "[FLEET] Daemon started (node=${NODE_ID}, nats=${NATS_URL:-auto})"
+      return 0
+    fi
     sleep 1
     if daemon_is_running; then
-      emit "[FLEET] Daemon started on port 8855"
+      emit "[FLEET] Daemon started (slow start)"
       return 0
     fi
   fi
 
-  emit "[FLEET] Daemon not running — start with: python3 tools/fleet_nerve_nats.py serve"
+  emit "[FLEET] Daemon not running -- start with: python3 tools/fleet_nerve_nats.py serve"
   return 1
 }
 
