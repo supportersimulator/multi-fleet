@@ -81,6 +81,31 @@ When dispatching work, respect the priority cascade:
 
 Lower-priority work yields to higher-priority. Never dispatch P4+ work to a node actively handling P1/P2.
 
+## Fleet Comms Agent Integration
+
+When a dedicated Fleet Comms Agent is running (check `/tmp/fleet-comms-agent.pid`), the coordinator's role shifts:
+
+### What the comms agent handles (coordinator defers)
+- **Inbox monitoring** — comms agent owns all inbox reads (seed, daemon, git, worker results)
+- **Self-healing** — comms agent triggers channel repair autonomously
+- **Health polling** — comms agent maintains the summary file with live fleet status
+- **Message delivery** — comms agent delivers outbox messages through the 8-priority cascade
+
+### What the coordinator retains
+- **Task dispatch strategy** — deciding WHAT to dispatch WHERE (comms agent handles HOW)
+- **Result synthesis** — reading pre-digested summaries from `/tmp/fleet-comms-summary.md`
+- **Consensus decisions** — voting on fleet-wide decisions escalated by comms agent
+- **Repair escalation** — only when comms agent cannot self-heal (level 3-4 escalation)
+
+### Communication with comms agent
+- **Read:** `/tmp/fleet-comms-summary.md` (updated every 30s)
+- **Write:** `/tmp/fleet-outbox-<node>/` (comms agent picks up and delivers)
+- **Urgent inbound:** Comms agent writes `[FLEET-URGENT]` seeds for items requiring coordinator attention
+- **Status:** `curl -sf http://127.0.0.1:8855/comms-agent/status` (when daemon endpoint available)
+
+### Fallback (no comms agent)
+If comms agent PID is missing or stale, coordinator reverts to direct inbox/health/delivery operations as documented above. Zero functionality lost — just higher context cost.
+
 ## Rules
 
 - Never hardcode IPs, secrets, or node names — use `$MULTIFLEET_NODE_ID` and fleet discovery

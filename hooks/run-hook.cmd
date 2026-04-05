@@ -80,26 +80,75 @@ start_daemon_if_needed() {
   return 1
 }
 
+validate_seed_file() {
+  # Security: validate seed file before reading
+  # - Must be a regular file (not symlink to outside /tmp)
+  # - Owned by current user (prevent symlink attacks)
+  # - Max 50KB
+  local file="$1"
+  [ -f "$file" ] || return 1
+  [ -s "$file" ] || return 1
+
+  # Reject symlinks pointing outside /tmp
+  if [ -L "$file" ]; then
+    local target
+    target=$(readlink -f "$file" 2>/dev/null) || return 1
+    case "$target" in
+      /tmp/*) ;; # OK
+      *) echo "[FLEET] SECURITY: seed file symlink outside /tmp: $file" >&2; return 1 ;;
+    esac
+  fi
+
+  # Check ownership — must be current user
+  local file_owner
+  file_owner=$(stat -f '%u' "$file" 2>/dev/null || stat -c '%u' "$file" 2>/dev/null) || return 1
+  if [ "$file_owner" != "$(id -u)" ]; then
+    echo "[FLEET] SECURITY: seed file not owned by current user: $file" >&2
+    return 1
+  fi
+
+  # Check size — max 50KB
+  local file_size
+  file_size=$(stat -f '%z' "$file" 2>/dev/null || stat -c '%s' "$file" 2>/dev/null) || return 1
+  if [ "$file_size" -gt 51200 ]; then
+    echo "[FLEET] SECURITY: seed file too large (${file_size}B > 50KB): $file" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+sanitize_seed_content() {
+  # Strip ANSI escape sequences and null bytes from seed file content
+  # Prevents terminal injection when content is displayed
+  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\x00//g'
+}
+
 check_seed_inbox() {
   local found=1
-  # Check file-based seed
-  if [ -f "$SEED_FILE" ] && [ -s "$SEED_FILE" ]; then
+  # Check file-based seed (with security validation)
+  if validate_seed_file "$SEED_FILE"; then
     emit "[FLEET INBOX] Messages for ${NODE_ID}:"
     emit "---"
-    emit "$(cat "$SEED_FILE")"
+    emit "$(sanitize_seed_content < "$SEED_FILE")"
     emit "---"
     mkdir -p "$SEED_ARCHIVE"
     mv "$SEED_FILE" "${SEED_ARCHIVE}/fleet-seed-${NODE_ID}-$(date +%s).md"
     found=0
   fi
 
-  # Check git-based inbox
+  # Check git-based inbox (with security validation per file)
   if [ -d "$GIT_INBOX" ] && [ "$(ls -A "$GIT_INBOX" 2>/dev/null)" ]; then
     local count
     count=$(ls -1 "$GIT_INBOX" | wc -l | tr -d ' ')
     emit "[FLEET GIT INBOX] ${count} git message(s):"
     for f in "$GIT_INBOX"/*; do
-      emit "  $(basename "$f"): $(head -1 "$f")"
+      # Validate each file before reading
+      if validate_seed_file "$f"; then
+        emit "  $(basename "$f"): $(head -1 "$f" | sanitize_seed_content)"
+      else
+        emit "  $(basename "$f"): [SKIPPED — failed validation]"
+      fi
     done
     mkdir -p "$SEED_ARCHIVE"
     mv "$GIT_INBOX"/* "${SEED_ARCHIVE}/" 2>/dev/null || true
