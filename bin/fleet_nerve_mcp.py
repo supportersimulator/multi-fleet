@@ -1163,7 +1163,7 @@ def handle_request(request: dict) -> dict:
         return {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "fleet-nerve", "version": "2.0.0"},
+            "serverInfo": {"name": "fleet-nerve", "version": "3.1.0"},
         }
 
     if method == "tools/list":
