@@ -26,6 +26,19 @@
         ]
       }
     ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' session-start",
+            "async": false,
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
     "TeammateIdle": [
       {
         "matcher": "",
