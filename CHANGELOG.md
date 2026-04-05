@@ -2,6 +2,31 @@
 
 All notable changes to Multi-Fleet are documented here.
 
+## [3.0.0] - 2026-04-05
+
+Major release: chain orchestration, dispatch gates, security hardening, and 5 new skills.
+
+### Added
+- 5 new skills: fleet-config-gate, fleet-dispatch-gate, fleet-healer, fleet-post-verification, fleet-protocol (16 total)
+- 2 new commands: fleet-chain (multi-step task chains), fleet-dispatch (gated task dispatch)
+- Chain orchestration — sequential multi-node task pipelines with automatic step tracking
+- Dispatch gate — pre-flight safety checks before sending work to remote nodes
+- Config gate — blast radius verification before fleet configuration changes
+- Post-verification gate — health and connectivity checks before claiming fleet work complete
+- Fleet protocol skill — self-healing communication invariant with channel priority and repair escalation
+- Fleet healer skill — background agents that automatically heal broken communication channels
+- Seed file security validation (ownership, size limits, symlink attack prevention)
+- Content sanitization (ANSI escape stripping) for seed file ingestion
+- API key management via macOS Keychain with AWS Secrets Manager fallback
+
+### Changed
+- Bumped version to 3.0.0 across plugin.json, package.json, marketplace.json
+- Fixed duplicate SessionStart key in hooks.json (JSON only keeps last occurrence)
+- Marketplace skills list now includes all 16 skills (was 11)
+
+### Fixed
+- hooks.json had duplicate SessionStart entries — consolidated to single entry with empty matcher
+
 ## [2.0.0] - 2026-04-05
 
 Major release: production-ready cross-machine AI collaboration.

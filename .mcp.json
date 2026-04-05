@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "fleet-nerve": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/fleet-nerve-mcp",
-      "args": [],
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/fleet_nerve_mcp.py"],
       "env": {
         "MULTIFLEET_NODE_ID": "",
         "FLEET_NERVE_PORT": "8855"

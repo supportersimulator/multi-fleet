@@ -1,11 +1,11 @@
 {
   "name": "multi-fleet",
   "displayName": "Multi-Fleet",
-  "description": "Cross-machine AI collaboration \u2014 real-time peer-to-peer messaging, session-aware task agents, and fleet-wide productivity visibility across multiple Claude Code instances",
-  "version": "2.0.0",
+  "description": "Cross-machine AI collaboration — real-time peer-to-peer messaging, chain orchestration, dispatch gates, session-aware task agents, and fleet-wide productivity visibility across multiple Claude Code instances",
+  "version": "3.0.0",
   "author": {
     "name": "Aaron Tjomsland",
-    "email": "multifleet@example.com"
+    "email": "contextdna@users.noreply.github.com"
   },
   "homepage": "https://github.com/supportersimulator/er-simulator-superrepo",
   "repository": "https://github.com/supportersimulator/er-simulator-superrepo",
@@ -17,7 +17,9 @@
     "multi-machine",
     "peer-to-peer",
     "real-time",
-    "productivity"
+    "productivity",
+    "chain-orchestration",
+    "dispatch"
   ],
   "skills": "./skills/",
   "agents": "./agents/",

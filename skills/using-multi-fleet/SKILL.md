@@ -148,7 +148,7 @@ Concretely:
 | `sync` | Silent state bookkeeping | No |
 | `broadcast` | Seed file on all nodes | No |
 
-## All 12 Skills
+## All 17 Skills
 
 | Skill | What It Does | When to Invoke |
 |-------|-------------|----------------|
@@ -156,6 +156,11 @@ Concretely:
 | **fleet-protocol** | CORE — self-healing communication invariant, channel priority (P0-P7), repair escalation, idle productivity, secrets protection. | Understanding how fleet communication works, debugging delivery, adding channels |
 | **fleet-send** | Send a message (context, task, alert, broadcast) to another machine. | Need to communicate with another node |
 | **fleet-task** | Dispatch autonomous work to another machine with session-aware agents. | Need work done on another node without human interaction |
+| **fleet-chain** | Chain orchestration — multi-step task dependencies with automatic sequencing across nodes. | Multi-node pipelines, ordered deployments, sequential workflows |
+| **fleet-dispatch** | Remote worker dispatch with tracked lifecycle and result polling. | Delegating tasks where you need delivery confirmation and result tracking |
+| **fleet-ack** | Delivery confirmation protocol — ACK tracking, retry on timeout, failure alerting. | Verifying message delivery, debugging undelivered tasks, tuning retry timing |
+| **fleet-idle** | Productive idle protocol — automatic work discovery when nodes are idle. | Checking suggested work, tuning idle thresholds, understanding suggestions |
+| **fleet-security** | HMAC signing, replay prevention, peer validation, session gold sanitization. | Setting up fleet auth, debugging rejected messages, auditing security posture |
 | **fleet-status** | Quick health check: who's online, idle, working. | Before dispatching work, checking connectivity |
 | **fleet-check** | Run the full 7-channel communication test to a target. | Diagnosing delivery failures, verifying setup |
 | **fleet-repair** | 4-level repair escalation for broken channels (notify, guide, assist, remote). | Channels are broken, self-healing triggered |
