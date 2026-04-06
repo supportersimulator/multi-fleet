@@ -280,17 +280,18 @@ def fleet_send(target: str, type: str = "context", subject: str = "", body: str 
         body: message body
         use_cloud: if True, try P0 cloud channel first (before local channels)
     """
-    import uuid
+    from multifleet.packet_registry import create_envelope
 
     node_id = _get_node_id()
-    message = {
-        "id": str(uuid.uuid4()),
-        "type": type,
-        "from": node_id,
-        "to": target,
-        "payload": {"subject": subject or body[:60], "body": body},
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+    message = create_envelope(
+        from_node=node_id,
+        to=target,
+        type=type,
+        payload={"subject": subject or body[:60], "body": body},
+    )
+    # Backward compat: daemon reads "from"/"to", envelope has "from_node"/"to_node"
+    message["from"] = message["from_node"]
+    message["to"] = message["to_node"]
 
     async def _do_send():
         nerve = _get_nats_instance()
@@ -823,21 +824,21 @@ def fleet_relay(target: str, type: str = "context", subject: str = "", body: str
         body: message body
         priority: message priority (1=highest, 5=lowest, default 2)
     """
-    import uuid
+    from multifleet.packet_registry import create_envelope
 
     node_id = _get_node_id()
     config = _load_config()
     chief_id = config.get("chief", {}).get("nodeId", "")
 
-    message = {
-        "id": str(uuid.uuid4()),
-        "type": type,
-        "from": node_id,
-        "to": target,
-        "priority": priority,
-        "payload": {"subject": subject or body[:60], "body": body},
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+    message = create_envelope(
+        from_node=node_id,
+        to=target,
+        type=type,
+        payload={"subject": subject or body[:60], "body": body},
+    )
+    message["from"] = message["from_node"]
+    message["to"] = message["to_node"]
+    message["priority"] = priority
 
     # Route to chief for relay
     chief_host, chief_port = _resolve_host(chief_id) if chief_id else ("127.0.0.1", 8855)
@@ -951,18 +952,18 @@ def fleet_send_smart(target: str, type: str = "context", subject: str = "", body
         body: message body
         priority: message priority (1=highest, 5=lowest, default 2)
     """
-    import uuid
+    from multifleet.packet_registry import create_envelope
 
     node_id = _get_node_id()
-    message = {
-        "id": str(uuid.uuid4()),
-        "type": type,
-        "from": node_id,
-        "to": target,
-        "priority": priority,
-        "payload": {"subject": subject or body[:60], "body": body},
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+    message = create_envelope(
+        from_node=node_id,
+        to=target,
+        type=type,
+        payload={"subject": subject or body[:60], "body": body},
+    )
+    message["from"] = message["from_node"]
+    message["to"] = message["to_node"]
+    message["priority"] = priority
 
     # Route through local daemon's /send-smart endpoint
     result = _daemon_post("/send-smart", {
