@@ -33,7 +33,7 @@ class TestMCPProtocol:
     def test_tools_list_returns_all_tools(self):
         result = handle_request({"method": "tools/list", "id": 2})
         tools = result["tools"]
-        assert len(tools) == 18
+        assert len(tools) >= 18  # Grows as features are added (25 as of fleet_race)
         names = {t["name"] for t in tools}
         # Original 6 + 12 added tools
         assert names >= {
