@@ -26,6 +26,17 @@ JSONL_FALLBACK = Path(
 # Cache the EventBus availability check for this many seconds
 _AVAILABILITY_CACHE_TTL_S = 30.0
 
+# JSONL size management
+MAX_JSONL_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_JSONL_ROTATIONS = 2  # keep .jsonl.1 and .jsonl.2
+
+# Events that should be broadcast to all fleet nodes
+_BROADCAST_EVENT_TYPES = frozenset({
+    "peer.online", "peer.offline",
+    "lease.acquired", "lease.released",
+    "health.degraded",
+})
+
 
 class FleetEventBus:
     """Publishes fleet events to the 3-surgeons EventBus or JSONL fallback.
@@ -35,23 +46,29 @@ class FleetEventBus:
     (no blocking I/O longer than the HTTP timeout).
     """
 
-    def __init__(self, node_id: str):
+    def __init__(self, node_id: str, daemon_port: int = 8855):
         self._node_id = node_id
+        self._daemon_port = daemon_port
         self._eventbus_available: Optional[bool] = None  # None = unknown
         self._last_availability_check: float = 0.0
         self._stats = {
             "emitted": 0,
             "eventbus_delivered": 0,
             "jsonl_fallback": 0,
+            "broadcast_sent": 0,
             "errors": 0,
         }
 
     # ── Core emit ──
 
-    def emit(self, event_type: str, payload: dict, correlation_id: str = None) -> bool:
+    def emit(self, event_type: str, payload: dict, correlation_id: str = None,
+             broadcast: bool = False) -> bool:
         """Emit a fleet.* event.
 
         Tries 3-surgeons EventBus first, falls back to JSONL.
+        If broadcast=True (or event_type is in _BROADCAST_EVENT_TYPES),
+        also sends the event to all fleet nodes via the daemon broadcast endpoint.
+
         Returns True if event was recorded somewhere.
         """
         event = {
@@ -73,20 +90,31 @@ class FleetEventBus:
         try:
             if self._try_eventbus(event):
                 self._stats["eventbus_delivered"] += 1
-                return True
+                recorded = True
+            else:
+                recorded = False
         except Exception as exc:
             logger.debug("EventBus delivery failed: %s", exc)
+            recorded = False
 
         # Fallback to JSONL
-        try:
-            if self._write_jsonl(event):
-                self._stats["jsonl_fallback"] += 1
-                return True
-        except Exception as exc:
-            logger.warning("JSONL fallback also failed: %s", exc)
+        if not recorded:
+            try:
+                if self._write_jsonl(event):
+                    self._stats["jsonl_fallback"] += 1
+                    recorded = True
+            except Exception as exc:
+                logger.warning("JSONL fallback also failed: %s", exc)
 
-        self._stats["errors"] += 1
-        return False
+        if not recorded:
+            self._stats["errors"] += 1
+
+        # Broadcast important events to fleet
+        should_broadcast = broadcast or event_type in _BROADCAST_EVENT_TYPES
+        if should_broadcast:
+            self._broadcast_to_fleet(event)
+
+        return recorded
 
     # ── EventBus transport ──
 
@@ -133,11 +161,82 @@ class FleetEventBus:
         except Exception:
             return False
 
+    # ── Fleet broadcast ──
+
+    def _broadcast_to_fleet(self, event: dict):
+        """Send event to all fleet nodes via daemon broadcast endpoint.
+
+        Best-effort: failure is logged but does not affect the return value of emit().
+        Only used for important cross-node events (peer status, leases, health).
+        """
+        payload = json.dumps({
+            "type": "event_broadcast",
+            "payload": event,
+        }).encode("utf-8")
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{self._daemon_port}/broadcast",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            resp = urllib.request.urlopen(req, timeout=3)
+            if 200 <= resp.status < 300:
+                self._stats["broadcast_sent"] += 1
+                logger.debug("Broadcast event %s to fleet", event.get("type", "?"))
+            else:
+                logger.debug("Broadcast returned status %d", resp.status)
+        except Exception as exc:
+            logger.debug("Fleet broadcast failed (non-fatal): %s", exc)
+
     # ── JSONL fallback ──
 
+    def _rotate_jsonl(self):
+        """Rotate JSONL file if it exceeds MAX_JSONL_SIZE.
+
+        Keeps up to MAX_JSONL_ROTATIONS rotated files (.jsonl.1, .jsonl.2).
+        """
+        try:
+            if not JSONL_FALLBACK.exists():
+                return
+            size = JSONL_FALLBACK.stat().st_size
+            if size < MAX_JSONL_SIZE:
+                return
+        except OSError:
+            return
+
+        # Shift existing rotations: .jsonl.2 -> delete, .jsonl.1 -> .jsonl.2, current -> .jsonl.1
+        for i in range(MAX_JSONL_ROTATIONS, 0, -1):
+            rotated = JSONL_FALLBACK.parent / f"{JSONL_FALLBACK.name}.{i}"
+            if i == MAX_JSONL_ROTATIONS:
+                # Delete the oldest
+                try:
+                    rotated.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if i > 1:
+                prev = JSONL_FALLBACK.parent / f"{JSONL_FALLBACK.name}.{i - 1}"
+                if prev.exists():
+                    try:
+                        prev.rename(rotated)
+                    except OSError:
+                        pass
+
+        # Move current to .jsonl.1
+        first_rotation = JSONL_FALLBACK.parent / f"{JSONL_FALLBACK.name}.1"
+        try:
+            JSONL_FALLBACK.rename(first_rotation)
+        except OSError:
+            pass
+        logger.info("Rotated JSONL fallback (was %d bytes)", size)
+
     def _write_jsonl(self, event: dict) -> bool:
-        """Append one JSON line to the JSONL fallback file."""
+        """Append one JSON line to the JSONL fallback file.
+
+        Rotates the file if it exceeds MAX_JSONL_SIZE before writing.
+        """
         JSONL_FALLBACK.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_jsonl()
         with open(JSONL_FALLBACK, "a") as f:
             f.write(json.dumps(event, separators=(",", ":")) + "\n")
         return True
@@ -145,31 +244,31 @@ class FleetEventBus:
     # ── Convenience methods for common fleet events ──
 
     def peer_online(self, peer_id: str, sessions: int = 0):
-        """Emit fleet.peer.online event."""
-        self.emit("peer.online", {"peer_id": peer_id, "sessions": sessions})
+        """Emit fleet.peer.online event (broadcast to fleet)."""
+        self.emit("peer.online", {"peer_id": peer_id, "sessions": sessions}, broadcast=True)
 
     def peer_offline(self, peer_id: str, last_seen_s: float = 0):
-        """Emit fleet.peer.offline event."""
-        self.emit("peer.offline", {"peer_id": peer_id, "last_seen_s": last_seen_s})
+        """Emit fleet.peer.offline event (broadcast to fleet)."""
+        self.emit("peer.offline", {"peer_id": peer_id, "last_seen_s": last_seen_s}, broadcast=True)
 
     def message_sent(self, target: str, channel: str, msg_type: str, elapsed_s: float):
-        """Emit fleet.message.sent event."""
+        """Emit fleet.message.sent event (local only — high frequency)."""
         self.emit(
             "message.sent",
             {"target": target, "channel": channel, "type": msg_type, "elapsed_s": elapsed_s},
         )
 
     def message_received(self, from_node: str, msg_type: str):
-        """Emit fleet.message.received event."""
+        """Emit fleet.message.received event (local only — high frequency)."""
         self.emit("message.received", {"from": from_node, "type": msg_type})
 
     def lease_changed(self, resource_id: str, action: str, holder: str):
-        """Emit fleet.lease.acquired or fleet.lease.released."""
-        self.emit(f"lease.{action}", {"resource_id": resource_id, "holder": holder})
+        """Emit fleet.lease.acquired or fleet.lease.released (broadcast to fleet)."""
+        self.emit(f"lease.{action}", {"resource_id": resource_id, "holder": holder}, broadcast=True)
 
     def health_degraded(self, peer_id: str, score: str, broken: list):
-        """Emit fleet.health.degraded event."""
-        self.emit("health.degraded", {"peer_id": peer_id, "score": score, "broken": broken})
+        """Emit fleet.health.degraded event (broadcast to fleet)."""
+        self.emit("health.degraded", {"peer_id": peer_id, "score": score, "broken": broken}, broadcast=True)
 
     # ── Stats ──
 

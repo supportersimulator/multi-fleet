@@ -1200,11 +1200,30 @@ def _get_lease_manager():
     try:
         from multifleet.leases import LeaseManager
         from multifleet.store import FleetNerveStore
+        config = _load_config()
+        chief_id = config.get("chief", {}).get("nodeId", "")
         store = FleetNerveStore()
-        _lease_manager = LeaseManager(store, NODE_ID)
+        _lease_manager = LeaseManager(store, NODE_ID, chief_node_id=chief_id or None,
+                                       daemon_port=FLEET_NERVE_PORT)
         return _lease_manager
     except Exception as e:
         logger.warning(f"LeaseManager init failed: {e}")
+        return None
+
+
+def _get_eventbus():
+    """Get or create a FleetEventBus instance (lazy init)."""
+    global _fleet_eventbus
+    try:
+        return _fleet_eventbus
+    except NameError:
+        pass
+    try:
+        from multifleet.eventbus import FleetEventBus
+        _fleet_eventbus = FleetEventBus(node_id=NODE_ID, daemon_port=FLEET_NERVE_PORT)
+        return _fleet_eventbus
+    except Exception as e:
+        logger.warning(f"FleetEventBus init failed: {e}")
         return None
 
 
@@ -1214,14 +1233,22 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
     if mgr is None:
         return {"error": "LeaseManager not available"}
 
+    eventbus = _get_eventbus()
+
     if action == "acquire":
         if not resource_id:
             return {"error": "resource_id required for acquire"}
-        return mgr.acquire(resource_id, lease_type=lease_type)
+        result = mgr.acquire(resource_id, lease_type=lease_type)
+        if result.get("acquired") and eventbus:
+            eventbus.lease_changed(resource_id, "acquired", NODE_ID)
+        return result
     elif action == "release":
         if not resource_id:
             return {"error": "resource_id required for release"}
-        return mgr.release(resource_id)
+        result = mgr.release(resource_id)
+        if result.get("released") and eventbus:
+            eventbus.lease_changed(resource_id, "released", NODE_ID)
+        return result
     elif action == "renew":
         if not resource_id:
             return {"error": "resource_id required for renew"}
