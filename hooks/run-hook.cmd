@@ -650,6 +650,15 @@ case "$HOOK_TYPE" in
     check_daemon_inbox || true
     check_worker_results || true
 
+    # Coordinator hint on first prompt of a session
+    if [ "${FLEET_COORDINATOR_ENABLED:-true}" = "true" ]; then
+      FLEET_COORD_HINT_FILE="/tmp/fleet-coord-hint-${NODE_ID}"
+      if [ ! -f "$FLEET_COORD_HINT_FILE" ]; then
+        touch "$FLEET_COORD_HINT_FILE"
+        emit "[FLEET] Tip: run fleet_probe or /fleet-check to initialize fleet coordination"
+      fi
+    fi
+
     # Only output if there are messages
     if [ ${#MSG_LINES[@]} -gt 0 ]; then
       output_json

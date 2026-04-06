@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "branch_status",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Machine reports branch progress to chief (ongoing updates)",
+  "payload": {
+    "type": "object",
+    "required": ["machine_id", "branch", "commit", "state", "summary", "files", "risks"],
+    "properties": {
+      "machine_id": {"type": "string"},
+      "branch": {"type": "string"},
+      "commit": {"type": "string"},
+      "state": {"type": "string", "enum": ["working", "ready_for_review", "merged"]},
+      "summary": {"type": "string"},
+      "files": {"type": "array", "items": {"type": "string"}},
+      "risks": {"type": "array", "items": {"type": "string"}}
+    }
+  },
+  "ttl_s": 1800,
+  "priority": "normal"
+}

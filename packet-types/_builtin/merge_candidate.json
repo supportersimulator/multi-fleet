@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "merge_candidate",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Machine submits branch as merge candidate to chief (Phase 4 input)",
+  "payload": {
+    "type": "object",
+    "required": ["task_id", "machine_id", "branch", "commit", "summary", "test_results", "recommendation"],
+    "properties": {
+      "task_id": {"type": "string"},
+      "machine_id": {"type": "string"},
+      "branch": {"type": "string"},
+      "commit": {"type": "string"},
+      "summary": {"type": "string"},
+      "test_results": {
+        "type": "object",
+        "properties": {
+          "passed": {"type": "integer", "minimum": 0},
+          "failed": {"type": "integer", "minimum": 0},
+          "skipped": {"type": "integer", "minimum": 0}
+        }
+      },
+      "recommendation": {"type": "string"}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "high"
+}

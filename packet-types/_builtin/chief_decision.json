@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "chief_decision",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Chief announces merge decision to all nodes (Phase 4 output)",
+  "payload": {
+    "type": "object",
+    "required": ["task_id", "decision", "winner_branch", "cherry_pick_from", "followups", "dissent_preserved"],
+    "properties": {
+      "task_id": {"type": "string"},
+      "decision": {"type": "string", "enum": ["merge", "cherry_pick", "reconciliation", "reject"]},
+      "winner_branch": {"type": "string"},
+      "cherry_pick_from": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["machine", "commit", "reason"],
+          "properties": {
+            "machine": {"type": "string"},
+            "commit": {"type": "string"},
+            "reason": {"type": "string"}
+          }
+        }
+      },
+      "followups": {"type": "array", "items": {"type": "string"}},
+      "dissent_preserved": {"type": "array", "items": {"type": "string"}}
+    }
+  },
+  "ttl_s": 7200,
+  "priority": "critical"
+}

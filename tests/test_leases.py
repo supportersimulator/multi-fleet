@@ -299,6 +299,59 @@ class TestQuery:
         assert mgr.query("nope") is None
 
 
+class TestConcurrentLeases:
+    def test_multiple_tasks_same_node(self, mgr):
+        """A single node can hold leases on multiple different resources."""
+        r1 = mgr.acquire("task-a")
+        r2 = mgr.acquire("task-b")
+        r3 = mgr.acquire("task-c")
+        assert r1["acquired"] is True
+        assert r2["acquired"] is True
+        assert r3["acquired"] is True
+        active = mgr.list_active(node_id="mac1")
+        assert len(active) == 3
+
+    def test_multiple_nodes_different_tasks(self, mgr, mgr2):
+        """Different nodes can hold leases on different resources simultaneously."""
+        r1 = mgr.acquire("task-a")
+        r2 = mgr2.acquire("task-b")
+        assert r1["acquired"] is True
+        assert r2["acquired"] is True
+        all_active = mgr.list_active()
+        assert len(all_active) == 2
+
+
+class TestPersistence:
+    def test_lease_survives_reopen(self, tmp_path):
+        """Leases persist across LeaseManager instances (SQLite durability)."""
+        db = tmp_path / "persist_test.db"
+        store1 = FleetNerveStore(db_path=db)
+        m1 = LeaseManager(store1, "mac1")
+        m1.acquire("persist-res", lease_type="long_task")
+
+        # Create new store + manager on same DB file (simulates restart)
+        store2 = FleetNerveStore(db_path=db)
+        m2 = LeaseManager(store2, "mac1")
+        info = m2.query("persist-res")
+        assert info is not None
+        assert info["node_id"] == "mac1"
+        assert info["active"] is True
+
+    def test_different_node_sees_persisted_lease(self, tmp_path):
+        """A different node reopening the DB sees existing leases and cannot acquire them."""
+        db = tmp_path / "persist_test2.db"
+        store1 = FleetNerveStore(db_path=db)
+        m1 = LeaseManager(store1, "mac1")
+        m1.acquire("persist-res2", lease_type="exclusive")
+
+        # New store instance on same DB — mac2 should see mac1's lease
+        store2 = FleetNerveStore(db_path=db)
+        m2 = LeaseManager(store2, "mac2")
+        result = m2.acquire("persist-res2")
+        assert result["acquired"] is False
+        assert result["holder"] == "mac1"
+
+
 class TestStats:
     def test_stats(self, mgr, mgr2):
         mgr.acquire("res-1")

@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "fleet-nerve": {
+      "command": "${workspaceFolder}/bin/fleet-nerve-mcp",
+      "args": []
+    }
+  }
+}

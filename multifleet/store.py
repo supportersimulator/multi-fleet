@@ -519,13 +519,25 @@ class FleetNerveStore:
         with self._conn() as conn:
             conn.execute("DELETE FROM wal WHERE processed = 1 AND processed_at < ?", (cutoff,))
 
-    def expire_old(self):
+    def expire_old(self, hours: int | None = None) -> int:
+        """Expire old pending messages past their TTL (or older than `hours` if given).
+
+        Returns the number of messages expired.
+        """
         with self._conn() as conn:
-            conn.execute(
-                """UPDATE messages SET status = 'expired'
-                   WHERE status = 'pending' AND created_at + (ttl_hours * 3600) < ?""",
-                (time.time(),),
-            )
+            if hours is not None:
+                cutoff = time.time() - (hours * 3600)
+                cursor = conn.execute(
+                    "UPDATE messages SET status = 'expired' WHERE status = 'pending' AND created_at < ?",
+                    (cutoff,),
+                )
+            else:
+                cursor = conn.execute(
+                    """UPDATE messages SET status = 'expired'
+                       WHERE status = 'pending' AND created_at + (ttl_hours * 3600) < ?""",
+                    (time.time(),),
+                )
+            return cursor.rowcount
 
     # ── Chief Relay (P3 channel) ──
 
@@ -594,3 +606,30 @@ class FleetNerveStore:
                 (time.time(), msg_id),
             )
             return cursor.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Maintenance — call hourly from the daemon watchdog
+# ---------------------------------------------------------------------------
+
+def run_maintenance(store: FleetNerveStore, expire_hours: int = 48) -> dict:
+    """Run periodic maintenance on the message store.
+
+    Intended to be called hourly by the daemon watchdog. Performs:
+    1. Expire old pending messages (default: >48h)
+    2. Prune processed WAL entries (>24h)
+    3. Prune delivered WAL replicas (>48h)
+    4. WAL checkpoint (TRUNCATE) to reclaim disk space
+
+    Returns a summary dict with counts.
+    """
+    expired = store.expire_old(hours=expire_hours)
+    store.wal_prune(max_age_hours=24)
+    store.wal_replica_prune(max_age_hours=expire_hours)
+
+    # WAL checkpoint — reclaim disk space from write-ahead log
+    conn = store._conn()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    logger.info("Maintenance complete: expired=%d messages", expired)
+    return {"expired": expired, "checkpoint": "done"}

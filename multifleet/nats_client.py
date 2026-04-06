@@ -277,10 +277,16 @@ class FleetNerveNATS:
                 self.js = None
 
     async def _on_reconnect(self):
-        logger.info(f"Reconnected to NATS")
+        logger.info("Reconnected to NATS — re-subscribing to all subjects")
+        try:
+            await self._subscribe_all()
+            logger.info("Re-subscribed to all NATS subjects after reconnect")
+        except Exception as e:
+            logger.error(f"Failed to re-subscribe after reconnect: {e}")
+            self._stats["errors"] += 1
 
     async def _on_disconnect(self):
-        logger.warning(f"Disconnected from NATS -- will auto-reconnect")
+        logger.warning(f"Disconnected from NATS at {datetime.now(timezone.utc).isoformat()} -- will auto-reconnect")
 
     async def _on_error(self, e):
         logger.error(f"NATS error: {e}")

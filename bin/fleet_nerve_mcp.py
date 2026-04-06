@@ -1337,8 +1337,11 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
     elif action == "list":
         leases = mgr.list_active(node_id=resource_id if resource_id else None)
         return {"leases": leases, "count": len(leases), "stats": mgr.stats}
+    elif action == "cleanup":
+        cleaned = mgr.cleanup_expired()
+        return {"cleaned": cleaned, "stats": mgr.stats}
     else:
-        return {"error": f"unknown action: {action}, expected: acquire|release|renew|query|list"}
+        return {"error": f"unknown action: {action}, expected: acquire|release|renew|query|list|cleanup"}
 
 
 def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
@@ -1475,6 +1478,68 @@ def fleet_evidence(action: str, event_type: str = "", node_id: str = "",
         return ledger.stats
     else:
         return {"error": f"unknown action: {action}, expected: record|query|verify|latest|stats"}
+
+
+def fleet_synthesize(task_id: str, verdicts: str = "") -> dict:
+    """Run chief synthesis on collected verdicts to produce a merge decision.
+
+    If verdicts are not provided inline, reads local_verdict packets from the
+    packet store for the given task_id.
+    """
+    from multifleet.synthesis import ChiefSynthesis
+
+    engine = ChiefSynthesis()
+    t0 = time.monotonic()
+
+    # Parse inline verdicts or read from packet store
+    verdict_map: dict[str, dict] = {}
+    if verdicts:
+        try:
+            verdict_map = json.loads(verdicts)
+        except json.JSONDecodeError:
+            return {"error": "verdicts must be valid JSON: {machine_id: verdict_payload}"}
+    else:
+        # Read from packet store
+        try:
+            from multifleet.packet_store import PacketStore
+            store = PacketStore()
+            raw = store.recent(packet_type="local_verdict", limit=50)
+            for pkt in raw:
+                payload = pkt.get("payload", pkt)
+                pkt_task = payload.get("task_id", "")
+                node = pkt.get("nodeId", pkt.get("from_node", "unknown"))
+                if pkt_task == task_id or not task_id:
+                    verdict_map[node] = payload
+        except Exception as e:
+            logger.warning("Could not read packet store: %s", e)
+            if not verdict_map:
+                return {"error": f"No inline verdicts and packet store unavailable: {e}"}
+
+    if not verdict_map:
+        return {"error": f"No verdicts found for task_id={task_id}"}
+
+    result = engine.synthesize(task_id, verdict_map)
+    decision = result.to_chief_decision()
+    latency = round((time.monotonic() - t0) * 1000, 1)
+
+    # Audit trail
+    audit = _get_audit()
+    if audit:
+        audit.record("synthesis", task_id, "", "ok", latency,
+                      metadata={"decision": result.decision, "confidence": result.confidence})
+
+    # Evidence ledger
+    try:
+        ledger = _get_evidence_ledger()
+        if ledger:
+            ledger.record("synthesis_decision", NODE_ID, f"task={task_id} decision={result.decision}",
+                          {"task_id": task_id, "decision": result.decision,
+                           "confidence": result.confidence, "dissent_count": len(result.dissent_preserved)})
+    except Exception as e:
+        logger.warning("Evidence ledger write failed: %s", e)
+
+    decision["latency_ms"] = latency
+    return decision
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
@@ -1711,7 +1776,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["acquire", "release", "renew", "query", "list"], "description": "Lease action"},
+                "action": {"type": "string", "enum": ["acquire", "release", "renew", "query", "list", "cleanup"], "description": "Lease action"},
                 "resource_id": {"type": "string", "description": "Resource to lease (branch name, file path, task ID)"},
                 "lease_type": {"type": "string", "enum": ["heartbeat", "short_task", "long_task", "exclusive"], "default": "short_task"},
             },
@@ -1754,6 +1819,19 @@ TOOLS = [
             "required": ["action"],
         },
         "fn": fleet_evidence,
+    },
+    {
+        "name": "fleet_synthesize",
+        "description": "Run chief synthesis on fleet verdicts to produce an evidence-informed merge decision. Reads verdicts from the packet store or accepts them inline as JSON. Returns a chief_decision payload with winner, confidence, cherry-picks, and preserved dissent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task ID to synthesize verdicts for"},
+                "verdicts": {"type": "string", "description": "Optional inline JSON: {machine_id: verdict_payload}. If omitted, reads from packet store."},
+            },
+            "required": ["task_id"],
+        },
+        "fn": fleet_synthesize,
     },
 ]
 

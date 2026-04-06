@@ -1,0 +1,230 @@
+"""Chief Synthesis Engine — aggregates fleet verdicts into merge decisions.
+
+Generic by design: multi-fleet provides the aggregation framework,
+consumers (3-surgeons, superpowers) register semantic analyzers.
+
+The engine:
+1. Collects local_verdict packets from all machines
+2. Runs registered analyzers (pluggable)
+3. Produces chief_decision packet
+4. Logs to decision ledger
+"""
+
+import json
+import logging
+import time
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Callable, Optional
+
+logger = logging.getLogger("fleet-nerve.synthesis")
+
+
+@dataclass
+class SynthesisResult:
+    """Result of synthesizing verdicts into a merge decision."""
+
+    task_id: str
+    decision: str  # merge | cherry_pick | reconciliation | reject | needs_rebuttal
+    winner_branch: Optional[str]
+    confidence: float
+    reasoning: str
+    cherry_pick_from: list = field(default_factory=list)  # [{machine, commit, reason}]
+    followups: list = field(default_factory=list)
+    dissent_preserved: list = field(default_factory=list)  # [{surgeon, machine, claim}]
+
+    def to_chief_decision(self) -> dict:
+        """Convert to chief_decision packet payload."""
+        return {
+            "type": "chief_decision",
+            "task_id": self.task_id,
+            "decision": self.decision,
+            "winner_branch": self.winner_branch,
+            "confidence": round(self.confidence, 4),
+            "reasoning": self.reasoning,
+            "cherry_pick_from": self.cherry_pick_from,
+            "followups": self.followups,
+            "dissent_preserved": self.dissent_preserved,
+            "dissent_count": len(self.dissent_preserved),
+            "timestamp": time.time(),
+        }
+
+
+class ChiefSynthesis:
+    """Aggregates verdicts and produces merge decisions."""
+
+    def __init__(self, ledger_path: Optional[str] = None):
+        self._ledger_path = (
+            Path(ledger_path)
+            if ledger_path
+            else Path.home() / ".fleet-nerve" / "decisions.jsonl"
+        )
+        self._analyzers: list[Callable] = []
+        self._default_analyzer = self._basic_confidence_analyzer
+
+    def register_analyzer(self, fn: Callable):
+        """Register a semantic analyzer. Called with (task_id, verdicts) -> SynthesisResult."""
+        self._analyzers.append(fn)
+
+    def synthesize(self, task_id: str, verdicts: dict[str, dict]) -> SynthesisResult:
+        """Run synthesis on collected verdicts.
+
+        Args:
+            task_id: The task being synthesized
+            verdicts: {machine_id: verdict_payload} from all machines
+
+        Returns:
+            SynthesisResult with merge decision
+        """
+        if not verdicts:
+            result = SynthesisResult(
+                task_id=task_id,
+                decision="reject",
+                winner_branch=None,
+                confidence=0.0,
+                reasoning="No verdicts received",
+            )
+            self._log_decision(result)
+            return result
+
+        t0 = time.monotonic()
+
+        if self._analyzers:
+            # Run registered analyzers, take highest-confidence result
+            results = []
+            for analyzer in self._analyzers:
+                try:
+                    result = analyzer(task_id, verdicts)
+                    if result:
+                        results.append(result)
+                except Exception as e:
+                    logger.warning("Analyzer %s failed: %s", analyzer.__name__, e)
+            if results:
+                best = max(results, key=lambda r: r.confidence)
+                self._log_decision(best, duration_ms=_elapsed_ms(t0))
+                return best
+
+        # Fallback to basic confidence-weighted scoring
+        result = self._default_analyzer(task_id, verdicts)
+        self._log_decision(result, duration_ms=_elapsed_ms(t0))
+        return result
+
+    def _basic_confidence_analyzer(
+        self, task_id: str, verdicts: dict[str, dict]
+    ) -> SynthesisResult:
+        """Default analyzer: pick highest confidence, preserve all dissent.
+
+        Scoring: confidence - (risk_count * 0.05) - (dissent_count * 0.1)
+        Cherry-pick suggestions from non-winners with unique strengths.
+        """
+        scores: dict[str, float] = {}
+        all_dissent: list[dict] = []
+
+        for machine_id, verdict in verdicts.items():
+            confidence = float(verdict.get("confidence", 0.0))
+            risks = verdict.get("risks", [])
+            dissents = verdict.get("dissent", [])
+
+            risk_penalty = len(risks) * 0.05
+            dissent_penalty = len(dissents) * 0.1
+            scores[machine_id] = confidence - risk_penalty - dissent_penalty
+
+            # Collect all dissent from all machines
+            for d in dissents:
+                entry = dict(d) if isinstance(d, dict) else {"claim": str(d)}
+                entry.setdefault("machine", machine_id)
+                all_dissent.append(entry)
+
+        # Winner = highest score
+        winner_id = max(scores, key=scores.get)  # type: ignore[arg-type]
+        winner_verdict = verdicts[winner_id]
+        winner_score = scores[winner_id]
+
+        # Cherry-pick suggestions from non-winners with unique strengths
+        cherry_picks: list[dict] = []
+        for machine_id, verdict in verdicts.items():
+            if machine_id == winner_id:
+                continue
+            strengths = verdict.get("strengths", [])
+            commit = verdict.get("commit", verdict.get("branch", ""))
+            for s in strengths:
+                cherry_picks.append(
+                    {
+                        "machine": machine_id,
+                        "commit": commit,
+                        "reason": s if isinstance(s, str) else str(s),
+                    }
+                )
+
+        # Determine decision type
+        if len(verdicts) == 1:
+            decision = "merge"
+        elif cherry_picks:
+            decision = "cherry_pick"
+        elif len(all_dissent) > len(verdicts):
+            decision = "needs_rebuttal"
+        else:
+            decision = "merge"
+
+        # Build reasoning
+        score_summary = ", ".join(
+            f"{m}: {s:.3f}" for m, s in sorted(scores.items(), key=lambda x: -x[1])
+        )
+        reasoning = f"Scores: [{score_summary}]. Winner: {winner_id} ({winner_score:.3f})."
+        if cherry_picks:
+            reasoning += f" {len(cherry_picks)} cherry-pick suggestion(s) from non-winners."
+        if all_dissent:
+            reasoning += f" {len(all_dissent)} dissent(s) preserved."
+
+        return SynthesisResult(
+            task_id=task_id,
+            decision=decision,
+            winner_branch=winner_verdict.get("branch", winner_id),
+            confidence=max(0.0, min(1.0, winner_score)),
+            reasoning=reasoning,
+            cherry_pick_from=cherry_picks,
+            followups=winner_verdict.get("followups", []),
+            dissent_preserved=all_dissent,
+        )
+
+    def _log_decision(self, result: SynthesisResult, duration_ms: float = 0.0):
+        """Append decision to JSONL ledger."""
+        try:
+            self._ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "timestamp": time.time(),
+                "task_id": result.task_id,
+                "decision": result.decision,
+                "winner_branch": result.winner_branch,
+                "confidence": round(result.confidence, 4),
+                "reasoning": result.reasoning,
+                "cherry_pick_from": result.cherry_pick_from,
+                "dissent_count": len(result.dissent_preserved),
+                "duration_ms": round(duration_ms, 1),
+            }
+            with open(self._ledger_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.error("Failed to log decision: %s", e)
+
+    def recent_decisions(self, limit: int = 10) -> list[dict]:
+        """Read recent decisions from ledger."""
+        if not self._ledger_path.exists():
+            return []
+        try:
+            lines = self._ledger_path.read_text().strip().splitlines()
+            recent = lines[-limit:] if len(lines) > limit else lines
+            results = []
+            for line in reversed(recent):
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return results
+        except Exception as e:
+            logger.error("Failed to read decisions: %s", e)
+            return []
+
+
+def _elapsed_ms(t0: float) -> float:
+    return (time.monotonic() - t0) * 1000
