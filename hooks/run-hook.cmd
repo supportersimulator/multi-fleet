@@ -607,11 +607,11 @@ SEED_EOF
 
 case "$HOOK_TYPE" in
   session-start)
-    # 1. Start daemon if not running
-    start_daemon_if_needed
+    # 1. Start daemon if not running (non-fatal — continue without daemon)
+    start_daemon_if_needed || true
 
-    # 2. Ensure API keys available
-    ensure_api_keys
+    # 2. Ensure API keys available (non-fatal — keys may be unavailable in test)
+    ensure_api_keys || true
 
     # 3. Check inbox for pending messages
     check_seed_inbox || true

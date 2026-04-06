@@ -110,22 +110,26 @@ class TestFleetSend:
             assert result["sent"] is True
             assert result["target"] == "mac2"
 
-    def test_send_routes_through_daemon_api(self):
-        """fleet_send routes through daemon HTTP API (port 8855) as primary path."""
+    def test_send_falls_back_to_http(self):
+        """When NATS fails, fleet_send falls back to HTTP direct."""
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"delivered": true, "channel": "P1_nats"}'
-        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_url:
-            result = fleet_send(target="mac2", body="hello")
-            assert result["sent"] is True
-            assert result["channel"] == "daemon_api"
+        with patch("tools.fleet_nerve_mcp._run_async", side_effect=Exception("NATS down")):
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                with patch("tools.fleet_nerve_config.load_peers", return_value=(
+                    {"mac2": {"ip": "10.0.0.2", "port": 8855}}, None,
+                )):
+                    result = fleet_send(target="mac2", body="hello")
+                    assert result["sent"] is True
+                    assert result["channel"] == "http_fallback"
 
     def test_send_unknown_peer_returns_error(self):
-        """When daemon API is down and peer is unknown, returns error."""
-        with patch("urllib.request.urlopen", side_effect=Exception("daemon down")):
+        """When NATS fails and peer is unknown, returns error."""
+        with patch("tools.fleet_nerve_mcp._run_async", side_effect=Exception("NATS down")):
             with patch("tools.fleet_nerve_config.load_peers", return_value=({}, None)):
                 result = fleet_send(target="unknown", body="hello")
                 assert result["sent"] is False
-                assert "Unknown peer" in result.get("error", "") or "daemon_error" in result
+                assert "Unknown peer" in result.get("error", "")
 
 
 class TestFleetBroadcast:

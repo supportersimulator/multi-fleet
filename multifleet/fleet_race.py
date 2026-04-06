@@ -239,16 +239,49 @@ class FleetRace:
     # ── Node Discovery ──────────────────────────────────────────────
 
     def _discover_nodes(self) -> list[str]:
-        """Discover available fleet nodes from daemon health endpoint."""
+        """Discover available fleet nodes.
+
+        Primary: Superset list_devices() — sees all org devices.
+        Fallback: daemon /health channel_health + peers.
+        """
+        nodes = [self._node_id]
+
+        # Primary: Superset device registry
+        try:
+            from multifleet.superset_bridge import SupersetBridge
+            bridge = SupersetBridge()
+            raw = bridge.list_devices()
+            # MCP responses wrap data: [{content, structuredContent}]
+            # Extract actual device list from structuredContent or content text
+            device_list = []
+            for item in (raw if isinstance(raw, list) else [raw]):
+                if isinstance(item, dict):
+                    sc = item.get("structuredContent", {})
+                    if isinstance(sc, dict) and "devices" in sc:
+                        device_list.extend(sc["devices"])
+                    elif "name" in item or "id" in item:
+                        device_list.append(item)
+            if device_list:
+                for dev in device_list:
+                    name = dev.get("name") or dev.get("id") or dev.get("deviceId", "")
+                    if name and name not in nodes:
+                        nodes.append(name)
+                if len(nodes) > 1:
+                    logger.info(
+                        "Superset discovery found %d nodes: %s",
+                        len(nodes), nodes,
+                    )
+                    return nodes
+        except Exception as e:
+            logger.debug("Superset discovery unavailable: %s", e)
+
+        # Fallback: daemon health endpoint
         try:
             data = self._daemon_get("/health")
             if "error" in data:
                 logger.warning("Health probe failed: %s", data["error"])
-                return [self._node_id]
+                return nodes
 
-            nodes = [self._node_id]
-
-            # Extract peers from channel_health or peers section
             channel_health = data.get("channel_health", {})
             for peer in channel_health:
                 if peer not in nodes:
@@ -262,7 +295,7 @@ class FleetRace:
             return nodes
         except Exception as e:
             logger.warning("Node discovery failed: %s", e)
-            return [self._node_id]
+            return nodes
 
     # ── Broadcast ───────────────────────────────────────────────────
 
@@ -348,34 +381,132 @@ class FleetRace:
     def _try_superset_dispatch(
         self, node: str, task: str, branch: str, race_id: str,
     ) -> Optional[dict]:
-        """Attempt dispatch via Superset MCP bridge."""
+        """Attempt dispatch via Superset MCP bridge.
+
+        Flow:
+            1. Check bridge availability (has API key)
+            2. Resolve project_id on the target device
+            3. create_workspace(project_id, branch) on target node
+            4. launch_agent_with_prompt(workspace_id, race prompt)
+            5. Return dispatch result or None to trigger fallback
+        """
         try:
             from multifleet.superset_bridge import SupersetBridge
             bridge = SupersetBridge()
-            if not bridge.available:
+            if not bridge._api_key:
                 return None
 
-            # Create workspace for isolated work
-            ws = bridge.call_tool("create_workspace", {
-                "name": f"race-{race_id}-{node}",
-                "description": f"Fleet race {race_id}: {task[:100]}",
-            })
+            # Resolve the project on the target device so we can create a workspace
+            raw_projects = bridge.list_projects(device_id=node)
+            project_id = self._extract_project_id(raw_projects)
+            if not project_id:
+                logger.debug("Superset: no usable project on %s, skipping", node)
+                return None
 
-            # Start agent session in the workspace
-            session = bridge.call_tool("start_agent_session", {
-                "task": task,
-                "workspace_id": ws.get("workspace_id", ""),
-            })
+            # Create isolated worktree workspace on the target device
+            ws = bridge.create_workspace(
+                project_id=project_id,
+                branch=branch,
+                base_branch="main",
+                device_id=node,
+            )
+            if isinstance(ws, dict) and ws.get("_available") is False:
+                logger.debug("Superset create_workspace failed on %s: %s", node, ws.get("error"))
+                return None
 
+            # Extract workspace ID from MCP response
+            workspace_id = self._extract_field(ws, "workspaceId", "workspace_id")
+            if not workspace_id:
+                logger.warning("Superset workspace created but no ID returned for %s", node)
+                return None
+
+            # Launch agent with the race prompt in the new workspace
+            race_prompt = (
+                f"[FLEET RACE {race_id}] Work on branch: {branch}\n\n"
+                f"Task: {task}\n\n"
+                f"Instructions:\n"
+                f"1. You are in an isolated worktree on branch {branch}\n"
+                f"2. Solve the task completely\n"
+                f"3. Commit your solution\n"
+                f"4. When done, send a fleet message with your summary and findings"
+            )
+            session = bridge.launch_agent_with_prompt(
+                workspace_id=workspace_id,
+                prompt=race_prompt,
+                device_id=node,
+            )
+            if isinstance(session, dict) and session.get("_available") is False:
+                logger.warning("Superset agent launch failed on %s: %s", node, session.get("error"))
+                # Workspace was created but agent failed — clean up
+                bridge.delete_workspace(workspace_id, device_id=node)
+                return None
+
+            session_id = self._extract_field(session, "sessionId", "session_id")
+            logger.info(
+                "Superset dispatch OK: node=%s workspace=%s session=%s",
+                node, workspace_id, session_id or "?",
+            )
             return {
                 "dispatched": True,
                 "via": "superset",
-                "workspace_id": ws.get("workspace_id"),
-                "session_id": session.get("session_id"),
+                "workspace_id": workspace_id,
+                "session_id": session_id,
             }
+        except ImportError:
+            logger.debug("superset_bridge not importable")
+            return None
         except Exception as e:
             logger.debug("Superset dispatch unavailable: %s", e)
             return None
+
+    # ── MCP Response Helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _extract_project_id(raw_projects: list) -> Optional[str]:
+        """Extract first usable project ID from MCP list_projects response.
+
+        MCP tools return [{content: [...], structuredContent: {...}}].
+        We need the project id from structuredContent or direct fields.
+        """
+        for item in (raw_projects if isinstance(raw_projects, list) else [raw_projects]):
+            if not isinstance(item, dict):
+                continue
+            # Check for error responses
+            if item.get("isError"):
+                return None
+            # structuredContent path
+            sc = item.get("structuredContent", {})
+            if isinstance(sc, dict):
+                projects = sc.get("projects", [])
+                if projects and isinstance(projects, list):
+                    p = projects[0]
+                    pid = p.get("id") or p.get("projectId", "")
+                    if pid:
+                        return pid
+            # Direct field path (non-MCP wrapped)
+            pid = item.get("id") or item.get("projectId", "")
+            if pid:
+                return pid
+        return None
+
+    @staticmethod
+    def _extract_field(response: dict, *field_names: str) -> Optional[str]:
+        """Extract a field from an MCP tool response, checking structuredContent first."""
+        if not isinstance(response, dict):
+            return None
+        # Check structuredContent first
+        sc = response.get("structuredContent", {})
+        if isinstance(sc, dict):
+            for name in field_names:
+                val = sc.get(name)
+                if val:
+                    return str(val)
+        # Check top-level fields
+        for name in field_names:
+            val = response.get(name)
+            if val:
+                return str(val)
+        return None
 
     # ── Cross-Review ────────────────────────────────────────────────
 

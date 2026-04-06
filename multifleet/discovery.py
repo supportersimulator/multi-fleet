@@ -254,3 +254,6 @@ class FleetDiscoveryManager:
             except Exception as e:
                 logger.debug(f"UDP gossip listener error: {e}")
                 await asyncio.sleep(1)
+
+# Backward compatibility alias (daemon imports FleetDiscovery)
+FleetDiscovery = FleetDiscoveryManager
