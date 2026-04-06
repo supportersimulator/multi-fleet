@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "rebuttal",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Rebuttal to a fleet proposal — disagrees with reason and optional counter",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "proposal_id": {"type": "string", "description": "UUID of the proposal being rebutted"},
+      "reason": {"type": "string", "description": "Why the proposal is rejected"},
+      "counter_body": {"type": "string", "description": "Optional counter-proposal text"}
+    },
+    "required": ["proposal_id", "reason"]
+  },
+  "ttl_s": 600,
+  "priority": "high"
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "proposal",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Fleet consensus proposal — starts the rebuttal state machine",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "subject": {"type": "string", "description": "Short proposal subject"},
+      "body": {"type": "string", "description": "Full proposal details"},
+      "scope": {"type": "string", "description": "Scope: general, architecture, infra, breaking"},
+      "proposal_id": {"type": "string", "description": "UUID assigned by RebuttalManager"}
+    },
+    "required": ["subject", "body"]
+  },
+  "ttl_s": 600,
+  "priority": "high"
+}
