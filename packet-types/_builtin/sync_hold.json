@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "sync_hold",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Stop-the-world coordination lock for fleet-wide changes",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "action": {"type": "string", "enum": ["acquire", "release"]},
+      "scope": {"type": "string"},
+      "reason": {"type": "string"},
+      "holder": {"type": "string"},
+      "expires_at": {"type": "string", "format": "date-time"}
+    },
+    "required": ["action", "scope", "reason"]
+  },
+  "ttl_s": 3600,
+  "priority": "critical"
+}
