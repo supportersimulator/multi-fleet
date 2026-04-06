@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "heartbeat",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Periodic node health beacon (10s interval default)",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string", "enum": ["online", "idle", "busy", "degraded"]},
+      "uptime_s": {"type": "number", "minimum": 0},
+      "active_branch": {"type": "string"},
+      "sessions": {"type": "integer", "minimum": 0},
+      "channel_score": {"type": "string", "pattern": "^[0-9]+/[0-9]+$"}
+    },
+    "required": ["status"]
+  },
+  "ttl_s": 60,
+  "priority": "low"
+}
