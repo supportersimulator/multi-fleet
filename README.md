@@ -26,6 +26,24 @@ Multi-Fleet is the first LLM-native fleet coordination system. Every node is ind
 
 ---
 
+## What's New in v5.0.0
+
+- **1142+ tests** across the full suite
+- **28+ MCP tools** for complete fleet operation via protocol
+- **Fleet Liaison Agent** -- background comms handler that manages fleet communication without interrupting active sessions
+- **Cross-machine rebuttal** -- 7-phase state machine for structured multi-node critique and convergence
+- **Chief synthesis engine** -- pluggable analyzers that aggregate fleet-wide intelligence
+- **100-node hierarchy** -- Chief/Captain/Worker roles for scalable fleet organization
+- **Invariance gates** -- hard gates on send, repair, and merge operations to enforce safety
+- **Productive waiting** -- sessions never idle; auto-discover and execute fleet backlog
+- **HTML dashboard** -- dark theme, auto-refresh, live fleet visualization
+- **Status aggregator + SSE event stream** -- real-time fleet state pushed to all consumers
+- **Unified fleet CLI** -- 15 commands covering all fleet operations
+- **Evidence ledger** -- hash-chain integrity for tamper-evident decision audit trails
+- **Fleet doctor** -- 6 diagnostic checks for automated health verification
+
+---
+
 ## Quick Start
 
 ```bash
