@@ -68,19 +68,22 @@ class TestBridgeUnavailable:
     """Test graceful degradation when no API key."""
 
     def test_no_key_means_unavailable(self):
-        bridge = SupersetBridge(api_key=None)
-        assert not bridge.is_available()
+        with patch("multifleet.superset_bridge._load_api_key", return_value=None):
+            bridge = SupersetBridge(api_key=None)
+            assert not bridge.is_available()
 
     def test_methods_return_empty(self):
-        bridge = SupersetBridge(api_key=None)
-        assert bridge.list_workspaces() == []
-        assert bridge.list_tasks() == []
-        assert bridge.list_devices() == []
+        with patch("multifleet.superset_bridge._load_api_key", return_value=None):
+            bridge = SupersetBridge(api_key=None)
+            assert bridge.list_workspaces() == []
+            assert bridge.list_tasks() == []
+            assert bridge.list_devices() == []
 
     def test_create_returns_error(self):
-        bridge = SupersetBridge(api_key=None)
-        result = bridge.create_workspace("proj-1", "feat-x")
-        assert result.get("_available") is False
+        with patch("multifleet.superset_bridge._load_api_key", return_value=None):
+            bridge = SupersetBridge(api_key=None)
+            result = bridge.create_workspace("proj-1", "feat-x")
+            assert result.get("_available") is False
 
 
 class TestCallTool:
