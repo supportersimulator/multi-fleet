@@ -1195,6 +1195,35 @@ def fleet_doctor() -> dict:
     }
 
 
+def fleet_gains_gate(quick: bool = False) -> dict:
+    """Run fleet gains gate — structured health verification.
+
+    Runs 6 (quick) or 10 (full) health checks and returns a structured
+    pass/fail result. Critical failures block the gate; non-critical
+    issues are reported but don't block.
+    """
+    try:
+        from multifleet.gains_gate import FleetGainsGate
+        gate = FleetGainsGate(daemon_port=FLEET_NERVE_PORT)
+        result = gate.run(quick=quick)
+        return result.to_dict()
+    except ImportError as e:
+        return {
+            "passed": False,
+            "error": f"gains_gate module not available: {e}",
+            "total": 0,
+            "checks": [],
+        }
+    except Exception as e:
+        _count_error("fleet_gains_gate")
+        return {
+            "passed": False,
+            "error": str(e),
+            "total": 0,
+            "checks": [],
+        }
+
+
 # ── Lease Management ──
 
 def _get_lease_manager():
@@ -1236,6 +1265,22 @@ def _get_rebuttal_manager():
         return None
 
 
+def _get_evidence_ledger():
+    """Get or create an EvidenceLedger instance (lazy init)."""
+    global _evidence_ledger
+    try:
+        return _evidence_ledger
+    except NameError:
+        pass
+    try:
+        from multifleet.evidence_ledger import EvidenceLedger
+        _evidence_ledger = EvidenceLedger()
+        return _evidence_ledger
+    except Exception as e:
+        logger.warning(f"EvidenceLedger init failed: {e}")
+        return None
+
+
 def _get_eventbus():
     """Get or create a FleetEventBus instance (lazy init)."""
     global _fleet_eventbus
@@ -1266,6 +1311,12 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
         result = mgr.acquire(resource_id, lease_type=lease_type)
         if result.get("acquired") and eventbus:
             eventbus.lease_changed(resource_id, "acquired", NODE_ID)
+        # Record in evidence ledger
+        evidence = _get_evidence_ledger()
+        if evidence:
+            evidence.record("lease_granted", NODE_ID, f"lease {'acquired' if result.get('acquired') else 'denied'}: {resource_id}",
+                            {"resource_id": resource_id, "lease_type": lease_type,
+                             "acquired": result.get("acquired", False), "holder": result.get("holder", "")})
         return result
     elif action == "release":
         if not resource_id:
@@ -1321,11 +1372,18 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
         if not proposal_id:
             return {"error": "proposal_id required for accept"}
         result = mgr.accept(proposal_id, reason=reason)
-        if result and result.get("state") == "accepted" and eventbus:
-            eventbus.emit("rebuttal.resolved", {
-                "proposal_id": proposal_id, "resolution": "accepted",
-                "actor": NODE_ID,
-            }, broadcast=True)
+        if result and result.get("state") == "accepted":
+            if eventbus:
+                eventbus.emit("rebuttal.resolved", {
+                    "proposal_id": proposal_id, "resolution": "accepted",
+                    "actor": NODE_ID,
+                }, broadcast=True)
+            evidence = _get_evidence_ledger()
+            if evidence:
+                evidence.record("rebuttal_resolved", NODE_ID,
+                                f"accepted: {result.get('subject', proposal_id[:8])}",
+                                {"proposal_id": proposal_id, "resolution": "accepted",
+                                 "reason": reason})
         return result
     elif action == "rebut":
         if not proposal_id or not reason:
@@ -1339,11 +1397,17 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
         if not proposal_id or not resolution:
             return {"error": "proposal_id and resolution required for resolve"}
         result = mgr.resolve(proposal_id, resolution)
-        if result and result.get("state") == "resolved" and eventbus:
-            eventbus.emit("rebuttal.resolved", {
-                "proposal_id": proposal_id, "resolution": resolution,
-                "actor": NODE_ID,
-            }, broadcast=True)
+        if result and result.get("state") == "resolved":
+            if eventbus:
+                eventbus.emit("rebuttal.resolved", {
+                    "proposal_id": proposal_id, "resolution": resolution,
+                    "actor": NODE_ID,
+                }, broadcast=True)
+            evidence = _get_evidence_ledger()
+            if evidence:
+                evidence.record("rebuttal_resolved", NODE_ID,
+                                f"resolved: {result.get('subject', proposal_id[:8])}",
+                                {"proposal_id": proposal_id, "resolution": resolution})
         return result
     elif action == "list":
         proposals = mgr.list_active(state=scope if scope != "general" else None)
@@ -1355,6 +1419,62 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
         return result if result else {"error": f"proposal {proposal_id} not found"}
     else:
         return {"error": f"unknown action: {action}, expected: propose|review|accept|rebut|counter|resolve|list|get"}
+
+
+def fleet_evidence(action: str, event_type: str = "", node_id: str = "",
+                   subject: str = "", payload: str = "",
+                   since: str = "", limit: str = "50") -> dict:
+    """Manage fleet evidence ledger — tamper-evident append-only log.
+
+    Actions: record, query, verify, latest, stats.
+    """
+    ledger = _get_evidence_ledger()
+    if ledger is None:
+        return {"error": "EvidenceLedger not available"}
+
+    if action == "record":
+        if not event_type or not node_id:
+            return {"error": "event_type and node_id required for record"}
+        try:
+            payload_dict = json.loads(payload) if payload else {}
+        except json.JSONDecodeError:
+            payload_dict = {"raw": payload}
+        return ledger.record(event_type, node_id or NODE_ID, subject, payload_dict)
+    elif action == "query":
+        kwargs = {}
+        if event_type:
+            kwargs["event_type"] = event_type
+        if node_id:
+            kwargs["node_id"] = node_id
+        if since:
+            try:
+                kwargs["since"] = float(since)
+            except ValueError:
+                pass
+        try:
+            kwargs["limit"] = int(limit)
+        except ValueError:
+            kwargs["limit"] = 50
+        entries = ledger.query(**kwargs)
+        return {"entries": entries, "count": len(entries)}
+    elif action == "verify":
+        lim = None
+        try:
+            lim = int(limit) if limit and limit != "50" else None
+        except ValueError:
+            pass
+        return ledger.verify_chain(limit=lim)
+    elif action == "latest":
+        try:
+            count = int(limit) if limit else 10
+        except ValueError:
+            count = 10
+        entries = ledger.latest(count=count)
+        return {"entries": entries, "count": len(entries)}
+    elif action == "stats":
+        return ledger.stats
+    else:
+        return {"error": f"unknown action: {action}, expected: record|query|verify|latest|stats"}
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
@@ -1574,6 +1694,18 @@ TOOLS = [
         "fn": fleet_doctor,
     },
     {
+        "name": "fleet_gains_gate",
+        "description": "Run fleet health verification gate. Returns structured pass/fail with per-check results. Use before merges, deployments, or phase transitions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "quick": {"type": "boolean", "description": "Quick mode (6 checks) vs full mode (10 checks)", "default": False},
+            },
+            "required": [],
+        },
+        "fn": fleet_gains_gate,
+    },
+    {
         "name": "fleet_lease",
         "description": "Manage resource leases — acquire, release, renew, or query ownership to prevent dual-work across nodes.",
         "inputSchema": {
@@ -1604,6 +1736,24 @@ TOOLS = [
             "required": ["action"],
         },
         "fn": fleet_rebuttal,
+    },
+    {
+        "name": "fleet_evidence",
+        "description": "Tamper-evident evidence ledger — append-only log with hash chain for fleet decisions, lease grants, rebuttals, gains gate results, and repairs. Actions: record (append entry), query (search with filters), verify (check hash chain integrity), latest (recent entries), stats (ledger summary).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["record", "query", "verify", "latest", "stats"], "description": "Evidence ledger action"},
+                "event_type": {"type": "string", "description": "Event type: merge_decision, lease_granted, rebuttal_resolved, gains_gate_result, channel_repair, consensus_reached"},
+                "node_id": {"type": "string", "description": "Node that produced the evidence (for record/query filter)"},
+                "subject": {"type": "string", "description": "Short description of the event (for record)"},
+                "payload": {"type": "string", "description": "JSON payload with event details (for record)"},
+                "since": {"type": "string", "description": "Unix timestamp — filter entries after this time (for query)"},
+                "limit": {"type": "string", "description": "Max entries to return (default 50 for query, 10 for latest)", "default": "50"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_evidence,
     },
 ]
 
