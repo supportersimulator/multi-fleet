@@ -144,7 +144,7 @@ class SupersetBridge:
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Accept": "text/event-stream",
+                "Accept": "application/json, text/event-stream",
                 "Authorization": f"Bearer {self._api_key}",
             },
             method="POST",
@@ -293,9 +293,11 @@ class SupersetBridge:
     def create_task(self, title: str, description: str = "", priority: str = "medium") -> dict:
         """Create a task in Superset."""
         return self._call_tool("create_task", {
-            "title": title,
-            "description": description,
-            "priority": priority,
+            "tasks": [{
+                "title": title,
+                "description": description,
+                "priority": priority,
+            }],
         })
 
     def update_task(self, task_id: str, updates: dict) -> dict:
