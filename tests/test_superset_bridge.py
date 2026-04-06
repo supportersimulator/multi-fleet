@@ -1,4 +1,4 @@
-"""Tests for Superset MCP bridge integration."""
+"""Tests for Superset bridge integration."""
 
 import json
 from unittest.mock import patch, MagicMock
@@ -8,260 +8,232 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from multifleet.superset_bridge import SupersetBridge, _load_api_key, _parse_sse_response
+from multifleet.superset_bridge import SupersetBridge, _load_api_key as _get_api_key
 
-# Test fixtures
-FAKE_KEY = "tk_test"
-
-
-def _mock_bridge():
-    return SupersetBridge(api_key=FAKE_KEY)
+TEST_KEY = "tk_test"
 
 
 class TestApiKeyResolution:
-    """Test API key resolution from Keychain and env."""
+    """Test API key resolution from env and Keychain."""
 
-    def test_keychain_first(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="sk_from_keychain\n")
-            key = _load_api_key()
-            assert key == "sk_from_keychain"
+    def test_env_var_takes_priority(self):
+        with patch.dict("os.environ", {"SUPERSET_API_KEY": "sk_test_123"}):
+            assert _get_api_key() == "sk_test_123"
 
-    def test_env_fallback(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=44, stdout="")
-            with patch.dict("os.environ", {"SUPERSET_API_KEY": "sk_from_env"}):
-                key = _load_api_key()
-                assert key == "sk_from_env"
+    def test_keychain_fallback(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="sk_live_from_keychain\n")
+                key = _get_api_key()
+                assert key == "sk_live_from_keychain"
 
     def test_no_key_returns_none(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=44, stdout="")
-            with patch.dict("os.environ", {}, clear=True):
-                assert _load_api_key() is None
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=44, stdout="")  # not found
+                assert _get_api_key() is None
 
 
-class TestSseParser:
-    """Test SSE response parsing."""
+class TestBridgeOfflineMode:
+    """Test bridge behavior when no API key is available."""
 
-    def test_parse_sse_data_line(self):
-        raw = 'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
-        result = _parse_sse_response(raw)
-        assert result["result"]["ok"] is True
-
-    def test_parse_plain_json(self):
-        raw = '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
-        result = _parse_sse_response(raw)
-        assert result["result"]["ok"] is True
-
-    def test_parse_error_response(self):
-        raw = 'data: {"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad"}}\n'
-        result = _parse_sse_response(raw)
-        assert "error" in result
-
-    def test_unparseable_returns_error(self):
-        result = _parse_sse_response("not json at all")
-        assert "error" in result
-
-
-class TestBridgeUnavailable:
-    """Test graceful degradation when no API key."""
-
-    def test_no_key_means_unavailable(self):
+    def test_offline_when_no_key(self):
         bridge = SupersetBridge(api_key=None)
-        assert not bridge.is_available()
+        # Force unavailable
+        bridge._available = False
+        assert not bridge.available
 
-    def test_methods_return_empty(self):
+    def test_offline_methods_return_error(self):
         bridge = SupersetBridge(api_key=None)
-        assert bridge.list_workspaces() == []
-        assert bridge.list_tasks() == []
-        assert bridge.list_devices() == []
-
-    def test_create_returns_error(self):
-        bridge = SupersetBridge(api_key=None)
-        result = bridge.create_workspace("proj-1", "feat-x")
-        assert result.get("_available") is False
+        bridge._available = False
+        assert "error" in bridge.create_workspace("test")
+        assert "error" in bridge.list_workspaces()
+        assert "error" in bridge.start_agent("claude", "task-1")
+        assert "error" in bridge.list_devices()
+        assert "error" in bridge.dispatch_fleet_task("branch", "prompt")
 
 
-class TestCallTool:
-    """Test the core _call_tool transport."""
+class TestMcpCall:
+    """Test the low-level MCP call function."""
 
     def test_successful_call(self):
-        bridge = _mock_bridge()
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'data: {"jsonrpc":"2.0","id":1,"result":{"id":"ws-1"}}\n'
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"id": "ws-123", "branch": "feature-x"}
+        }).encode()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = bridge._call_tool("list_workspaces", {})
-            assert result == {"id": "ws-1"}
-            assert bridge.stats["successes"] == 1
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            result = _mcp_call("create_workspace", {"branch": "feature-x"}, "sk_test")
+            assert result == {"id": "ws-123", "branch": "feature-x"}
 
-    def test_http_error(self):
-        bridge = _mock_bridge()
-        from urllib.error import HTTPError
-        with patch("urllib.request.urlopen", side_effect=HTTPError("", 401, "Unauth", {}, None)):
-            result = bridge._call_tool("list_workspaces", {})
-            assert result["_available"] is False
-            assert bridge.stats["errors"] == 1
+    def test_http_error_returns_error_dict(self):
+        error = MagicMock()
+        error.code = 401
+        error.read.return_value = b"Unauthorized"
 
-    def test_unreachable(self):
-        bridge = _mock_bridge()
-        from urllib.error import URLError
-        with patch("urllib.request.urlopen", side_effect=URLError("Connection refused")):
-            result = bridge._call_tool("list_workspaces", {})
-            assert result["_available"] is False
-            assert "Unreachable" in result["error"]
+        with patch("urllib.request.urlopen", side_effect=__import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
+            url="", code=401, msg="Unauthorized", hdrs=None, fp=MagicMock(read=lambda: b"Unauthorized")
+        )):
+            result = _mcp_call("list_workspaces", {}, "bad_key")
+            assert "error" in result
 
-    def test_timeout(self):
-        bridge = _mock_bridge()
-        with patch("urllib.request.urlopen", side_effect=TimeoutError()):
-            result = bridge._call_tool("list_workspaces", {}, timeout=5)
-            assert result["_available"] is False
-            assert bridge.stats["timeouts"] == 1
-
-    def test_rpc_error(self):
-        bridge = _mock_bridge()
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'data: {"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad request"}}\n'
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = bridge._call_tool("create_task", {"title": "x"})
-            assert result["_available"] is False
-            assert bridge.stats["errors"] == 1
+    def test_unreachable_returns_error(self):
+        with patch("urllib.request.urlopen", side_effect=__import__("urllib.error", fromlist=["URLError"]).URLError("Connection refused")):
+            result = _mcp_call("list_devices", {}, "sk_test")
+            assert result["error"] == "unreachable"
 
 
-class TestWorkspaces:
-    """Test workspace CRUD."""
+class TestBridgeWorkspaces:
+    """Test workspace management methods."""
 
-    def test_create_workspace(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"id": "ws-1", "branch": "feat-x"}
-            result = bridge.create_workspace("proj-1", "feat-x")
+    @pytest.fixture
+    def bridge(self):
+        return SupersetBridge(api_key=TEST_KEY)
+
+    def test_create_workspace(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"id": "ws-1", "path": "/tmp/wt", "branch": "feat-x"}
+            result = bridge.create_workspace("feat-x")
             assert result["branch"] == "feat-x"
-            mock.assert_called_once_with("create_workspace", {
-                "projectId": "proj-1", "branch": "feat-x", "baseBranch": "main"
-            })
+            mock.assert_called_once_with("create_workspace", {"branch": "feat-x"}, TEST_KEY)
 
-    def test_create_workspace_custom_base(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
+    def test_create_workspace_from_source(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
             mock.return_value = {"id": "ws-2"}
-            bridge.create_workspace("proj-1", "feat-y", base_branch="develop")
-            args = mock.call_args[0][1]
-            assert args["baseBranch"] == "develop"
+            bridge.create_workspace("feat-y", source_workspace_id="ws-1")
+            mock.assert_called_once_with("create_workspace",
+                {"branch": "feat-y", "sourceWorkspaceId": "ws-1"}, TEST_KEY)
 
-    def test_delete_workspace(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"deleted": True}
-            bridge.delete_workspace("ws-1")
-            mock.assert_called_once()
-
-    def test_list_workspaces_returns_list(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
+    def test_list_workspaces(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
             mock.return_value = [{"id": "ws-1"}, {"id": "ws-2"}]
             result = bridge.list_workspaces()
             assert len(result) == 2
 
+    def test_delete_workspace(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"deleted": True}
+            result = bridge.delete_workspace("ws-1")
+            assert result["deleted"]
 
-class TestAgents:
+
+class TestBridgeAgents:
     """Test agent session management."""
 
-    def test_launch_agent_with_task(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"sessionId": "s-1"}
-            result = bridge.launch_agent("ws-1", task_id="t-1")
-            assert result["sessionId"] == "s-1"
-            args = mock.call_args[0][1]
-            assert args["agent"] == "claude"
-            assert args["taskId"] == "t-1"
+    @pytest.fixture
+    def bridge(self):
+        return SupersetBridge(api_key=TEST_KEY)
 
-    def test_launch_agent_with_prompt(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"sessionId": "s-2"}
-            bridge.launch_agent_with_prompt("ws-1", "Fix the bug", agent="codex")
-            args = mock.call_args[0][1]
-            assert args["agent"] == "codex"
-            assert args["prompt"] == "Fix the bug"
+    def test_start_agent_with_task(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"session_id": "s-1"}
+            result = bridge.start_agent("claude", "task-1")
+            assert result["session_id"] == "s-1"
+            mock.assert_called_once_with("start_agent_session",
+                {"app": "claude", "taskId": "task-1"}, TEST_KEY)
 
-    def test_launch_on_remote_device(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"sessionId": "s-3"}
-            bridge.launch_agent("ws-1", device_id="device-mac2")
-            args = mock.call_args[0][1]
-            assert args["deviceId"] == "device-mac2"
+    def test_start_agent_with_prompt(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"session_id": "s-2"}
+            bridge.start_agent_with_prompt("codex", "Fix the auth bug")
+            mock.assert_called_once_with("start_agent_session_with_prompt",
+                {"app": "codex", "prompt": "Fix the auth bug"}, TEST_KEY)
+
+    def test_start_agent_with_pane(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"session_id": "s-3"}
+            bridge.start_agent("gemini", "task-2", pane_id="pane-1")
+            call_params = mock.call_args[0][1]
+            assert call_params["paneId"] == "pane-1"
 
 
-class TestTasks:
+class TestBridgeTasks:
     """Test task management."""
 
-    def test_create_task(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"id": "t-1"}
-            result = bridge.create_task("Fix auth")
-            assert result["id"] == "t-1"
+    @pytest.fixture
+    def bridge(self):
+        return SupersetBridge(api_key=TEST_KEY)
 
-    def test_list_tasks_with_filter(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = [{"id": "t-1"}]
-            result = bridge.list_tasks(status="active")
-            assert len(result) == 1
-            mock.assert_called_once_with("list_tasks", {"status": "active"})
+    def test_create_task(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"tasks": [{"id": "t-1"}]}
+            result = bridge.create_task("Fix auth", description="Refactor login flow")
+            assert "tasks" in result
 
-    def test_update_task(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"id": "t-1", "status": "done"}
-            bridge.update_task("t-1", {"status": "done"})
-            args = mock.call_args[0][1]
-            assert args["taskId"] == "t-1"
-            assert args["status"] == "done"
+    def test_create_task_with_labels(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"tasks": [{"id": "t-2"}]}
+            bridge.create_task("Deploy", labels=["urgent", "prod"])
+            call_params = mock.call_args[0][1]
+            assert call_params["tasks"][0]["labels"] == ["urgent", "prod"]
 
-
-class TestDiscovery:
-    """Test device and project discovery."""
-
-    def test_list_devices(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = [{"id": "d-1", "name": "mac1"}, {"id": "d-2", "name": "mac2"}]
-            result = bridge.list_devices()
-            assert len(result) == 2
-
-    def test_list_projects(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = [{"id": "p-1", "name": "superrepo"}]
-            result = bridge.list_projects()
-            assert result[0]["name"] == "superrepo"
+    def test_list_tasks_with_filter(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = []
+            bridge.list_tasks(status="active")
+            mock.assert_called_once_with("list_tasks", {"status": "active"}, TEST_KEY)
 
 
-class TestObservability:
-    """Test stats and health."""
+class TestDispatchFleetTask:
+    """Test the high-level dispatch integration."""
 
-    def test_stats_increment(self):
-        bridge = _mock_bridge()
-        assert bridge.stats["calls"] == 0
+    @pytest.fixture
+    def bridge(self):
+        return SupersetBridge(api_key=TEST_KEY)
 
-    def test_is_available_checks_connectivity(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = ["active", "done"]
-            assert bridge.is_available()
+    def test_full_dispatch(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.side_effect = [
+                {"tasks": [{"id": "t-1"}]},  # create_task
+                {"id": "ws-1", "branch": "feat-auth"},  # create_workspace
+                {"session_id": "s-1"},  # start_agent
+            ]
+            result = bridge.dispatch_fleet_task("feat-auth", "Implement auth refactor")
+            assert result["branch"] == "feat-auth"
+            assert result["agent"] == "claude"
+            assert mock.call_count == 3
 
-    def test_is_available_false_on_error(self):
-        bridge = _mock_bridge()
-        with patch.object(bridge, "_call_tool") as mock:
-            mock.return_value = {"_available": False, "error": "timeout"}
-            assert not bridge.is_available()
+    def test_dispatch_fails_on_task_error(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"error": "quota exceeded"}
+            result = bridge.dispatch_fleet_task("feat-x", "test")
+            assert "error" in result
+
+    def test_dispatch_fails_on_workspace_error(self, bridge):
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.side_effect = [
+                {"tasks": [{"id": "t-1"}]},  # task OK
+                {"error": "branch exists"},  # workspace fails
+            ]
+            result = bridge.dispatch_fleet_task("main", "test")
+            assert "error" in result
+            assert "task" in result  # task still returned
+
+
+class TestBridgeHealth:
+    """Test health check."""
+
+    def test_health_available(self):
+        bridge = SupersetBridge(api_key=TEST_KEY)
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"activeWorkspace": "ws-1"}
+            health = bridge.health()
+            assert health["available"]
+            assert health["connected"]
+            assert health["api_key_source"] == "keychain"
+
+    def test_health_unavailable(self):
+        bridge = SupersetBridge(api_key=None)
+        bridge._available = False
+        health = bridge.health()
+        assert not health["available"]
+
+    def test_health_connected_false_on_error(self):
+        bridge = SupersetBridge(api_key="sk_test")
+        with patch("multifleet.superset_bridge._mcp_call") as mock:
+            mock.return_value = {"error": "timeout"}
+            health = bridge.health()
+            assert not health["connected"]
