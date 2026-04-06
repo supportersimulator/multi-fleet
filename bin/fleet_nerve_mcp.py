@@ -303,6 +303,15 @@ def fleet_send(target: str, type: str = "context", subject: str = "", body: str 
     message["from"] = message["from_node"]
     message["to"] = message["to_node"]
 
+    # Run FleetSendGate before sending
+    try:
+        from multifleet.invariance_gates import FleetSendGate
+        gate_result = FleetSendGate().check(message, rate_limiter=_rate_limiter)
+        if not gate_result.passed:
+            return {"sent": False, "gate_blocked": True, "gate": gate_result.to_dict()}
+    except ImportError:
+        pass  # Gate module not available — proceed without gate
+
     async def _do_send():
         nerve = _get_nats_instance()
         try:
@@ -346,6 +355,15 @@ def fleet_repair(target: str, action: str = "restart_nats", broken_channels: str
         broken_channels: comma-separated list of broken channels (e.g. "P1_nats,P2_http")
     """
     channels = [c.strip() for c in broken_channels.split(",") if c.strip()] if broken_channels else []
+
+    # Run FleetRepairGate before executing repair
+    try:
+        from multifleet.invariance_gates import FleetRepairGate
+        gate_result = FleetRepairGate().check(target, action)
+        if not gate_result.passed:
+            return {"repair_initiated": False, "gate_blocked": True, "gate": gate_result.to_dict()}
+    except ImportError:
+        pass  # Gate module not available — proceed without gate
 
     async def _do_repair():
         nerve = _get_nats_instance()
@@ -1266,6 +1284,66 @@ def fleet_gains_gate(quick: bool = False) -> dict:
         }
 
 
+# ── Invariance Gate Check ──
+
+def fleet_gate_check(gate: str, target: str = "", action: str = "",
+                     branch: str = "", quick: bool = True) -> dict:
+    """Run a fleet invariance gate on demand.
+
+    Args:
+        gate: which gate to run — "send", "repair", or "merge"
+        target: target node (required for send/repair gates)
+        action: repair action (for repair gate)
+        branch: branch name (for merge gate)
+        quick: quick mode for merge gate gains sub-check
+    """
+    try:
+        from multifleet.invariance_gates import (
+            FleetSendGate, FleetRepairGate, FleetMergeGate,
+        )
+    except ImportError as e:
+        return {"error": f"invariance_gates module not available: {e}"}
+
+    gate_lower = gate.lower()
+
+    if gate_lower == "send":
+        if not target:
+            return {"error": "target is required for send gate"}
+        # Build a minimal test packet
+        from multifleet.packet_registry import create_envelope
+        node_id = _get_node_id()
+        packet = create_envelope(
+            from_node=node_id, to=target, type="context",
+            payload={"subject": "gate_check", "body": "gate_check"},
+        )
+        packet["from"] = packet["from_node"]
+        packet["to"] = packet["to_node"]
+        result = FleetSendGate().check(packet, rate_limiter=_rate_limiter)
+        return result.to_dict()
+
+    elif gate_lower == "repair":
+        if not target:
+            return {"error": "target is required for repair gate"}
+        result = FleetRepairGate().check(target, action or "restart_nats")
+        return result.to_dict()
+
+    elif gate_lower == "merge":
+        if not branch:
+            return {"error": "branch is required for merge gate"}
+        gains = None
+        if quick:
+            try:
+                from multifleet.gains_gate import FleetGainsGate
+                gains = FleetGainsGate(daemon_port=FLEET_NERVE_PORT)
+            except ImportError:
+                pass
+        result = FleetMergeGate().check(branch, gains_gate=gains)
+        return result.to_dict()
+
+    else:
+        return {"error": f"Unknown gate: '{gate}'. Valid: send, repair, merge"}
+
+
 # ── Lease Management ──
 
 def _get_lease_manager():
@@ -1785,6 +1863,102 @@ def fleet_liaison_status() -> dict:
     return liaison.to_dict()
 
 
+def fleet_status_snapshot() -> dict:
+    """Return aggregated fleet status snapshot — daemon health, peers, liaison, rebuttals, leases, recent events, and health dot."""
+    try:
+        from multifleet.status_aggregator import FleetStatusAggregator
+        aggregator = FleetStatusAggregator(
+            daemon_url=f"http://127.0.0.1:{os.environ.get('FLEET_DAEMON_PORT', '8855')}",
+            node_id=NODE_ID,
+        )
+        return aggregator.snapshot()
+    except Exception as e:
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+# ── Hierarchy Tool ──
+
+def fleet_hierarchy(action: str, node_id: str = "", role: str = "",
+                    captain_id: str = "", cluster_id: str = "",
+                    capabilities: str = "", from_node: str = "",
+                    to_node: str = "", candidates: str = "") -> dict:
+    """Manage fleet hierarchy — roles, routing, elections.
+
+    Actions:
+      status   — show current hierarchy (nodes, roles, chief)
+      promote  — promote a node to captain (requires node_id)
+      elect    — run chief election (requires candidates as comma-separated node IDs)
+      route    — show routing path between two nodes (requires from_node, to_node)
+      register — register a node (requires node_id, role; optional captain_id, cluster_id, capabilities)
+      nats     — show NATS subject for a node (requires node_id)
+    """
+    try:
+        from multifleet.hierarchy import FleetHierarchy, NodeRole
+    except ImportError:
+        return {"error": "hierarchy module not available"}
+
+    config = _load_config()
+    hierarchy = FleetHierarchy(config)
+
+    if action == "status":
+        data = hierarchy.to_dict()
+        data["node_count"] = len(data.get("nodes", {}))
+        # Summarize by role
+        roles = {}
+        for n in data.get("nodes", {}).values():
+            r = n.get("role", "unknown")
+            roles[r] = roles.get(r, 0) + 1
+        data["role_summary"] = roles
+        return data
+
+    if action == "register":
+        if not node_id or not role:
+            return {"error": "register requires node_id and role"}
+        try:
+            nr = NodeRole(role)
+        except ValueError:
+            return {"error": f"Invalid role: {role}. Use: chief, captain, worker"}
+        caps = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities else []
+        node = hierarchy.register_node(
+            node_id=node_id, role=nr,
+            captain_id=captain_id or None,
+            cluster_id=cluster_id or None,
+            capabilities=caps or None,
+        )
+        return {"registered": node.to_dict()}
+
+    if action == "promote":
+        if not node_id:
+            return {"error": "promote requires node_id"}
+        ok = hierarchy.promote_to_captain(node_id, cluster_id=cluster_id or None)
+        return {"promoted": ok, "node_id": node_id}
+
+    if action == "elect":
+        if not candidates:
+            return {"error": "elect requires candidates (comma-separated node IDs)"}
+        cands = [c.strip() for c in candidates.split(",") if c.strip()]
+        try:
+            winner = hierarchy.elect_chief(cands)
+            return {"elected_chief": winner, "candidates": cands}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if action == "route":
+        if not from_node or not to_node:
+            return {"error": "route requires from_node and to_node"}
+        path = hierarchy.route_message(from_node, to_node)
+        return {"from": from_node, "to": to_node, "path": path, "hops": len(path) - 1}
+
+    if action == "nats":
+        if not node_id:
+            return {"error": "nats requires node_id"}
+        subject = hierarchy.nats_subject(node_id)
+        subs = hierarchy.nats_subscribe_subjects(node_id)
+        return {"node_id": node_id, "publish_subject": subject, "subscribe_subjects": subs}
+
+    return {"error": f"Unknown action: {action}. Use: status, register, promote, elect, route, nats"}
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -2014,6 +2188,22 @@ TOOLS = [
         "fn": fleet_gains_gate,
     },
     {
+        "name": "fleet_gate_check",
+        "description": "Run a fleet invariance gate on demand. Gates: 'send' (validates packet schema/auth/rate), 'repair' (verifies repair is warranted), 'merge' (pre-merge lease/consensus/health). Returns structured pass/fail.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "gate": {"type": "string", "enum": ["send", "repair", "merge"], "description": "Which gate to run"},
+                "target": {"type": "string", "description": "Target node (required for send/repair gates)"},
+                "action": {"type": "string", "description": "Repair action (for repair gate)", "default": "restart_nats"},
+                "branch": {"type": "string", "description": "Branch name (for merge gate)"},
+                "quick": {"type": "boolean", "description": "Quick mode for merge gate gains sub-check", "default": True},
+            },
+            "required": ["gate"],
+        },
+        "fn": fleet_gate_check,
+    },
+    {
         "name": "fleet_lease",
         "description": "Manage resource leases — acquire, release, renew, or query ownership to prevent dual-work across nodes.",
         "inputSchema": {
@@ -2097,6 +2287,12 @@ TOOLS = [
         "fn": fleet_liaison_status,
     },
     {
+        "name": "fleet_status_snapshot",
+        "description": "Aggregated fleet status snapshot — daemon health, peers, liaison state, rebuttals, leases, recent events, and health dot (green/yellow/red). Single-source fleet status for IDE consumption.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": fleet_status_snapshot,
+    },
+    {
         "name": "fleet_cross_rebuttal",
         "description": "Orchestrate cross-machine rebuttal protocol — the 4-phase cycle (task_brief -> local verdicts -> cross-critique -> chief synthesis). Actions: start, verdict, critique, status, synthesize, list.",
         "inputSchema": {
@@ -2109,6 +2305,26 @@ TOOLS = [
             "required": ["action"],
         },
         "fn": fleet_cross_rebuttal,
+    },
+    {
+        "name": "fleet_hierarchy",
+        "description": "Manage fleet hierarchy — roles (chief/captain/worker), routing paths, NATS subjects, and chief elections. Actions: status, register, promote, elect, route, nats.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["status", "register", "promote", "elect", "route", "nats"], "description": "Hierarchy action"},
+                "node_id": {"type": "string", "description": "Node ID (for register, promote, nats)"},
+                "role": {"type": "string", "enum": ["chief", "captain", "worker"], "description": "Node role (for register)"},
+                "captain_id": {"type": "string", "description": "Captain to assign worker to (for register)"},
+                "cluster_id": {"type": "string", "description": "Cluster/region ID (for register, promote)"},
+                "capabilities": {"type": "string", "description": "Comma-separated capabilities (for register)"},
+                "from_node": {"type": "string", "description": "Source node (for route)"},
+                "to_node": {"type": "string", "description": "Destination node (for route)"},
+                "candidates": {"type": "string", "description": "Comma-separated candidate node IDs (for elect)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_hierarchy,
     },
 ]
 
