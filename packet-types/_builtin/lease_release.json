@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "lease_release",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Notification that a resource lease has been released",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "resource_id": {"type": "string", "description": "Resource being released"},
+      "released_by": {"type": "string", "description": "Node ID releasing the lease"}
+    },
+    "required": ["resource_id", "released_by"]
+  },
+  "ttl_s": 60,
+  "priority": "normal"
+}
