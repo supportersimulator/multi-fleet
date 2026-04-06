@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fleet CLI wrapper — run from anywhere
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 -m multifleet.cli "$@"
