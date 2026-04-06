@@ -83,19 +83,20 @@ That's it. The plugin auto-discovers skills, commands, hooks, and agents from `p
 | Feature | Status | Description |
 |---------|--------|-------------|
 | Cross-IDE support | Stable | Claude Code (native), Cursor, VS Code, Codex CLI, Gemini. Generated manifests from canonical source |
-| 16 skills | Stable | Full fleet operation coverage including invariance gates |
-| 10 commands | Stable | CLI-driven fleet operations |
+| 24 skills | Stable | Full fleet operation coverage including invariance gates, chain orchestration, verdicts |
+| 18 commands | Stable | CLI-driven fleet operations |
 | 2 agents | Stable | Fleet-coordinator (orchestration) and fleet-worker (autonomous execution) |
+| 20 MCP tools | Stable | Full fleet operation via MCP protocol (fleet_send, fleet_task, fleet_status, etc.) |
 | Per-session seed files | Stable | Messages arrive as `/tmp/fleet-seed-*.md`, injected on next prompt via hook |
 
 ### Testing
 
 | Metric | Value |
 |--------|-------|
-| Test files | 7 (config, MCP, repair, send, watchdog, worker, conftest) |
-| Test functions | 71 |
-| Test lines | 1,039 |
-| Coverage areas | Config loading, MCP protocol, fallback cascade, self-healing, worker dispatch, heartbeat, broadcast, HMAC |
+| Test files | 25 |
+| Test functions | 557 |
+| Test lines | 6,191 |
+| Coverage areas | Config, MCP, fallback cascade, self-healing, worker dispatch, heartbeat, HMAC, packets, packet registry, sanitize, store, leases, eventbus, coordinator, channel cascade, dedup, superset bridge, task state, doctor, audit, hooks, seed validation |
 
 ---
 
@@ -130,7 +131,7 @@ Every machine runs a lightweight daemon (port 8855) with 4 background threads:
 +-- Fleet Nerve Daemon (port 8855) ----------------------------+
 |                                                               |
 |  HTTP Server ---- /health, /message, /inbox, /peers, /stats  |
-|       |           /sessions/gold, /work, /wal/*               |
+|       |           /sessions/gold, /work, /wal/*, /doctor      |
 |       |                                                       |
 |  +-- Background Threads ----------------------------------+   |
 |  | 1. UDP Heartbeat Sender (10s) -- git-enriched packets  |   |
@@ -140,6 +141,13 @@ Every machine runs a lightweight daemon (port 8855) with 4 background threads:
 |  +--------------------------------------------------------+   |
 |                                                               |
 |  SQLite Store -- messages, peers, outbox, WAL                 |
+|                                                               |
+|  Packet Registry -- 7 built-in types (ack, heartbeat,         |
+|    lease_request, lease_grant, lease_release, repair,          |
+|    sync_hold) with JSON Schema validation                     |
+|                                                               |
+|  Task State Machine -- durable SQLite-backed task lifecycle   |
+|    (pending→claimed→running→done/failed/cancelled)            |
 +---------------------------------------------------------------+
 ```
 
@@ -183,6 +191,7 @@ Rate limit: 3 repair escalations per node per hour. Local-first principle: targe
 | `using-multi-fleet` | Bootstrap | Architecture overview, role guide, skill index |
 | `fleet-send` | Core | Send messages (context, task, alert, broadcast) with 9-priority fallback |
 | `fleet-task` | Core | Dispatch autonomous session-aware work to another machine |
+| `fleet-dispatch` | Core | Remote worker dispatch with priority routing and result tracking |
 | `fleet-status` | Core | Quick health check -- who's online, idle, working |
 | `fleet-check` | Core | Run full 7-channel communication test to a target node |
 | `fleet-repair` | Core | 4-level repair escalation for broken channels |
@@ -190,7 +199,14 @@ Rate limit: 3 repair escalations per node per hour. Local-first principle: targe
 | `fleet-tunnel` | Core | SSH tunnel management for restricted networks |
 | `fleet-worker` | Core | tmux-isolated worker pool -- no interactive session disruption |
 | `fleet-watchdog` | Core | Continuous health monitoring with auto-repair triggers |
+| `fleet-idle` | Core | Productive idle -- automatic work discovery when nodes are idle |
+| `fleet-ack` | Core | Delivery confirmation protocol -- ACK tracking, retry, failure alerting |
+| `fleet-security` | Core | HMAC signing, replay prevention, peer validation, session gold sanitization |
 | `productivity-view` | Core | Live fleet-wide dashboard of nodes, agents, and backlog |
+| `fleet-chain` | Orchestration | Chain orchestration -- multi-step task dependencies with automatic sequencing |
+| `fleet-orchestrate` | Orchestration | Parallel scatter-gather, pipeline, fan-out/fan-in across fleet nodes |
+| `fleet-verdict` | Consensus | Structured verdict packets for cross-machine 3x3x3 consensus |
+| `fleet-rebuttal` | Consensus | 4-phase cross-machine critique cycle converging on chief decision |
 | `fleet-protocol` | Invariance | Self-healing communication invariant and background healing agents |
 | `fleet-config-gate` | Hard Gate | Verify safety and blast radius before changing fleet configuration |
 | `fleet-dispatch-gate` | Hard Gate | Verify target readiness and task safety before dispatching work |
@@ -324,13 +340,17 @@ Full specification: [COMMS-PROTOCOL.md](COMMS-PROTOCOL.md)
 
 ```
 multi-fleet/
-  skills/              16 skill definitions
-  commands/            10 command definitions
+  skills/              24 skill definitions
+  commands/            18 command definitions
   agents/              2 agent definitions (coordinator, worker)
   hooks/               4 lifecycle hooks (SessionStart, UserPromptSubmit, TeammateIdle, Stop)
+  multifleet/          22 core modules (channels, config, coordinator, discovery, doctor,
+                         eventbus, leases, mcp, nats_client, packet_registry, packet_store,
+                         packets, sanitize, security, self_heal, sessions, store,
+                         superset_bridge, task_state, visual, worker, audit)
   config/              Template config + IDE adapter manifests
   scripts/             Build manifests, setup, utilities
-  tests/               71 tests across 7 files (1,039 lines)
+  tests/               557 tests across 25 files (6,191 lines)
   bin/                 fleet-nerve-mcp entrypoint
   package.json         Plugin metadata + MCP server definition
   COMMS-PROTOCOL.md    Canonical communication specification
