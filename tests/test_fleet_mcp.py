@@ -116,7 +116,7 @@ class TestFleetSend:
         mock_resp.read.return_value = b'{"delivered": true, "channel": "P1_nats"}'
         with patch("tools.fleet_nerve_mcp._run_async", side_effect=Exception("NATS down")):
             with patch("urllib.request.urlopen", return_value=mock_resp):
-                with patch("tools.fleet_nerve_config.load_peers", return_value=(
+                with patch("multifleet.config.load_peers", return_value=(
                     {"mac2": {"ip": "10.0.0.2", "port": 8855}}, None,
                 )):
                     result = fleet_send(target="mac2", body="hello")
@@ -126,7 +126,7 @@ class TestFleetSend:
     def test_send_unknown_peer_returns_error(self):
         """When NATS fails and peer is unknown, returns error."""
         with patch("tools.fleet_nerve_mcp._run_async", side_effect=Exception("NATS down")):
-            with patch("tools.fleet_nerve_config.load_peers", return_value=({}, None)):
+            with patch("multifleet.config.load_peers", return_value=({}, None)):
                 result = fleet_send(target="unknown", body="hello")
                 assert result["sent"] is False
                 assert "Unknown peer" in result.get("error", "")
