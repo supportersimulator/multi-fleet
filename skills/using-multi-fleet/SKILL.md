@@ -406,14 +406,4 @@ curl -s http://127.0.0.1:8855/fleet/live | python3 -m json.tool
 4. **Self-healing** — broken channels are detected and repaired automatically. When P3+ is used, repair of P1/P2 triggers immediately. The fleet is not healthy until ALL nodes have P1+P2.
 5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session.
 6. **Idle sessions work** — sessions idle >5min pick up fleet tasks and channel repairs. No wasted compute.
-2. **Always deliver** — the 8-priority fallback chain ensures messages reach their target. Direct text injection is always last resort. See HARD-GATE section.
-3. **Session awareness** — task agents inherit context from the target's active session. They don't work blind.
-4. **Self-healing is mandatory** — broken channels are detected and repaired automatically. Not best-effort — invariant. See HARD-GATE section.
-5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session. P8 (text injection) only when P1-P7 exhausted.
-6. **Idle = explore** — no node sits silent when there is discoverable work. See HARD-GATE Idle Protocol.
-7. **Secrets never in code** — env var → Keychain → AWS. Fallbacks flagged. See HARD-GATE Secrets Invariant.
-2. **Always deliver** — the 8-priority fallback chain ensures messages reach their target. Even if it takes git push as a last resort.
-3. **Session awareness** — task agents inherit context from the target's active session. They don't work blind.
-4. **Self-healing** — broken channels are detected and repaired automatically. The fleet MUST converge to all-channels-working state.
-5. **No disruption** — most message types are non-disruptive. Only `alert` interrupts the target session.
-6. **Never idle** — idle machines study plans, check health, propose improvements. Idle is wasted capacity.
+7. **Secrets never in code** — env var → Keychain → AWS. Fallbacks flagged.
