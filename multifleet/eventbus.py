@@ -51,6 +51,7 @@ class FleetEventBus:
         self._daemon_port = daemon_port
         self._eventbus_available: Optional[bool] = None  # None = unknown
         self._last_availability_check: float = 0.0
+        self._core_bus = None  # In-process EventBus (set by daemon when co-located)
         self._stats = {
             "emitted": 0,
             "eventbus_delivered": 0,
@@ -58,6 +59,14 @@ class FleetEventBus:
             "broadcast_sent": 0,
             "errors": 0,
         }
+
+    def set_core_bus(self, core_bus) -> None:
+        """Inject the in-process EventBus for direct emit (no HTTP overhead).
+
+        Called by the daemon when EventBusServer is co-located in the same process.
+        """
+        self._core_bus = core_bus
+        logger.info("FleetEventBus: using in-process EventBus (direct emit)")
 
     # ── Core emit ──
 
@@ -119,7 +128,22 @@ class FleetEventBus:
     # ── EventBus transport ──
 
     def _try_eventbus(self, event: dict) -> bool:
-        """POST event to 3-surgeons EventBus. Returns True on 2xx."""
+        """Deliver event to EventBus. Prefers in-process bus, falls back to HTTP POST."""
+        # Fast path: in-process EventBus (same daemon process, no HTTP)
+        if self._core_bus is not None:
+            try:
+                self._core_bus.emit(
+                    event_type=event["type"],
+                    payload=event.get("payload", {}),
+                    source=event.get("source", f"fleet-nerve:{self._node_id}"),
+                    correlation_id=event.get("metadata", {}).get("correlation_id"),
+                )
+                return True
+            except Exception as exc:
+                logger.debug("In-process EventBus emit failed: %s", exc)
+                # Fall through to HTTP
+
+        # Slow path: HTTP POST to EventBus server
         if not self._is_eventbus_available():
             return False
 
