@@ -14,7 +14,6 @@ import json
 import logging
 import time
 from collections import defaultdict, deque
-from http import HTTPStatus
 from typing import Callable, Optional
 
 from .event_types import create_event, validate_namespace
@@ -370,12 +369,17 @@ class EventBusServer:
 
     # ── HTTP handler for SSE and health ──
 
-    async def _http_handler(self, path, request_headers):
+    def _http_handler(self, connection, request):
         """Handle non-WebSocket HTTP requests (SSE, health).
 
-        Returns (status, headers, body) for HTTP responses,
-        or None to proceed with WebSocket upgrade.
+        websockets v16 API: process_request(connection, request) -> Response | None.
+        Returns a Response to short-circuit, or None to proceed with WS upgrade.
         """
+        from websockets.http11 import Response
+        from websockets.datastructures import Headers
+
+        path = request.path
+
         if path == "/health":
             from multifleet.protocol import PROTOCOL_VERSION
             from multifleet.metrics import fleet_metrics
@@ -387,30 +391,29 @@ class EventBusServer:
                 "bus_stats": self._bus.stats,
                 "metrics": fleet_metrics.snapshot(),
             }).encode()
-            return (
-                HTTPStatus.OK,
-                [("Content-Type", "application/json")],
+            return Response(
+                200, "OK",
+                Headers([("Content-Type", "application/json")]),
                 body,
             )
 
         if path == "/events":
-            # SSE endpoint — return headers and start streaming
-            # websockets doesn't support long-lived SSE easily, so we return
-            # recent events as a JSON array for simple polling
             events = self._bus.recent(limit=50)
             body = json.dumps(events).encode()
-            return (
-                HTTPStatus.OK,
-                [("Content-Type", "application/json"),
-                 ("Cache-Control", "no-cache")],
+            return Response(
+                200, "OK",
+                Headers([
+                    ("Content-Type", "application/json"),
+                    ("Cache-Control", "no-cache"),
+                ]),
                 body,
             )
 
         if path == "/stats":
             body = json.dumps(self._bus.stats).encode()
-            return (
-                HTTPStatus.OK,
-                [("Content-Type", "application/json")],
+            return Response(
+                200, "OK",
+                Headers([("Content-Type", "application/json")]),
                 body,
             )
 
