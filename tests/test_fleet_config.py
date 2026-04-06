@@ -131,6 +131,6 @@ class TestLoadPeers:
     def test_no_config_returns_empty(self):
         with patch("tools.fleet_nerve_config.JSON_CONF", Path("/nonexistent/config.json")):
             with patch("tools.fleet_nerve_config.SHELL_CONF", Path("/nonexistent/shell.conf")):
-                peers, chief = load_peers()
+                peers, chief = load_peers(include_discovered=False)
                 assert peers == {}
                 assert chief is None

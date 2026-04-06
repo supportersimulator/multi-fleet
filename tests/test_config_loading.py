@@ -36,7 +36,7 @@ class TestMissingConfigFile:
     def test_json_missing_falls_back_to_shell(self, shell_conf_file):
         """When JSON config is missing, shell conf is used."""
         with patch("tools.fleet_nerve_config.JSON_CONF", Path("/nonexistent/config.json")):
-            peers, chief = load_peers(conf_path=str(shell_conf_file))
+            peers, chief = load_peers(conf_path=str(shell_conf_file), include_discovered=False)
             assert len(peers) == 3
             assert chief == "mac1"
 

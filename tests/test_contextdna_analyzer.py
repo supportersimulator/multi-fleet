@@ -329,6 +329,9 @@ class TestAutoRegistration:
         """ChiefSynthesis handles ImportError from contextdna_analyzer."""
         import importlib
         from multifleet import synthesis as syn_mod
+        # Save original module dict so reload doesn't poison class identity
+        # for other test files that imported SynthesisResult at module level.
+        orig_attrs = dict(syn_mod.__dict__)
         try:
             with patch.dict("sys.modules", {"multifleet.contextdna_analyzer": None}):
                 # Force reimport of synthesis to test the try/except ImportError
@@ -339,9 +342,10 @@ class TestAutoRegistration:
                 result = engine.synthesize("t1", {"mac1": _verdict()})
                 assert result.decision == "merge"
         finally:
-            # Restore original module so SynthesisResult class identity is preserved
-            # for other test files that imported it at module level.
-            importlib.reload(syn_mod)
+            # Restore original module attrs so SynthesisResult class identity
+            # is preserved for other test files.
+            syn_mod.__dict__.clear()
+            syn_mod.__dict__.update(orig_attrs)
 
 
 # ── Integration: full flow with mocked memory ───────────────────────────────
