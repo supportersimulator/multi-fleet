@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "task_result",
+  "version": 1,
+  "owner": "coordination",
+  "description": "Result of a dispatched task",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "task_id": {"type": "string"},
+      "status": {"type": "string", "enum": ["completed", "failed", "timeout"]},
+      "output": {"type": "string"},
+      "duration_s": {"type": "number", "minimum": 0},
+      "error": {"type": "string"}
+    },
+    "required": ["task_id", "status"]
+  },
+  "ttl_s": 3600,
+  "priority": "normal"
+}
