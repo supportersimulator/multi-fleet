@@ -59,6 +59,13 @@ import logging
 
 logger = logging.getLogger("fleet-nerve-mcp")
 
+# Rate limiter (prevents runaway agents from flooding the fleet)
+try:
+    from multifleet.rate_limit import RateLimiter
+    _rate_limiter = RateLimiter()
+except ImportError:
+    _rate_limiter = None  # type: ignore
+
 # Audit trail (optional — graceful if not available)
 try:
     from multifleet.audit import get_audit_trail
@@ -1211,6 +1218,24 @@ def _get_lease_manager():
         return None
 
 
+def _get_rebuttal_manager():
+    """Get or create a RebuttalManager instance (lazy init)."""
+    global _rebuttal_manager
+    try:
+        return _rebuttal_manager
+    except NameError:
+        pass
+    try:
+        from multifleet.rebuttal import RebuttalManager
+        from multifleet.store import FleetNerveStore
+        store = FleetNerveStore()
+        _rebuttal_manager = RebuttalManager(store, NODE_ID)
+        return _rebuttal_manager
+    except Exception as e:
+        logger.warning(f"RebuttalManager init failed: {e}")
+        return None
+
+
 def _get_eventbus():
     """Get or create a FleetEventBus instance (lazy init)."""
     global _fleet_eventbus
@@ -1263,6 +1288,73 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
         return {"leases": leases, "count": len(leases), "stats": mgr.stats}
     else:
         return {"error": f"unknown action: {action}, expected: acquire|release|renew|query|list"}
+
+
+def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
+                   body: str = "", reason: str = "", scope: str = "general",
+                   resolution: str = "") -> dict:
+    """Manage fleet proposals and rebuttals — structured consensus protocol.
+
+    Actions: propose, review, accept, rebut, counter, resolve, list, get.
+    """
+    mgr = _get_rebuttal_manager()
+    if mgr is None:
+        return {"error": "RebuttalManager not available"}
+
+    eventbus = _get_eventbus()
+
+    if action == "propose":
+        if not subject or not body:
+            return {"error": "subject and body required for propose"}
+        result = mgr.propose(subject, body, scope=scope)
+        if result and eventbus:
+            eventbus.emit("rebuttal.proposed", {
+                "proposal_id": result["proposal_id"], "subject": subject,
+                "proposer": NODE_ID, "scope": scope,
+            }, broadcast=True)
+        return result
+    elif action == "review":
+        if not proposal_id:
+            return {"error": "proposal_id required for review"}
+        return mgr.review(proposal_id)
+    elif action == "accept":
+        if not proposal_id:
+            return {"error": "proposal_id required for accept"}
+        result = mgr.accept(proposal_id, reason=reason)
+        if result and result.get("state") == "accepted" and eventbus:
+            eventbus.emit("rebuttal.resolved", {
+                "proposal_id": proposal_id, "resolution": "accepted",
+                "actor": NODE_ID,
+            }, broadcast=True)
+        return result
+    elif action == "rebut":
+        if not proposal_id or not reason:
+            return {"error": "proposal_id and reason required for rebut"}
+        return mgr.rebut(proposal_id, reason, counter=body)
+    elif action == "counter":
+        if not proposal_id or not body:
+            return {"error": "proposal_id and body required for counter"}
+        return mgr.counter_propose(proposal_id, body)
+    elif action == "resolve":
+        if not proposal_id or not resolution:
+            return {"error": "proposal_id and resolution required for resolve"}
+        result = mgr.resolve(proposal_id, resolution)
+        if result and result.get("state") == "resolved" and eventbus:
+            eventbus.emit("rebuttal.resolved", {
+                "proposal_id": proposal_id, "resolution": resolution,
+                "actor": NODE_ID,
+            }, broadcast=True)
+        return result
+    elif action == "list":
+        proposals = mgr.list_active(state=scope if scope != "general" else None)
+        return {"proposals": proposals, "count": len(proposals), "stats": mgr.stats}
+    elif action == "get":
+        if not proposal_id:
+            return {"error": "proposal_id required for get"}
+        result = mgr.get(proposal_id)
+        return result if result else {"error": f"proposal {proposal_id} not found"}
+    else:
+        return {"error": f"unknown action: {action}, expected: propose|review|accept|rebut|counter|resolve|list|get"}
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
@@ -1495,6 +1587,24 @@ TOOLS = [
         },
         "fn": fleet_lease,
     },
+    {
+        "name": "fleet_rebuttal",
+        "description": "Manage fleet proposals and rebuttals — structured consensus protocol for disagreements. Actions: propose (create), review, accept, rebut (with reason), counter (counter-propose), resolve (final decision), list (active), get (by ID).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["propose", "review", "accept", "rebut", "counter", "resolve", "list", "get"], "description": "Rebuttal action"},
+                "proposal_id": {"type": "string", "description": "Proposal UUID (required for all actions except propose/list)"},
+                "subject": {"type": "string", "description": "Proposal subject (for propose)"},
+                "body": {"type": "string", "description": "Proposal body (for propose) or counter-proposal text (for counter/rebut)"},
+                "reason": {"type": "string", "description": "Reason for accept/rebut"},
+                "scope": {"type": "string", "description": "Scope: general, architecture, infra, breaking (for propose). For list: filter by state.", "default": "general"},
+                "resolution": {"type": "string", "description": "Resolution text (for resolve)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_rebuttal,
+    },
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
@@ -1525,6 +1635,12 @@ def handle_request(request: dict) -> dict:
         tool = TOOLS_BY_NAME.get(tool_name)
         if not tool:
             return {"content": [{"type": "text", "text": json.dumps({"error": f"Unknown tool: {tool_name}"})}], "isError": True}
+        # Rate limit check (before any work)
+        if _rate_limiter is not None:
+            allowed, reason = _rate_limiter.check(tool_name)
+            if not allowed:
+                logger.warning("rate_limited tool=%s reason=%s", tool_name, reason)
+                return {"content": [{"type": "text", "text": json.dumps({"error": reason, "rate_limited": True})}], "isError": True}
         t0 = time.monotonic()
         try:
             result = tool["fn"](**args)

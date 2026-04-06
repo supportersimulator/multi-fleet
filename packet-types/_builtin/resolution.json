@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "resolution",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Final resolution of a proposal/rebuttal chain",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "proposal_id": {"type": "string", "description": "UUID of the proposal being resolved"},
+      "resolution": {
+        "type": "string",
+        "enum": ["accepted", "rejected", "merged", "deferred"],
+        "description": "Resolution outcome"
+      },
+      "summary": {"type": "string", "description": "Summary of the resolution decision"}
+    },
+    "required": ["proposal_id", "resolution"]
+  },
+  "ttl_s": 3600,
+  "priority": "normal"
+}
