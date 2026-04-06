@@ -378,12 +378,14 @@ class EventBusServer:
         """
         if path == "/health":
             from multifleet.protocol import PROTOCOL_VERSION
+            from multifleet.metrics import fleet_metrics
             body = json.dumps({
                 "status": "ok",
                 "protocol_version": PROTOCOL_VERSION,
                 "clients": len(self._clients),
                 "sse_clients": len(self._sse_clients),
                 "bus_stats": self._bus.stats,
+                "metrics": fleet_metrics.snapshot(),
             }).encode()
             return (
                 HTTPStatus.OK,
@@ -451,7 +453,8 @@ class SSEHandler:
             await self._stream_events(writer)
         elif "GET /health" in request_str:
             from multifleet.protocol import PROTOCOL_VERSION as _PV
-            body = json.dumps({"status": "ok", "protocol_version": _PV, "sse_clients": len(self._clients)}).encode()
+            from multifleet.metrics import fleet_metrics as _fm
+            body = json.dumps({"status": "ok", "protocol_version": _PV, "sse_clients": len(self._clients), "metrics": _fm.snapshot()}).encode()
             response = (
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: application/json\r\n"
