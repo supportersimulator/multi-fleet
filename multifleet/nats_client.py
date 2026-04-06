@@ -1618,6 +1618,13 @@ class FleetNerveNATS:
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+                elif self.path == "/dashboard/data":
+                    try:
+                        from .dashboard_data import FleetDashboardData
+                        dd = FleetDashboardData(daemon_port=8855)
+                        self._json_response(200, dd.snapshot())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/broadcast/health":
                     # Run async broadcast in the event loop
                     future = asyncio.run_coroutine_threadsafe(daemon.broadcast_health(), main_loop)
