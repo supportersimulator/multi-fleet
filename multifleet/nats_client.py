@@ -141,6 +141,9 @@ from .channels import (  # noqa: E402
     ChannelState,
     CommunicationProtocol,
 )
+from .discovery import FleetDiscoveryManager  # noqa: E402
+from .self_heal import SelfHealManager  # noqa: E402
+from .sessions import SessionManager  # noqa: E402
 
 
 # ── Subjects ──
@@ -212,6 +215,12 @@ class FleetNerveNATS:
             self._discovery = None
         # Communication protocol (self-healing, channel state tracking)
         self.protocol = CommunicationProtocol(self)
+        # Self-healing, watchdog, and repair escalation
+        self._healer = SelfHealManager(self)
+        # Discovery, gossip, and heartbeat
+        self._disco = FleetDiscoveryManager(self)
+        # Session management (injection, detection, notifications)
+        self._sessions = SessionManager(self)
 
     async def connect(self):
         """Connect to NATS server with auto-reconnect.
@@ -440,53 +449,12 @@ class FleetNerveNATS:
             self._stats["errors"] += 1
 
     async def _handle_heartbeat(self, msg):
-        """Track peer heartbeats. Auto-adds unknown peers. Clears stale repair/channel state."""
-        try:
-            data = json.loads(msg.data.decode())
-            node = data.get("node", "unknown")
-            if node != self.node_id:
-                was_unknown = node not in self._peers and node not in self._peers_config
-                self._peers[node] = {**data, "_received_at": time.time()}
-                # Fresh heartbeat = peer is alive on NATS. Clear any stale repair state.
-                if hasattr(self, '_repair_in_progress'):
-                    self._repair_in_progress.pop(node, None)
-                if hasattr(self, 'protocol') and self.protocol:
-                    self.protocol.channel_state.record_success(node, "P1_nats", 0)
-                # Auto-add unknown peers to discovery (don't reject)
-                if was_unknown:
-                    logger.info(f"Auto-discovered new peer via NATS heartbeat: {node}")
-                if hasattr(self, '_discovery') and self._discovery:
-                    peer_ip = data.get("ip", "")
-                    peer_port = data.get("port", 8855)
-                    self._discovery.add_nats_peer(node, ip=peer_ip, port=peer_port)
-        except Exception:
-            pass
+        return await self._disco.handle_heartbeat(msg)
+
+    # ── Self-healing / Repair — delegated to SelfHealManager ──
 
     async def _ssh_repair_peer(self, ip: str, user: str, action: str):
-        """L3 escalation: SSH into peer and fix their broken channel after 2min timeout."""
-        import subprocess as _sp
-        REPAIR_COMMANDS = {
-            "restart_nats": "pkill -f fleet_nerve_nats; sleep 2; cd ~/dev/er-simulator-superrepo && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
-            "restart_tunnel": "pkill -f 'ssh.*4222'; sleep 1; autossh -M 0 -f -N -L 4222:127.0.0.1:4222 chief 2>/dev/null || true",
-            "restart_daemon": "pkill -f fleet_nerve; sleep 2; cd ~/dev/er-simulator-superrepo && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
-        }
-        cmd = REPAIR_COMMANDS.get(action)
-        if not cmd:
-            logger.warning(f"SSH repair: unknown action {action}")
-            return
-        try:
-            logger.info(f"SSH repair: {user}@{ip} action={action}")
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: _sp.run(
-                    ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-                     f"{user}@{ip}", cmd],
-                    capture_output=True, text=True, timeout=30))
-            if result.returncode == 0:
-                logger.info(f"SSH repair success: {action} on {ip}")
-            else:
-                logger.warning(f"SSH repair failed: {action} on {ip} rc={result.returncode}")
-        except Exception as e:
-            logger.warning(f"SSH repair error: {action} on {ip}: {type(e).__name__}")
+        return await self._healer._ssh_repair_peer(ip, user, action)
 
     async def _handle_ack(self, msg):
         """Process inbound ACK -- mark pending message as delivered."""
@@ -509,296 +477,34 @@ class FleetNerveNATS:
         except Exception:
             pass
 
-    # ── Injection (last mile) ──
+    # ── Injection (last mile) — delegated to SessionManager ──
 
     def _format_resume_message(self, data: dict) -> str:
-        """Format a fleet message for --resume injection. Never includes raw body in logs."""
-        msg_type = data.get("type", "context").upper()
-        sender = data.get("from", "unknown")
-        payload = data.get("payload", {})
-        subject = payload.get("subject", "Fleet message")
-        body = payload.get("body", "")
-        lines = [
-            f"[FLEET {msg_type}] from {sender}: {subject}",
-            "",
-            body,
-        ]
-        return "\n".join(lines)
+        return self._sessions._format_resume_message(data)
 
     def _get_active_session_full_id(self) -> Optional[str]:
-        """Get the full session ID of the most recently active interactive session.
-
-        Prefers sessions detected via PID files (have full IDs).
-        Falls back to JSONL filename stems for full UUID.
-        Returns None if no active session found.
-        """
-        best_sid = None
-        best_mtime = 0.0
-
-        # Method 1: PID session files -- have full session ID
-        sessions_dir = Path.home() / ".claude" / "sessions"
-        if sessions_dir.exists():
-            for pid_file in sessions_dir.glob("*.json"):
-                try:
-                    pid = int(pid_file.stem)
-                    os.kill(pid, 0)  # alive?
-                    data = json.loads(pid_file.read_text())
-                    kind = data.get("kind", "")
-                    # Prefer interactive sessions over agents
-                    if kind == "agent":
-                        continue
-                    sid = data.get("sessionId", "")
-                    if sid:
-                        mtime = pid_file.stat().st_mtime
-                        if mtime > best_mtime:
-                            best_mtime = mtime
-                            best_sid = sid
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
-
-        # Method 2: Recently modified JSONL (full UUID in filename)
-        projects_dir = Path.home() / ".claude" / "projects"
-        if projects_dir.exists() and not best_sid:
-            cutoff = time.time() - 1800  # 30 min
-            for proj_dir in projects_dir.iterdir():
-                if not proj_dir.is_dir():
-                    continue
-                for jsonl in proj_dir.glob("*.jsonl"):
-                    if jsonl.stem.startswith("agent-"):
-                        continue
-                    try:
-                        mtime = jsonl.stat().st_mtime
-                        if mtime > cutoff and mtime > best_mtime:
-                            best_mtime = mtime
-                            best_sid = jsonl.stem  # full UUID
-                    except OSError:
-                        pass
-
-        return best_sid
+        return self._sessions._get_active_session_full_id()
 
     def _inject_via_resume(self, session_id: str, message: str) -> bool:
-        """Inject message into active Claude session via `claude --resume`.
-
-        Args:
-            session_id: Full session UUID
-            message: Pre-formatted message text
-
-        Returns:
-            True if injection succeeded, False otherwise.
-            Never logs message content -- only type and delivery status.
-        """
-        try:
-            cmd = ["claude", "--resume", session_id, "--message", message]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                logger.info(f"resume-inject: success session={session_id[:12]}")
-                return True
-            logger.warning(f"resume-inject: failed rc={result.returncode} session={session_id[:12]}")
-            return False
-        except Exception as e:
-            logger.warning(f"resume-inject: error session={session_id[:12]}: {e}")
-            return False
+        return self._sessions._inject_via_resume(session_id, message)
 
     def _resolve_seed_path(self, data: dict) -> str:
-        """Resolve seed file path - per-session when possible, per-node fallback.
-
-        Priority:
-        1. Explicit _target_session in message -> /tmp/fleet-seed-<session_id>.md
-        2. Primary active session (most recently active) -> /tmp/fleet-seed-<session_id>.md
-        3. Fallback -> /tmp/fleet-seed-<node_id>.md
-        """
-        # Check explicit target
-        target_session = data.get("_target_session")
-        if target_session:
-            safe_sid = "".join(c for c in target_session if c.isalnum() or c in "-_")
-            if safe_sid:
-                return os.path.join(SEED_DIR, f"fleet-seed-{safe_sid}.md")
-
-        # Try to detect primary session from daemon health endpoint
-        try:
-            import urllib.request
-            resp = urllib.request.urlopen("http://127.0.0.1:8855/health", timeout=2)
-            health = json.loads(resp.read())
-            sessions = health.get("sessions", [])
-            if sessions:
-                # Pick most recently active (lowest idle)
-                best = min(sessions, key=lambda s: s.get("idle_s", s.get("lastModified", 0) or 9999))
-                sid = best.get("sessionId", "")
-                safe_sid = "".join(c for c in sid if c.isalnum() or c in "-_") if sid else ""
-                if safe_sid:
-                    return os.path.join(SEED_DIR, f"fleet-seed-{safe_sid}.md")
-        except Exception:
-            pass
-
-        # Fallback: per-node
-        return os.path.join(SEED_DIR, f"fleet-seed-{self.node_id}.md")
+        return self._sessions._resolve_seed_path(data)
 
     def _inject_context(self, data: dict):
-        """Write to seed file AND auto-trigger Claude session to read it.
-
-        INJECTION IS P8 — LAST RESORT. Only inject for alert/critical types.
-        Context/info messages are logged silently — the session reads them
-        via the prompt-submit hook when the user naturally types next.
-
-        Idle gating: if _idle_gated is set, skip keystroke trigger (seed only).
-        """
-        msg_type = data.get("type", "context")
-        sender = data.get("from", "unknown")
-        payload = data.get("payload", {})
-
-        # P8 injection only for urgent types — everything else is seed-only (passive)
-        is_urgent = msg_type in ("alert", "sync_hold") or payload.get("urgency") == "critical"
-        if not is_urgent:
-            # Write seed file silently — hook reads it on next user prompt
-            self._inject_seed(data)
-            logger.info(f"Fleet msg from {sender} ({msg_type}) — seed only, no injection")
-            return
-
-        # Try --resume first for context and reply types
-        if msg_type in ("context", "reply"):
-            session_id = self._get_active_session_full_id()
-            if session_id:
-                message = self._format_resume_message(data)
-                if self._inject_via_resume(session_id, message):
-                    self._notify(f"Fleet: {payload.get('subject', 'message')} from {sender}")
-                    return
-
-        # Fallback: seed file + keystroke trigger
-        self._inject_seed(data)
-        self._notify(f"Fleet: {payload.get('subject', 'message')} from {sender}")
-        if not data.get("_idle_gated"):
-            self._keystroke_trigger(f"fleet message from {sender}: {payload.get('subject', '')}")
-        else:
-            logger.info(f"Idle-gated: skipping keystroke trigger for {sender} message")
+        self._sessions._inject_context(data)
 
     def _inject_seed(self, data: dict):
-        """Write message to seed file (fallback injection method)."""
-        sender = data.get("from", "unknown")
-        payload = data.get("payload", {})
-        seed_path = self._resolve_seed_path(data)
-        with open(seed_path, "a") as f:
-            f.write(f"\n## [{data.get('type', 'context').upper()}] from {sender}: {payload.get('subject', '')}\n\n")
-            f.write(f"{payload.get('body', '')}\n\n---\n")
-        logger.info(f"seed-inject: written to {seed_path}")
-
-    _last_keystroke = 0.0  # Rate limit: max 1 keystroke per 30s
+        self._sessions._inject_seed(data)
 
     def _keystroke_trigger(self, summary: str):
-        """Focus VS Code and type a trigger prompt so the hook fires automatically.
-
-        Uses osascript to simulate user input. Only fires if VS Code is running
-        and no Claude agent is mid-response (checks for idle session).
-        Rate-limited: max 1 keystroke per 30s to prevent spam when multiple messages arrive.
-        """
-        # Rate limit -- don't spam keystrokes
-        now = time.time()
-        if now - FleetNerveNATS._last_keystroke < 30:
-            logger.debug(f"Keystroke throttled ({int(30 - (now - FleetNerveNATS._last_keystroke))}s remaining)")
-            return
-        FleetNerveNATS._last_keystroke = now
-        try:
-            # Check if VS Code is running
-            check = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to (name of processes) contains "Code"'],
-                capture_output=True, text=True, timeout=3)
-            if "true" not in check.stdout.lower():
-                logger.debug("VS Code not running -- skipping keystroke trigger")
-                return
-
-            # Trigger: focus VS Code, type the fleet check command, press Enter
-            # The fleet-inbox-hook.sh will fire on UserPromptSubmit and read the seed file
-            trigger_cmd = f"bash {REPO_ROOT}/scripts/fleet-check.sh"
-            subprocess.run(
-                ["osascript", "-e", f'''
-                    tell application "Visual Studio Code 3" to activate
-                    delay 0.5
-                    tell application "System Events"
-                        keystroke "{trigger_cmd}"
-                        delay 0.2
-                        keystroke return
-                    end tell
-                '''],
-                capture_output=True, timeout=5)
-            logger.info(f"Keystroke trigger sent to VS Code: {summary[:60]}")
-        except Exception as e:
-            logger.debug(f"Keystroke trigger failed: {e}")
+        self._sessions._keystroke_trigger(summary)
 
     def _inject_alert(self, data: dict):
-        """Alert: --resume (preferred) > seed file + auto-trigger + focus VS Code + notification."""
-        self._inject_context(data)  # handles --resume with seed fallback
-        # Additional focus for alerts (in case --resume didn't bring VS Code forward)
-        try:
-            subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to if exists (process "Code") then '
-                 'tell application "Visual Studio Code 3" to activate'],
-                capture_output=True, timeout=3,
-            )
-        except Exception:
-            pass
+        self._sessions._inject_alert(data)
 
     def _inject_task(self, data: dict):
-        """Task: spawn session-driver worker (invisible to user) or fallback to claude -p."""
-        payload = data.get("payload", {})
-        sender = data.get("from", "unknown")
-        task_id = data.get("id", str(uuid.uuid4()))[:8]
-        chain_id = data.get("_chain_id")
-        dispatch_id = payload.get("dispatch_id", task_id)
-        timeout_s = int(payload.get("timeout_s", 300))
-        prompt = f"Fleet task from {sender}: {payload.get('subject', '')}. {payload.get('body', '')}"
-
-        def _send_result(response: str, status: str = "completed"):
-            """Send task_result back to the dispatching node."""
-            if self._loop and sender != self.node_id:
-                result_msg = {
-                    "type": "task_result", "from": self.node_id, "to": sender,
-                    "payload": {"dispatch_id": dispatch_id, "status": status, "response": response[:2000]},
-                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                }
-                asyncio.run_coroutine_threadsafe(
-                    self.send_with_fallback(sender, result_msg), self._loop)
-
-        # Prefer session-driver worker (runs in tmux, never disrupts user)
-        try:
-            from .worker import FleetWorkerManager
-            mgr = FleetWorkerManager()
-            worker_name = f"fleet-task-{task_id}"
-            worker = mgr.launch_worker(self.node_id, worker_name)
-            if "error" not in worker:
-                # Send task in background thread (don't block message handler)
-                def _run_task():
-                    try:
-                        response = mgr.send_task(worker_name, prompt, timeout=timeout_s)
-                        mgr.stop_worker(worker_name)
-                        logger.info(f"Worker {worker_name} completed: {response[:100]}...")
-                        # Chain advancement: report completion
-                        if chain_id:
-                            self._chain_step_done(chain_id, sender, True, response[:2000])
-                        _send_result(response, "completed")
-                    except Exception as e:
-                        logger.warning(f"Worker {worker_name} failed: {e}")
-                        if chain_id:
-                            self._chain_step_done(chain_id, sender, False, str(e))
-                        _send_result(str(e), "failed")
-                from threading import Thread
-                Thread(target=_run_task, daemon=True).start()
-                logger.info(f"Launched worker {worker_name} for task from {sender}")
-                return
-        except Exception as e:
-            logger.debug(f"Session-driver unavailable ({e}), falling back to claude -p")
-
-        # Fallback: raw claude -p
-        claude = self._find_claude()
-        if claude:
-            log_path = f"/tmp/fleet-task-{task_id}.log"
-            subprocess.Popen(
-                [claude, "-p", prompt, "--output-format", "json", "--max-turns", "20"],
-                stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
-            )
-            logger.info(f"Spawned task agent {task_id} (claude -p fallback)")
-        else:
-            self._inject_context(data)  # fallback to seed file
+        self._sessions._inject_task(data)
 
     # ── Chain Orchestration ──
 
@@ -917,19 +623,10 @@ class FleetNerveNATS:
             self._inject_context(data)
 
     def _notify(self, message: str):
-        try:
-            subprocess.run(
-                ["osascript", "-e", f'display notification "{message}" with title "Fleet Nerve" sound name "Glass"'],
-                capture_output=True, timeout=3,
-            )
-        except Exception:
-            pass
+        self._sessions._notify(message)
 
     def _find_claude(self) -> Optional[str]:
-        for path in ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"]:
-            if os.path.exists(path):
-                return path
-        return None
+        return self._sessions._find_claude()
 
     # ── Health ──
 
@@ -1036,68 +733,10 @@ class FleetNerveNATS:
             return {"branch": "unknown", "commit": "unknown"}
 
     def _detect_vscode_state(self) -> str:
-        """Returns: 'active' (frontmost), 'open' (running), 'closed'."""
-        try:
-            result = subprocess.run(["pgrep", "-f", "Visual Studio Code"], capture_output=True, timeout=2)
-            if result.returncode != 0:
-                return "closed"
-            result = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to get name of first application process whose frontmost is true'],
-                capture_output=True, text=True, timeout=2)
-            if "Code" in result.stdout:
-                return "active"
-            return "open"
-        except Exception:
-            return "unknown"
+        return self._sessions._detect_vscode_state()
 
     def _detect_sessions(self) -> list:
-        sessions = []
-        # Method 1: PID files (most reliable)
-        sessions_dir = Path.home() / ".claude" / "sessions"
-        if sessions_dir.exists():
-            for pid_file in sessions_dir.glob("*.json"):
-                try:
-                    pid = int(pid_file.stem)
-                    os.kill(pid, 0)
-                    data = json.loads(pid_file.read_text())
-                    sessions.append({
-                        "sessionId": data.get("sessionId", pid_file.stem)[:12],
-                        "pid": pid,
-                        "kind": data.get("kind", "?"),
-                        "entrypoint": data.get("entrypoint", "?"),
-                    })
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
-        # Method 2: JSONL mtime for idle_s
-        projects_dir = Path.home() / ".claude" / "projects"
-        if projects_dir.exists():
-            cutoff = time.time() - 1800
-            for proj_dir in projects_dir.iterdir():
-                if not proj_dir.is_dir():
-                    continue
-                for jsonl in proj_dir.glob("*.jsonl"):
-                    if jsonl.stem.startswith("agent-"):
-                        continue
-                    try:
-                        mtime = jsonl.stat().st_mtime
-                        if mtime > cutoff:
-                            sid = jsonl.stem[:12]
-                            # Update idle_s on existing session or add new one
-                            existing = next((s for s in sessions if s["sessionId"] == sid), None)
-                            if existing:
-                                existing["idle_s"] = int(time.time() - mtime)
-                                existing["project"] = proj_dir.name
-                            else:
-                                sessions.append({
-                                    "sessionId": sid,
-                                    "project": proj_dir.name,
-                                    "idle_s": int(time.time() - mtime),
-                                    "kind": "interactive",
-                                })
-                    except OSError:
-                        pass
-        return sessions
+        return self._sessions._detect_sessions()
 
     # ── Publish ──
 
@@ -1152,50 +791,19 @@ class FleetNerveNATS:
             logger.info(f"NATS subscribed: fleet.{self.node_id}.> + fleet.all.> + fleet.heartbeat + ack")
 
     async def _repair_restart_nats(self, heal: dict):
-        """Reconnect to NATS server without killing the daemon."""
-        logger.info("Repair: reconnecting to NATS...")
-        if self.nc:
-            try:
-                await self.nc.close()
-            except Exception:
-                pass
-        await asyncio.sleep(1)
-        await self.connect()
-        await self._subscribe_all()
-        logger.info("Repair: NATS reconnected + resubscribed")
+        return await self._healer._repair_restart_nats(heal)
 
     async def _repair_restart_tunnel(self, heal: dict):
-        """Restart the autossh tunnel via launchctl."""
-        logger.info("Repair: restarting SSH tunnel...")
-        subprocess.run(["launchctl", "kickstart", "-k",
-                        f"gui/{os.getuid()}/io.contextdna.fleet-tunnel"],
-                       capture_output=True, timeout=10)
-        logger.info("Repair: tunnel restart requested")
+        return await self._healer._repair_restart_tunnel(heal)
 
     async def _repair_git_pull(self, heal: dict):
-        """Pull latest code from origin."""
-        logger.info("Repair: git pull...")
-        result = subprocess.run(["git", "pull", "origin", "main"],
-                                cwd=str(REPO_ROOT), capture_output=True, timeout=30)
-        logger.info(f"Repair: git pull {'OK' if result.returncode == 0 else 'FAILED'}")
+        return await self._healer._repair_git_pull(heal)
 
     async def _repair_kill_zombie(self, heal: dict):
-        """Kill a specific zombie/rogue process by PID."""
-        pid = heal.get("pid")
-        if not pid:
-            logger.warning("Repair: kill_zombie requires 'pid' in heal payload")
-            return
-        try:
-            os.kill(int(pid), 9)
-            logger.info(f"Repair: killed PID {pid}")
-        except (ProcessLookupError, PermissionError) as e:
-            logger.warning(f"Repair: kill PID {pid} failed: {e}")
+        return await self._healer._repair_kill_zombie(heal)
 
     async def _repair_restart_daemon(self, heal: dict):
-        """Restart this daemon process (exec replaces current process)."""
-        logger.info("Repair: daemon restart requested -- re-execing in 2s...")
-        await asyncio.sleep(2)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        return await self._healer._repair_restart_daemon(heal)
 
     async def _send_p1_nats(self, target: str, message: dict) -> dict:
         """P1: NATS pub/sub -- fastest, scales to 100+ nodes."""
@@ -1735,200 +1343,19 @@ class FleetNerveNATS:
         return result
 
     def _update_channel_health(self, target: str, channel: str, status: str):
-        """Track per-peer channel health. Status: 'ok' or 'broken'."""
-        if target not in self._channel_health:
-            self._channel_health[target] = {ch: "ok" for ch in ALL_CHANNELS}
-        self._channel_health[target][channel] = status
+        self._healer._update_channel_health(target, channel, status)
 
     def _get_peer_health_score(self, target: str) -> tuple:
-        """Returns (score, broken_list) for a peer. Max score = len(ALL_CHANNELS)."""
-        ch = self._channel_health.get(target, {})
-        broken = [name for name in ALL_CHANNELS if ch.get(name) == "broken"]
-        score = len(ALL_CHANNELS) - len(broken)
-        return score, broken
+        return self._healer._get_peer_health_score(target)
 
     def _attempt_self_heal(self, target: str, working_channel: str, broken: list):
-        """Aggressive self-heal: immediately start repair_with_escalation for broken channels.
-
-        Replaces the old L1-only notify. Now triggers full L1-L4 escalation,
-        then re-probes each broken channel to verify the fix actually worked.
-        Deduplicates: only one heal task per peer at a time.
-        """
-        if not broken:
-            return
-        # Don't stack heals -- one per peer
-        existing = self._heal_in_flight.get(target)
-        if existing and not existing.done():
-            logger.debug(f"Self-heal already in flight for {target}, skipping")
-            return
-        score, _ = self._get_peer_health_score(target)
-        action = "restart_nats" if "P1_nats" in broken else "check_connectivity"
-        logger.info(f"Self-heal triggered for {target}: score={score}/{len(ALL_CHANNELS)}, broken={broken}")
-
-        async def _heal_and_verify():
-            try:
-                result = await self.repair_with_escalation(target, broken, action)
-                if result and result.get("repaired"):
-                    # Re-probe each broken channel to verify repair
-                    for ch in broken:
-                        probe_ok = await self._verify_channel(target, ch)
-                        self._update_channel_health(target, ch, "ok" if probe_ok else "broken")
-                    new_score, still_broken = self._get_peer_health_score(target)
-                    logger.info(f"Self-heal result for {target}: "
-                                f"score {score}->{new_score}/{len(ALL_CHANNELS)}, "
-                                f"still_broken={still_broken}")
-                else:
-                    logger.warning(f"Self-heal for {target} did not fully repair: {result}")
-            except Exception as e:
-                logger.warning(f"Self-heal task failed for {target}: {e}")
-            finally:
-                self._heal_in_flight.pop(target, None)
-
-        self._heal_in_flight[target] = asyncio.ensure_future(_heal_and_verify())
+        self._healer._attempt_self_heal(target, working_channel, broken)
 
     async def _verify_channel(self, target: str, channel: str) -> bool:
-        """Probe a single channel to verify it works. Returns True if delivered."""
-        probe_msg = {"type": "sync", "payload": {"subject": "ping"}, "from": self.node_id}
-        sender_map = {
-            "P1_nats": self._send_p1_nats, "P2_http": self._send_p2_http,
-            "P3_chief": self._send_p3_chief, "P4_seed": self._send_p4_seed,
-            "P5_ssh": self._send_p5_ssh, "P7_git": self._send_p7_git,
-        }
-        sender = sender_map.get(channel)
-        if not sender:
-            return False
-        try:
-            result = await asyncio.wait_for(sender(target, probe_msg), timeout=5)
-            return bool(result.get("delivered"))
-        except Exception:
-            return False
+        return await self._healer._verify_channel(target, channel)
 
     async def repair_with_escalation(self, target: str, broken_channels: list, action: str = "restart_nats"):
-        """Multi-level repair escalation. Total time to L4: ~90s.
-
-        Level 1 NOTIFY: Silent repair msg to target (30s wait)
-        Level 2 GUIDE: Send specific repair command (30s wait)
-        Level 3 ASSIST: Send auto-exec repair action (30s wait)
-        Level 4 REMOTE: SSH direct intervention (~90s after detection)
-
-        All repair messages use type:"repair" (NOT "context") to avoid
-        seed file writes and keystroke injection spam on the target.
-        Each level uses send_with_fallback() for delivery.
-        """
-        logger.info(f"Repair escalation for {target}: broken={broken_channels}, action={action}")
-
-        # Level 1: NOTIFY -- silent repair msg (no seed/keystroke), 2min wait
-        logger.info(f"Repair L1 NOTIFY -> {target}")
-        notify_msg = {
-            "type": "repair", "from": self.node_id, "to": target,
-            "payload": {
-                "subject": "repair",
-                "body": json.dumps({
-                    "action": action,
-                    "reporter": self.node_id,
-                    "broken_channels": broken_channels,
-                    "level": 1,
-                }),
-            },
-        }
-        result = await self.send_with_fallback(target, notify_msg)
-        if result.get("delivered"):
-            logger.info(f"Repair L1 delivered via {result.get('channel')}. Waiting 120s for local fix...")
-            await asyncio.sleep(120)  # 2min -- give target time to self-fix
-            probe = await self._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
-            if probe.get("delivered"):
-                logger.info(f"Repair SUCCESS: {target} back on P1 after L1 notify")
-                return {"repaired": True, "level": 1}
-
-        # Level 2: GUIDE -- auto-executable repair command (still silent, no seed/keystroke)
-        logger.info(f"Repair L2 GUIDE -> {target}")
-        guide_msg = {
-            "type": "repair", "from": self.node_id, "to": target,
-            "payload": {
-                "subject": "repair",
-                "body": json.dumps({
-                    "action": "restart_daemon",
-                    "reporter": self.node_id,
-                    "broken_channels": broken_channels,
-                    "level": 2,
-                }),
-            },
-        }
-        result = await self.send_with_fallback(target, guide_msg)
-        if result.get("delivered"):
-            logger.info(f"Repair L2 delivered via {result.get('channel')}. Waiting 30s...")
-            await asyncio.sleep(30)
-            probe = await self._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
-            if probe.get("delivered"):
-                logger.info(f"Repair SUCCESS: {target} back on P1 after L2 guide")
-                return {"repaired": True, "level": 2}
-
-        # Level 3: ASSIST -- send auto-executable repair action (mac1's handlers)
-        logger.info(f"Repair L3 ASSIST -> {target}")
-        repair_msg = {
-            "type": "repair", "from": self.node_id, "to": target,
-            "payload": {
-                "subject": "repair",
-                "body": json.dumps({
-                    "action": action,
-                    "reporter": self.node_id,
-                    "broken_channels": broken_channels,
-                    "level": 3,
-                }),
-            },
-        }
-        result = await self.send_with_fallback(target, repair_msg)
-        if result.get("delivered"):
-            logger.info(f"Repair L3 delivered via {result.get('channel')}. Waiting 30s...")
-            await asyncio.sleep(30)
-            probe = await self._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
-            if probe.get("delivered"):
-                logger.info(f"Repair SUCCESS: {target} back on P1 after L3 assist")
-                return {"repaired": True, "level": 3}
-
-        # Level 4: REMOTE -- SSH direct intervention (last resort, ~90s after first detection)
-        logger.info(f"Repair L4 REMOTE -> {target} (~90s failure, all local attempts exhausted)")
-        peer = self._resolve_peer(target)
-        user, ip = peer.get("user"), peer.get("ip")
-        if user and ip:
-            try:
-                # Check if target has active session -- don't interrupt
-                check = subprocess.run(
-                    ["ssh", "-o", "ConnectTimeout=3", f"{user}@{ip}",
-                     "pgrep -f 'claude.*native-binary' > /dev/null && echo ACTIVE || echo NONE"],
-                    capture_output=True, text=True, timeout=8)
-                if "ACTIVE" in check.stdout:
-                    logger.warning(f"Repair L4: {target} has active session -- NOT restarting remotely")
-                    # Notify the active session instead -- use base64 to prevent injection
-                    import base64
-                    notice = f"Fleet repair: your channels {broken_channels} are down for 3min+. Please restart daemon."
-                    b64_notice = base64.b64encode(notice.encode()).decode()
-                    # Validate target name before using in path
-                    safe_target = "".join(c for c in target if c.isalnum() or c in "-_")
-                    subprocess.run(
-                        ["ssh", "-o", "ConnectTimeout=3", f"{user}@{ip}",
-                         f"echo '{b64_notice}' | base64 -d > /tmp/fleet-seed-{safe_target}.md"],
-                        capture_output=True, timeout=8)
-                    return {"repaired": False, "level": 4, "reason": "active_session_detected"}
-                else:
-                    # No active session -- safe to remote restart
-                    logger.info(f"Repair L4: no active session on {target} -- remote restart")
-                    safe_target = "".join(c for c in target if c.isalnum() or c in "-_")
-                    subprocess.run(
-                        ["ssh", "-o", "ConnectTimeout=3", f"{user}@{ip}",
-                         f"pkill -f fleet_nerve_nats.py; sleep 2; cd ~/dev/er-simulator-superrepo && "
-                         f"MULTIFLEET_NODE_ID={safe_target} nohup python3 tools/fleet_nerve_nats.py serve &>/tmp/fleet-nats-{safe_target}.log &"],
-                        capture_output=True, timeout=15)
-                    await asyncio.sleep(10)
-                    probe = await self._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
-                    if probe.get("delivered"):
-                        logger.info(f"Repair SUCCESS: {target} back on P1 after L4 remote restart")
-                        return {"repaired": True, "level": 4}
-            except Exception as e:
-                logger.warning(f"Repair L4 SSH failed: {e}")
-
-        logger.warning(f"Repair FAILED: all 4 levels exhausted for {target}")
-        return {"repaired": False, "level": 4, "reason": "all_levels_failed"}
+        return await self._healer.repair_with_escalation(target, broken_channels, action)
 
     async def broadcast_health(self) -> list:
         """Request health from all nodes, collect replies."""
@@ -1962,229 +1389,30 @@ class FleetNerveNATS:
         results.sort(key=lambda r: r["node"])
         return results
 
-    # ── Heartbeat ──
+    # ── Heartbeat / Discovery / Gossip — delegated to FleetDiscoveryManager ──
 
     async def _heartbeat_loop(self):
-        """Publish heartbeat every 10s."""
-        while self._running:
-            try:
-                detected = self._detect_sessions()
-                hb = {
-                    "node": self.node_id,
-                    "timestamp": time.time(),
-                    "ip": self._get_local_ip(),
-                    "sessions": len(detected),
-                    "session_list": [
-                        {"sessionId": s.get("sessionId", ""), "idle_s": s.get("idle_s", 0)}
-                        for s in detected
-                    ],
-                    "vscode": self._detect_vscode_state(),
-                    "git": self._get_git_context(),
-                }
-                await self.nc.publish("fleet.heartbeat", json.dumps(hb).encode())
-
-                # Publish session historian data (change-driven, piggybacked on heartbeat)
-                if fleet_historian_nats:
-                    try:
-                        await fleet_historian_nats.publish_all_session_data(self)
-                    except Exception as e:
-                        logger.debug(f"Session publish failed: {e}")
-
-            except Exception as e:
-                logger.debug(f"Heartbeat publish failed: {e}")
-            await asyncio.sleep(10)
+        return await self._disco.heartbeat_loop()
 
     def _get_local_ip(self) -> str:
-        """Get LAN IP for heartbeat advertisement."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return ""
-
-    # ── UDP Gossip Heartbeat ──
+        return self._disco.get_local_ip()
 
     def _get_known_peer_ips(self) -> dict[str, str]:
-        """Return {node_id: ip} for all known peers (from heartbeats + config)."""
-        peers = {}
-        # From NATS heartbeat data (runtime-discovered)
-        for node, data in self._peers.items():
-            ip = data.get("ip")
-            if ip and node != self.node_id:
-                peers[node] = ip
-        # From static peer config (fleet_nerve_config)
-        for node, cfg in self._peers_config.items():
-            if node != self.node_id and node not in peers:
-                ip = cfg.get("ip") or cfg.get("host")
-                if ip:
-                    peers[node] = ip
-        return peers
+        return self._disco.get_known_peer_ips()
 
     def _select_gossip_targets(self, exclude_nodes: set[str] | None = None) -> list[tuple[str, str]]:
-        """Select up to GOSSIP_FANOUT random peers to gossip to.
-
-        Returns list of (node_id, ip) tuples. Excludes self and any nodes in exclude_nodes.
-        """
-        peer_ips = self._get_known_peer_ips()
-        if exclude_nodes:
-            peer_ips = {n: ip for n, ip in peer_ips.items() if n not in exclude_nodes}
-        candidates = list(peer_ips.items())
-        if len(candidates) <= GOSSIP_FANOUT:
-            return candidates
-        return random.sample(candidates, GOSSIP_FANOUT)
+        return self._disco.select_gossip_targets(exclude_nodes=exclude_nodes)
 
     async def _udp_gossip_loop(self):
-        """Send UDP gossip heartbeats every 10s to GOSSIP_FANOUT random peers."""
-        # Wait for initial NATS heartbeats to populate peer list
-        await asyncio.sleep(15)
-        logger.info(f"UDP gossip heartbeat started (fanout={GOSSIP_FANOUT}, ttl={GOSSIP_TTL}, port={UDP_GOSSIP_PORT})")
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
-
-        while self._running:
-            try:
-                targets = self._select_gossip_targets()
-                if not targets:
-                    await asyncio.sleep(10)
-                    continue
-
-                detected = self._detect_sessions()
-                hb = {
-                    "node": self.node_id,
-                    "timestamp": time.time(),
-                    "ip": self._get_local_ip(),
-                    "sessions": len(detected),
-                    "session_list": [
-                        {"sessionId": s.get("sessionId", ""), "idle_s": s.get("idle_s", 0)}
-                        for s in detected
-                    ],
-                    "vscode": self._detect_vscode_state(),
-                    "git": self._get_git_context(),
-                    # Gossip metadata
-                    "_gossip_ttl": GOSSIP_TTL,
-                    "_gossip_path": [self.node_id],
-                    "_gossip_origin": self.node_id,
-                }
-                payload = json.dumps(hb).encode()
-
-                for node_id, ip in targets:
-                    try:
-                        sock.sendto(payload, (ip, UDP_GOSSIP_PORT))
-                        logger.debug(f"Gossip heartbeat sent to {node_id} ({ip}:{UDP_GOSSIP_PORT})")
-                    except Exception as e:
-                        logger.debug(f"Gossip send to {node_id} ({ip}) failed: {e}")
-            except Exception as e:
-                logger.debug(f"UDP gossip loop error: {e}")
-            await asyncio.sleep(10)
+        return await self._disco.udp_gossip_loop()
 
     async def _udp_gossip_listener(self):
-        """Listen for UDP gossip heartbeats and forward to more peers (with TTL)."""
-        loop = asyncio.get_running_loop()
+        return await self._disco.udp_gossip_listener()
 
-        # Create UDP socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(("0.0.0.0", UDP_GOSSIP_PORT))
-        except OSError as e:
-            logger.warning(f"UDP gossip listener bind failed on port {UDP_GOSSIP_PORT}: {e}")
-            return
-        sock.setblocking(False)
-
-        logger.info(f"UDP gossip listener started on port {UDP_GOSSIP_PORT}")
-
-        # Forward socket for gossip relay
-        fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        fwd_sock.setblocking(False)
-
-        while self._running:
-            try:
-                # Non-blocking recv via asyncio
-                data, addr = await loop.run_in_executor(None, lambda: sock.recvfrom(65535))
-                hb = json.loads(data.decode())
-
-                node = hb.get("node", "unknown")
-                if node == self.node_id:
-                    continue  # Ignore own heartbeats
-
-                # Update peer state (same as NATS _handle_heartbeat)
-                self._peers[node] = {**hb, "_received_at": time.time(), "_via": "udp_gossip"}
-                if hasattr(self, '_repair_in_progress'):
-                    self._repair_in_progress.pop(node, None)
-                if hasattr(self, 'protocol') and self.protocol:
-                    self.protocol.channel_state.record_success(node, "P1_nats", 0)
-
-                # Gossip forwarding: decrement TTL, forward to more peers
-                ttl = hb.get("_gossip_ttl", 0)
-                gossip_path = hb.get("_gossip_path", [])
-
-                if ttl > 0:
-                    # Add ourselves to the path
-                    new_path = gossip_path + [self.node_id]
-                    hb["_gossip_ttl"] = ttl - 1
-                    hb["_gossip_path"] = new_path
-
-                    # Don't forward back to sender, origin, or anyone in the path
-                    exclude = set(new_path) | {hb.get("_gossip_origin", "")}
-                    targets = self._select_gossip_targets(exclude_nodes=exclude)
-
-                    if targets:
-                        fwd_payload = json.dumps(hb).encode()
-                        for fwd_node, fwd_ip in targets:
-                            try:
-                                fwd_sock.sendto(fwd_payload, (fwd_ip, UDP_GOSSIP_PORT))
-                                logger.debug(f"Gossip forwarded {node}'s heartbeat to {fwd_node} (ttl={ttl - 1})")
-                            except Exception as e:
-                                logger.debug(f"Gossip forward to {fwd_node} failed: {e}")
-
-            except json.JSONDecodeError:
-                logger.debug("UDP gossip: invalid JSON received")
-            except BlockingIOError:
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.debug(f"UDP gossip listener error: {e}")
-                await asyncio.sleep(1)
-
-    # ── Proactive Fleet Watchdog ──
+    # ── Proactive Fleet Watchdog — delegated to SelfHealManager ──
 
     async def _watchdog_loop(self):
-        """Proactive health monitor -- detects degraded peers and auto-repairs.
-
-        Runs every 30s. Checks:
-        1. Peer heartbeat staleness -> triggers repair_with_escalation()
-        2. Local zombie processes -> auto-kills known runaways
-        3. Git divergence -> auto-pulls if behind origin
-        4. Tunnel health -> restarts dead tunnels
-        5. Idle detection -> proactive work discovery for self and peers
-        """
-        # Wait 60s for fleet to stabilize on startup
-        await asyncio.sleep(60)
-        logger.info("Watchdog started -- proactive fleet health monitoring (30s interval)")
-
-        # Track repair state to avoid re-triggering during escalation
-        self._repair_in_progress = {}  # target -> {started_at, level}
-
-        # Idle tracking state
-        self._last_activity_at = time.time()  # updated on send/receive
-        self._idle_wake_sent = {}  # peer_id -> timestamp of last idle-wake sent
-        self._last_suggestion_scan = 0.0  # productive idle rate limit
-
-        while self._running:
-            try:
-                await self._watchdog_check_peers()
-                await self._watchdog_check_channel_health()
-                await self._watchdog_check_zombies()
-                await self._watchdog_check_git()
-                await self._watchdog_check_tunnels()
-                await self._watchdog_check_idle()
-                await self._watchdog_check_pending_acks()
-            except Exception as e:
-                logger.debug(f"Watchdog cycle error: {e}")
-            await asyncio.sleep(30)
+        return await self._healer._watchdog_loop()
 
     def _touch_activity(self):
         """Mark that NATS activity occurred (call on send/receive)."""
@@ -2192,430 +1420,33 @@ class FleetNerveNATS:
             self._last_activity_at = time.time()
 
     async def _watchdog_check_idle(self):
-        """Detect idle state for this node and peers, trigger proactive work discovery.
-
-        Self-idle (no NATS messages sent/received >5min):
-          - Check fleet inbox (.fleet-messages/<node>/) for unprocessed messages
-          - Check /tmp/fleet-seed-<node>.md for pending messages
-          - Broadcast idle status to fleet
-          - Trigger git pull if behind origin
-          - Log for observability
-
-        Peer-idle (session count = 0 or last heartbeat >10min):
-          - Send gentle wake message (rate-limited: 1 per peer per 30min)
-        """
-        now = time.time()
-        idle_threshold_self = 300   # 5 minutes
-        idle_threshold_peer = 600   # 10 minutes
-        wake_cooldown = 1800        # 30 minutes between idle-wakes per peer
-
-        # ── Self idle check ──
-        idle_seconds = now - self._last_activity_at
-        if idle_seconds > idle_threshold_self:
-            pending_items = []
-
-            # Check fleet inbox for unprocessed messages
-            inbox_dir = REPO_ROOT / ".fleet-messages" / self.node_id
-            if inbox_dir.exists():
-                unprocessed = [f.name for f in inbox_dir.iterdir()
-                               if f.is_file() and f.suffix == ".md"]
-                if unprocessed:
-                    pending_items.append(f"{len(unprocessed)} inbox message(s)")
-
-            # Check seed file for pending messages
-            seed_path = Path(SEED_DIR) / f"fleet-seed-{self.node_id}.md"
-            if seed_path.exists() and seed_path.stat().st_size > 0:
-                pending_items.append("pending seed file")
-
-            pending_note = f" -- found: {', '.join(pending_items)}" if pending_items else ""
-            idle_msg = (
-                f"Node {self.node_id} idle ({int(idle_seconds)}s)"
-                f" -- checking plans and exploring opportunities{pending_note}"
-            )
-            logger.info(f"Watchdog idle: {idle_msg}")
-
-            # Broadcast idle status to fleet
-            try:
-                if self.nc and self.nc.is_connected:
-                    await self.send("all", "idle", "idle-check", idle_msg)
-            except Exception as e:
-                logger.debug(f"Watchdog idle broadcast failed: {e}")
-
-            # Trigger git pull if behind (reuses existing method's cooldown)
-            await self._watchdog_check_git()
-
-            # Productive idle: scan for actionable work and broadcast suggestions
-            await self._productive_idle_scan()
-
-            # Reset activity timer so we don't spam every 30s
-            self._last_activity_at = now
-
-        # ── Peer idle check ──
-        for peer_id, hb_data in self._peers.items():
-            if peer_id == self.node_id:
-                continue
-
-            peer_last_seen = now - hb_data.get("_received_at", 0)
-            peer_sessions = hb_data.get("sessions", -1)
-            peer_is_idle = (
-                peer_last_seen > idle_threshold_peer
-                or peer_sessions == 0
-            )
-
-            if not peer_is_idle:
-                continue
-
-            # Rate limit: max 1 idle-wake per peer per 30min
-            last_wake = self._idle_wake_sent.get(peer_id, 0)
-            if now - last_wake < wake_cooldown:
-                continue
-
-            idle_min = int(peer_last_seen / 60)
-            reason = (
-                f"no heartbeat for {idle_min}min"
-                if peer_last_seen > idle_threshold_peer
-                else "0 active sessions"
-            )
-            wake_msg = (
-                f"You've been idle for {idle_min}min ({reason})."
-                f" Any pending fleet work? Check plans."
-            )
-
-            try:
-                if self.nc and self.nc.is_connected:
-                    await self.send(peer_id, "idle-wake", "idle-wake", wake_msg)
-                    self._idle_wake_sent[peer_id] = now
-                    logger.info(f"Watchdog idle-wake sent to {peer_id} ({reason})")
-            except Exception as e:
-                logger.debug(f"Watchdog idle-wake to {peer_id} failed: {e}")
+        return await self._healer._watchdog_check_idle()
 
     async def _productive_idle_scan(self):
-        """Scan for productive work when idle. Rate-limited: 1 per 10min.
-
-        Checks incomplete plan items, unanswered fleet messages, and recent
-        commits lacking tests.  Writes to /tmp/fleet-watchdog-suggestions.json
-        and broadcasts a summary to the fleet.
-        """
-        now = time.time()
-        if now - self._last_suggestion_scan < 600:  # 10min cooldown
-            return
-        self._last_suggestion_scan = now
-        suggestions = []
-
-        # 1. Incomplete items in docs/plans/
-        plans_dir = REPO_ROOT / "docs" / "plans"
-        if plans_dir.exists():
-            for p in sorted(plans_dir.iterdir()):
-                if not p.is_file() or p.suffix != ".md":
-                    continue
-                try:
-                    text = p.read_text(errors="replace")
-                    todos = [ln.strip() for ln in text.splitlines()
-                             if any(k in ln for k in ("[ ]", "TODO", "UNRESOLVED"))]
-                    if todos:
-                        suggestions.append({
-                            "source": "plans",
-                            "file": str(p.relative_to(REPO_ROOT)),
-                            "items": todos[:5],
-                        })
-                except Exception:
-                    pass
-
-        # 2. Unanswered fleet messages (all nodes' inboxes)
-        fleet_dir = REPO_ROOT / ".fleet-messages"
-        if fleet_dir.exists():
-            for node_dir in fleet_dir.iterdir():
-                if not node_dir.is_dir() or node_dir.name in ("archive",):
-                    continue
-                msgs = [f.name for f in node_dir.iterdir()
-                        if f.is_file() and f.suffix == ".md"]
-                if msgs:
-                    suggestions.append({
-                        "source": "fleet-messages",
-                        "node": node_dir.name,
-                        "pending": msgs[:10],
-                    })
-
-        # 3. Recent commits without tests (last 24h)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-C", str(REPO_ROOT), "log",
-                "--since=24 hours ago", "--pretty=format:%h %s",
-                "--no-merges", "-20",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            commits = stdout.decode(errors="replace").strip().splitlines()
-            untested = [c for c in commits
-                        if c and "test" not in c.lower()
-                        and "fleet-msg" not in c.lower()]
-            if untested:
-                suggestions.append({
-                    "source": "untested-commits",
-                    "commits": untested[:10],
-                })
-        except Exception:
-            pass
-
-        # Write to disk
-        output = {
-            "node": self.node_id,
-            "scanned_at": datetime.now(timezone.utc).isoformat() + "Z",
-            "suggestions": suggestions,
-        }
-        try:
-            Path("/tmp/fleet-watchdog-suggestions.json").write_text(
-                json.dumps(output, indent=2))
-        except Exception as e:
-            logger.debug(f"Productive idle: write suggestions failed: {e}")
-
-        # Broadcast summary to fleet
-        if suggestions and self.nc and self.nc.is_connected:
-            lines = []
-            for s in suggestions:
-                src = s["source"]
-                if src == "plans":
-                    lines.append(
-                        f"  plans/{Path(s['file']).name}: "
-                        f"{len(s['items'])} TODO(s)")
-                elif src == "fleet-messages":
-                    lines.append(
-                        f"  fleet-messages/{s['node']}: "
-                        f"{len(s['pending'])} pending")
-                elif src == "untested-commits":
-                    lines.append(
-                        f"  {len(s['commits'])} recent commit(s) "
-                        f"may need tests")
-            body = ("Productive idle scan found work:\n"
-                    + "\n".join(lines))
-            try:
-                await self.send(
-                    "all", "idle-suggestions", "productive-idle", body)
-            except Exception:
-                pass
-
-        logger.info(f"Productive idle scan: "
-                    f"{len(suggestions)} suggestion group(s)")
+        return await self._healer._productive_idle_scan()
 
     async def _watchdog_check_peers(self):
-        """Detect stale peers and trigger repair escalation."""
-        now = time.time()
-        all_peers = set(self._peers_config.keys()) - {self.node_id}
-        seen_peers = set(self._peers.keys())
-
-        for peer_id in all_peers:
-            # Skip if repair already in progress
-            repair = self._repair_in_progress.get(peer_id, {})
-            if repair and now - repair.get("started_at", 0) < 300:  # 5min cooldown
-                continue
-
-            if peer_id in seen_peers:
-                last_seen = now - self._peers[peer_id].get("_received_at", 0)
-                if last_seen > 90:  # 90s = 9 missed heartbeats
-                    logger.warning(f"Watchdog: {peer_id} heartbeat stale ({int(last_seen)}s)")
-                    self._repair_in_progress[peer_id] = {"started_at": now, "level": 1}
-                    asyncio.create_task(
-                        self.repair_with_escalation(peer_id, ["P1_nats"], "restart_nats"))
-                elif last_seen > 45:  # Warning threshold
-                    logger.info(f"Watchdog: {peer_id} heartbeat slow ({int(last_seen)}s)")
-            else:
-                # Never seen this peer -- they might not be online yet
-                # Only escalate if we've been running >5min (past startup window)
-                if now - self._stats["started_at"] > 300:
-                    logger.warning(f"Watchdog: {peer_id} never seen -- attempting contact")
-                    self._repair_in_progress[peer_id] = {"started_at": now, "level": 1}
-                    asyncio.create_task(
-                        self.repair_with_escalation(peer_id, ["P1_nats", "P2_http"], "restart_nats"))
+        return await self._healer._watchdog_check_peers()
 
     async def _watchdog_check_channel_health(self):
-        """Check channel health scores and trigger repair for degraded peers."""
-        now = time.time()
-        for peer_id, channels in self._channel_health.items():
-            score, broken = self._get_peer_health_score(peer_id)
-            if score >= HEAL_SCORE_THRESHOLD or not broken:
-                continue
-            # Skip if repair already in progress (5min cooldown)
-            repair = self._repair_in_progress.get(peer_id, {})
-            if repair and now - repair.get("started_at", 0) < 300:
-                continue
-            existing = self._heal_in_flight.get(peer_id)
-            if existing and not existing.done():
-                continue
-            logger.warning(f"Watchdog: {peer_id} channel score {score}/{len(ALL_CHANNELS)} "
-                           f"< {HEAL_SCORE_THRESHOLD} -- auto-repair: {broken}")
-            self._repair_in_progress[peer_id] = {"started_at": now, "level": 1}
-            action = "restart_nats" if "P1_nats" in broken else "check_connectivity"
-            self._attempt_self_heal(peer_id, "watchdog", broken)
+        return await self._healer._watchdog_check_channel_health()
 
     async def _watchdog_check_pending_acks(self):
-        """Retry messages with no ACK after timeout. Drop after max retries."""
-        now = time.time()
-        to_remove = []
-        for msg_id, info in list(self._pending_acks.items()):
-            if info["acked"]:
-                to_remove.append(msg_id)
-                continue
-            age = now - info["sent_at"]
-            if age < self._ack_timeout_s:
-                continue
-            if info["retries"] >= self._ack_max_retries:
-                logger.warning(f"ACK failed after {self._ack_max_retries} retries: "
-                               f"{msg_id[:8]} -> {info['target']}")
-                to_remove.append(msg_id)
-                continue
-            info["retries"] += 1
-            logger.info(f"ACK retry {info['retries']}/{self._ack_max_retries}: "
-                        f"{msg_id[:8]} -> {info['target']}")
-            asyncio.create_task(self.send_with_fallback(info["target"], info["message"]))
-        for msg_id in to_remove:
-            self._pending_acks.pop(msg_id, None)
+        return await self._healer._watchdog_check_pending_acks()
 
     async def _watchdog_check_zombies(self):
-        """Detect and kill known zombie patterns (runaway processes)."""
-        try:
-            result = subprocess.run(
-                ["ps", "aux"], capture_output=True, text=True, timeout=5)
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) < 11:
-                    continue
-                try:
-                    pid = int(parts[1])
-                    cpu = float(parts[2])
-                    # Skip our own daemon process
-                    if pid == os.getpid():
-                        continue
-                    # Flag: python process using >10% CPU for extended time
-                    # (We can't tell duration from ps alone, so only kill known patterns)
-                    cmd = " ".join(parts[10:])
-                    # Known zombie: fleet_nerve_daemon.py fighting for our port
-                    if "fleet_nerve_daemon.py" in cmd and "--port 8855" in cmd:
-                        logger.warning(f"Watchdog: killing rogue fleet_nerve_daemon.py (PID {pid})")
-                        os.kill(pid, 9)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-        except Exception:
-            pass
+        return await self._healer._watchdog_check_zombies()
 
     async def _watchdog_check_git(self):
-        """Auto-pull if behind origin (check every cycle, pull at most every 5min)."""
-        if not hasattr(self, "_last_git_pull"):
-            self._last_git_pull = 0
-        now = time.time()
-        if now - self._last_git_pull < 300:  # 5min cooldown
-            return
-        try:
-            # Check if behind
-            subprocess.run(["git", "fetch", "origin", "main"],
-                           cwd=str(REPO_ROOT), capture_output=True, timeout=15)
-            result = subprocess.run(
-                ["git", "rev-list", "--count", "HEAD..FETCH_HEAD"],
-                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=5)
-            behind = int(result.stdout.strip()) if result.returncode == 0 else 0
-            if behind > 0:
-                logger.info(f"Watchdog: {behind} commits behind origin -- auto-pulling")
-                subprocess.run(["git", "rebase", "FETCH_HEAD"],
-                               cwd=str(REPO_ROOT), capture_output=True, timeout=30)
-                self._last_git_pull = now
-                logger.info("Watchdog: git pull complete")
-        except Exception as e:
-            logger.debug(f"Watchdog git check error: {e}")
+        return await self._healer._watchdog_check_git()
 
     async def _watchdog_check_tunnels(self):
-        """Verify SSH tunnels are alive, restart if dead."""
-        tunnel_dir = Path.home() / ".fleet-tunnels"
-        if not tunnel_dir.exists():
-            return
-        any_dead = False
-        for pidfile in tunnel_dir.glob("tunnel-*.pid"):
-            try:
-                pid = int(pidfile.read_text().strip())
-                os.kill(pid, 0)  # Check if alive (signal 0)
-            except (ProcessLookupError, ValueError):
-                logger.warning(f"Watchdog: tunnel {pidfile.stem} is dead -- restarting")
-                any_dead = True
-                pidfile.unlink(missing_ok=True)
-        if any_dead:
-            # Restart tunnels
-            try:
-                subprocess.run(
-                    ["bash", str(REPO_ROOT / "scripts" / "fleet-tunnel.sh"), "start"],
-                    capture_output=True, timeout=30,
-                    env={**os.environ, "MULTIFLEET_NODE_ID": self.node_id})
-                logger.info("Watchdog: tunnels restarted")
-            except Exception as e:
-                logger.debug(f"Watchdog tunnel restart failed: {e}")
+        return await self._healer._watchdog_check_tunnels()
 
-    # ── ACK Retry Loop ──
-
-    ACK_TIMEOUT_S = 60.0
-    ACK_MAX_RETRIES = 3
+    # ── ACK Retry Loop — delegated to SelfHealManager ──
 
     async def _ack_retry_loop(self):
-        """Check for unacknowledged messages and retry via next fallback channel.
-
-        Runs every 30s. Messages awaiting ACK past ACK_TIMEOUT_S get re-sent.
-        After ACK_MAX_RETRIES, marked as failed and surfaced via _inject_alert.
-        """
-        await asyncio.sleep(30)  # Let daemon stabilize
-        logger.info("ACK retry loop started (30s interval)")
-        while self._running:
-            try:
-                if not self._store:
-                    await asyncio.sleep(30)
-                    continue
-                pending = self._store.get_awaiting_ack(
-                    max_age_s=self.ACK_TIMEOUT_S, max_retries=self.ACK_MAX_RETRIES
-                )
-                for row in pending:
-                    msg_id = row["id"]
-                    target = row["to_node"]
-                    retries = row.get("retry_count", 0)
-
-                    if retries >= self.ACK_MAX_RETRIES:
-                        # Exhausted retries -- mark failed and alert
-                        self._store.mark_ack_failed(msg_id)
-                        logger.warning(f"ACK failed after {retries} retries: {msg_id[:8]}… -> {target}")
-                        self._inject_alert({
-                            "from": "fleet-ack",
-                            "type": "alert",
-                            "payload": {
-                                "subject": f"Message delivery failed: {msg_id[:8]}…",
-                                "body": f"Message to {target} failed after {retries} retries. ID: {msg_id}",
-                            },
-                        })
-                        continue
-
-                    # Rebuild message from stored body
-                    try:
-                        body_data = json.loads(row.get("body", "{}"))
-                    except (json.JSONDecodeError, TypeError):
-                        body_data = {}
-
-                    message = {
-                        "id": msg_id,
-                        "type": row.get("type", "context"),
-                        "from": row.get("from_node", self.node_id),
-                        "to": target,
-                        "payload": body_data,
-                        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                    }
-
-                    self._store.bump_retry(msg_id)
-                    logger.info(f"ACK retry {retries + 1}/{self.ACK_MAX_RETRIES}: {msg_id[:8]}… -> {target}")
-
-                    # Re-send (send_with_fallback will skip re-storing since it already exists)
-                    try:
-                        result = await self.send_with_fallback(target, message)
-                        if result.get("delivered"):
-                            logger.info(f"ACK retry delivered: {msg_id[:8]}… via {result.get('channel')}")
-                    except Exception as e:
-                        logger.warning(f"ACK retry send failed: {msg_id[:8]}…: {e}")
-
-            except Exception as e:
-                logger.error(f"ACK retry loop error: {e}")
-            await asyncio.sleep(30)
+        return await self._healer._ack_retry_loop()
 
     # ── Main Loop ──
 
