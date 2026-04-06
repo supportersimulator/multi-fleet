@@ -228,7 +228,12 @@ class FleetDiscoveryManager:
                     continue  # Ignore own heartbeats
 
                 # Update peer state (same as NATS _handle_heartbeat)
-                nerve._peers[node] = {**hb, "_received_at": time.time(), "_via": "udp_gossip"}
+                from multifleet.protocol import check_peer_version
+                peer_ver = hb.get("protocol_version")
+                compat, ver_status = check_peer_version(peer_ver)
+                nerve._peers[node] = {**hb, "_received_at": time.time(), "_via": "udp_gossip", "_version_status": ver_status}
+                if not compat:
+                    logger.warning(f"Gossip peer {node} has incompatible protocol: {peer_ver} ({ver_status})")
                 if hasattr(nerve, '_repair_in_progress'):
                     nerve._repair_in_progress.pop(node, None)
                 if hasattr(nerve, 'protocol') and nerve.protocol:

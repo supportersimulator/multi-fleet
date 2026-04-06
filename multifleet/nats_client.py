@@ -699,6 +699,8 @@ class FleetNerveNATS:
                     "sessions": v.get("sessions", 0),
                     "transport": "nats",
                     "vscode": v.get("vscode", "?"),
+                    "protocol_version": v.get("protocol_version"),
+                    "version_status": v.get("_version_status", "unknown"),
                 }
                 for k, v in self._peers.items()
             },
