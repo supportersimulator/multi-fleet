@@ -1188,6 +1188,56 @@ def fleet_doctor() -> dict:
     }
 
 
+# ── Lease Management ──
+
+def _get_lease_manager():
+    """Get or create a LeaseManager instance (lazy init)."""
+    global _lease_manager
+    try:
+        return _lease_manager
+    except NameError:
+        pass
+    try:
+        from multifleet.leases import LeaseManager
+        from multifleet.store import FleetNerveStore
+        store = FleetNerveStore()
+        _lease_manager = LeaseManager(store, NODE_ID)
+        return _lease_manager
+    except Exception as e:
+        logger.warning(f"LeaseManager init failed: {e}")
+        return None
+
+
+def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_task") -> dict:
+    """Manage resource leases — acquire, release, renew, query, or list."""
+    mgr = _get_lease_manager()
+    if mgr is None:
+        return {"error": "LeaseManager not available"}
+
+    if action == "acquire":
+        if not resource_id:
+            return {"error": "resource_id required for acquire"}
+        return mgr.acquire(resource_id, lease_type=lease_type)
+    elif action == "release":
+        if not resource_id:
+            return {"error": "resource_id required for release"}
+        return mgr.release(resource_id)
+    elif action == "renew":
+        if not resource_id:
+            return {"error": "resource_id required for renew"}
+        return mgr.renew(resource_id)
+    elif action == "query":
+        if not resource_id:
+            return {"error": "resource_id required for query"}
+        result = mgr.query(resource_id)
+        return result if result else {"lease": None, "resource_id": resource_id}
+    elif action == "list":
+        leases = mgr.list_active(node_id=resource_id if resource_id else None)
+        return {"leases": leases, "count": len(leases), "stats": mgr.stats}
+    else:
+        return {"error": f"unknown action: {action}, expected: acquire|release|renew|query|list"}
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -1403,6 +1453,20 @@ TOOLS = [
         "description": "Run diagnostic health checks on this fleet node. Returns structured report with 6 checks: daemon health, NATS connectivity, peer reachability, keychain secrets, message store integrity, and Python dependencies.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": fleet_doctor,
+    },
+    {
+        "name": "fleet_lease",
+        "description": "Manage resource leases — acquire, release, renew, or query ownership to prevent dual-work across nodes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["acquire", "release", "renew", "query", "list"], "description": "Lease action"},
+                "resource_id": {"type": "string", "description": "Resource to lease (branch name, file path, task ID)"},
+                "lease_type": {"type": "string", "enum": ["heartbeat", "short_task", "long_task", "exclusive"], "default": "short_task"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_lease,
     },
 ]
 

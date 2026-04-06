@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "lease_grant",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Response to a lease request — indicates whether the lease was granted or denied",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "resource_id": {"type": "string", "description": "Resource that was requested"},
+      "granted": {"type": "boolean", "description": "Whether the lease was granted"},
+      "holder": {"type": "string", "description": "Node ID of the current lease holder"},
+      "expires_at": {"type": "string", "description": "ISO timestamp or epoch when lease expires"},
+      "reason": {"type": "string", "description": "Reason for denial (if not granted)"}
+    },
+    "required": ["resource_id", "granted", "holder", "expires_at"]
+  },
+  "ttl_s": 60,
+  "priority": "high"
+}
