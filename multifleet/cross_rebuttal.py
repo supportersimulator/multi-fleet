@@ -195,3 +195,81 @@ class RebuttalManager:
     def all_sessions(self) -> list[RebuttalSession]:
         """Return all sessions including resolved."""
         return list(self._sessions.values())
+
+    def handle_incoming_packet(self, packet_type: str, payload: dict) -> dict:
+        """Handle an incoming rebuttal-related packet.
+
+        Routes local_verdict, critique, and chief_decision packets to the
+        correct session. Auto-advances the session phase when all expected
+        machines have submitted.
+
+        Returns dict with:
+          - action: what happened (verdict_recorded, critique_recorded,
+            decision_recorded, auto_advanced, error)
+          - task_id: the task this packet belongs to
+          - phase: current phase after processing
+          - needs_synthesis: True when all critiques are in and chief
+            should run synthesis
+        """
+        task_id = payload.get("task_id", "")
+        if not task_id:
+            return {"action": "error", "error": "missing task_id in payload"}
+
+        session = self._sessions.get(task_id)
+        if not session:
+            return {"action": "error", "error": f"no session for task {task_id}",
+                    "task_id": task_id}
+
+        machine_id = payload.get("from", payload.get("machine", ""))
+        result: dict = {"task_id": task_id, "needs_synthesis": False}
+
+        if packet_type == "local_verdict":
+            if not machine_id:
+                return {"action": "error", "error": "missing from/machine in verdict",
+                        "task_id": task_id}
+            session.add_verdict(machine_id, payload)
+            result["action"] = "verdict_recorded"
+            result["verdicts_count"] = len(session.verdicts)
+            result["expected"] = len(session.expected_machines)
+
+            # Auto-advance: all verdicts collected
+            if session.all_verdicts_in() and session.phase == RebuttalPhase.LOCAL_SURGERY:
+                session.advance(RebuttalPhase.VERDICTS_COLLECTED)
+                result["action"] = "auto_advanced"
+                result["advanced_to"] = RebuttalPhase.VERDICTS_COLLECTED.value
+
+        elif packet_type == "critique":
+            if not machine_id:
+                return {"action": "error", "error": "missing from/machine in critique",
+                        "task_id": task_id}
+            session.add_critique(machine_id, payload)
+            result["action"] = "critique_recorded"
+            result["critiques_count"] = len(session.critiques)
+            result["expected"] = len(session.expected_machines)
+
+            # Auto-advance: all critiques collected
+            if session.all_critiques_in() and session.phase == RebuttalPhase.UNDER_REVIEW:
+                session.advance(RebuttalPhase.CRITIQUES_COLLECTED)
+                result["action"] = "auto_advanced"
+                result["advanced_to"] = RebuttalPhase.CRITIQUES_COLLECTED.value
+                result["needs_synthesis"] = True
+
+        elif packet_type == "chief_decision":
+            session.set_decision(payload)
+            result["action"] = "decision_recorded"
+
+            # Auto-advance through synthesis -> resolved
+            if session.phase == RebuttalPhase.CRITIQUES_COLLECTED:
+                session.advance(RebuttalPhase.SYNTHESIS)
+            if session.phase == RebuttalPhase.SYNTHESIS:
+                session.advance(RebuttalPhase.RESOLVED)
+                result["action"] = "auto_advanced"
+                result["advanced_to"] = RebuttalPhase.RESOLVED.value
+
+        else:
+            return {"action": "error",
+                    "error": f"unknown packet_type: {packet_type}",
+                    "task_id": task_id}
+
+        result["phase"] = session.phase.value
+        return result

@@ -27,6 +27,7 @@ Tools:
   fleet_doctor           — run 6 diagnostic health checks on this node
   fleet_race             — start a Competitive Branch Race across fleet nodes
   fleet_race_status      — check race progress or list all races
+  fleet_cross_rebuttal   — orchestrate cross-machine rebuttal protocol (4-phase cycle)
 
 Usage:
   python3 tools/fleet_nerve_mcp.py
@@ -399,12 +400,41 @@ def fleet_worker_dispatch(target: str, task: str, timeout: str = "300") -> dict:
     prompt, waits for completion, and returns the response. Worker is stopped
     after task completes.
 
+    When the task is a JSON task_brief (has "message_type": "task_brief" or
+    "type": "task_brief"), a cross-machine RebuttalSession is automatically
+    created to track verdicts and critiques across fleet nodes.
+
     Args:
         target: node to run worker on (e.g. "mac2", or "local" for this node)
         task: the prompt/task to send to the worker
         timeout: max seconds to wait for worker response (default 300)
     """
     timeout_int = int(timeout)
+
+    # Detect task_brief and create a cross-rebuttal session if applicable
+    rebuttal_info = None
+    try:
+        task_data = json.loads(task) if isinstance(task, str) else None
+    except (json.JSONDecodeError, TypeError):
+        task_data = None
+
+    if task_data and task_data.get("message_type") in ("task_brief",) or (
+        task_data and task_data.get("type") == "task_brief"
+    ):
+        try:
+            cross_mgr = _get_cross_rebuttal_manager()
+            if cross_mgr is not None:
+                session = cross_mgr.start_session(task_data)
+                cross_mgr.advance_session(session.task_id)
+                rebuttal_info = {
+                    "rebuttal_session": session.task_id,
+                    "phase": session.phase.value,
+                    "expected_machines": session.expected_machines,
+                }
+                logger.info("Created cross-rebuttal session %s for dispatch to %s",
+                            session.task_id[:8], target)
+        except Exception as e:
+            logger.warning("Failed to create cross-rebuttal session: %s", e)
 
     try:
         try:
@@ -414,6 +444,8 @@ def fleet_worker_dispatch(target: str, task: str, timeout: str = "300") -> dict:
         mgr = FleetWorkerManager()
         actual_target = target if target != "local" else mgr.node_id
         result = _run_async(mgr.dispatch(actual_target, task, timeout=timeout_int))
+        if rebuttal_info:
+            result["rebuttal"] = rebuttal_info
         return result
     except RuntimeError as e:
         if "session-driver" in str(e):
@@ -593,9 +625,11 @@ def fleet_tasks() -> dict:
             continue
         sessions = health.get("sessions", [])
         for s in sessions:
+            full_sid = s.get("sessionId", s.get("id", "?"))
             all_tasks.append({
                 "node": name,
-                "session_id": s.get("sessionId", s.get("id", "?"))[:12],
+                "session_id": full_sid,
+                "display_id": full_sid[:12],
                 "idle_s": s.get("idle_s", 0),
                 "cwd": s.get("cwd", ""),
                 "branch": s.get("branch", ""),
@@ -812,6 +846,12 @@ def fleet_inject(message: str, target: str = "", session_id: str = "") -> dict:
 
     body = {"message": message}
     if session_id:
+        # Normalize truncated session IDs to full UUIDs before sending to daemon
+        try:
+            from multifleet.sessions import normalize_session_id
+            session_id = normalize_session_id(session_id)
+        except ImportError:
+            pass  # graceful degradation — daemon also normalizes
         body["session_id"] = session_id
 
     result = _daemon_post("/inject", body, host=host, port=port)
@@ -1423,6 +1463,162 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
         return {"error": f"unknown action: {action}, expected: propose|review|accept|rebut|counter|resolve|list|get"}
 
 
+# ── Cross-Machine Rebuttal (task_brief -> verdict -> critique -> synthesis) ──
+
+_cross_rebuttal_manager = None
+_chief_synthesis = None
+
+
+def _get_cross_rebuttal_manager():
+    """Get or create a cross-machine RebuttalManager (lazy init)."""
+    global _cross_rebuttal_manager
+    if _cross_rebuttal_manager is not None:
+        return _cross_rebuttal_manager
+    try:
+        from multifleet.cross_rebuttal import RebuttalManager
+        _cross_rebuttal_manager = RebuttalManager()
+        return _cross_rebuttal_manager
+    except Exception as e:
+        logger.warning(f"CrossRebuttalManager init failed: {e}")
+        return None
+
+
+def _get_chief_synthesis():
+    """Get or create a ChiefSynthesis engine (lazy init)."""
+    global _chief_synthesis
+    if _chief_synthesis is not None:
+        return _chief_synthesis
+    try:
+        from multifleet.synthesis import ChiefSynthesis
+        _chief_synthesis = ChiefSynthesis()
+        return _chief_synthesis
+    except Exception as e:
+        logger.warning(f"ChiefSynthesis init failed: {e}")
+        return None
+
+
+def fleet_cross_rebuttal(action: str, task_id: str = "", payload: str = "") -> dict:
+    """Orchestrate cross-machine rebuttal protocol.
+
+    Actions:
+    - start: Chief creates a rebuttal session from a task_brief payload (JSON).
+             Payload must include objective, deadline_minutes, assigned_to.
+    - verdict: Submit this machine's local_verdict for a task.
+               Payload is the verdict JSON (must include confidence, summary).
+    - critique: Submit this machine's critique of another's verdict.
+                Payload is the critique JSON (must include reviewing, stance).
+    - status: Check rebuttal session status for a task_id.
+    - synthesize: Chief runs synthesis on collected verdicts/critiques.
+    - list: List all active rebuttal sessions.
+    """
+    mgr = _get_cross_rebuttal_manager()
+    if mgr is None:
+        return {"error": "CrossRebuttalManager not available"}
+
+    if action == "start":
+        if not payload:
+            return {"error": "payload (JSON task_brief) required for start"}
+        try:
+            brief = json.loads(payload) if isinstance(payload, str) else payload
+        except json.JSONDecodeError as e:
+            return {"error": f"invalid JSON payload: {e}"}
+        session = mgr.start_session(brief)
+        # Auto-advance to LOCAL_SURGERY so machines can start working
+        mgr.advance_session(session.task_id)
+        return {
+            "status": "started",
+            "task_id": session.task_id,
+            "phase": session.phase.value,
+            "expected_machines": session.expected_machines,
+            "deadline_minutes": session.deadline_minutes,
+        }
+
+    elif action == "verdict":
+        if not task_id:
+            return {"error": "task_id required for verdict"}
+        if not payload:
+            return {"error": "payload (JSON verdict) required for verdict"}
+        try:
+            verdict = json.loads(payload) if isinstance(payload, str) else payload
+        except json.JSONDecodeError as e:
+            return {"error": f"invalid JSON payload: {e}"}
+        verdict.setdefault("from", NODE_ID)
+        verdict["task_id"] = task_id
+        result = mgr.handle_incoming_packet("local_verdict", verdict)
+        return result
+
+    elif action == "critique":
+        if not task_id:
+            return {"error": "task_id required for critique"}
+        if not payload:
+            return {"error": "payload (JSON critique) required for critique"}
+        try:
+            critique = json.loads(payload) if isinstance(payload, str) else payload
+        except json.JSONDecodeError as e:
+            return {"error": f"invalid JSON payload: {e}"}
+        critique.setdefault("from", NODE_ID)
+        critique["task_id"] = task_id
+        # Advance to UNDER_REVIEW if still at VERDICTS_COLLECTED
+        session = mgr.get_session(task_id)
+        if session:
+            from multifleet.cross_rebuttal import RebuttalPhase
+            if session.phase == RebuttalPhase.VERDICTS_COLLECTED:
+                session.advance(RebuttalPhase.UNDER_REVIEW)
+        result = mgr.handle_incoming_packet("critique", critique)
+        return result
+
+    elif action == "status":
+        if not task_id:
+            return {"error": "task_id required for status"}
+        session = mgr.get_session(task_id)
+        if not session:
+            return {"error": f"no session for task {task_id}"}
+        return {
+            "task_id": session.task_id,
+            "phase": session.phase.value,
+            "expected_machines": session.expected_machines,
+            "verdicts": list(session.verdicts.keys()),
+            "verdicts_count": len(session.verdicts),
+            "critiques": list(session.critiques.keys()),
+            "critiques_count": len(session.critiques),
+            "has_decision": session.chief_decision is not None,
+            "is_expired": session.is_expired(),
+            "deadline_minutes": session.deadline_minutes,
+        }
+
+    elif action == "synthesize":
+        if not task_id:
+            return {"error": "task_id required for synthesize"}
+        session = mgr.get_session(task_id)
+        if not session:
+            return {"error": f"no session for task {task_id}"}
+        engine = _get_chief_synthesis()
+        if engine is None:
+            return {"error": "ChiefSynthesis engine not available"}
+        synthesis_result = engine.synthesize(task_id, session.verdicts)
+        decision = synthesis_result.to_chief_decision()
+        # Record decision on session and advance to resolved
+        result = mgr.handle_incoming_packet("chief_decision", decision)
+        return {
+            "status": "synthesized",
+            "task_id": task_id,
+            "decision": decision,
+            "session_phase": result.get("phase", "unknown"),
+        }
+
+    elif action == "list":
+        active = mgr.active_sessions()
+        all_sessions = mgr.all_sessions()
+        return {
+            "active": [s.to_dict() for s in active],
+            "active_count": len(active),
+            "total_count": len(all_sessions),
+        }
+
+    else:
+        return {"error": f"unknown action: {action}, expected: start|verdict|critique|status|synthesize|list"}
+
+
 def fleet_evidence(action: str, event_type: str = "", node_id: str = "",
                    subject: str = "", payload: str = "",
                    since: str = "", limit: str = "50") -> dict:
@@ -1564,6 +1760,29 @@ def fleet_race_status(race_id: str = "", action: str = "status") -> dict:
         return {"error": "use POST /race/<id>/submit to submit results"}
     else:
         return {"error": f"unknown action: {action}, expected: status|list|submit"}
+
+
+# ── Liaison ──
+
+_liaison_instance = None
+
+def _get_liaison():
+    global _liaison_instance
+    if _liaison_instance is None:
+        try:
+            from multifleet.liaison import create_liaison
+            _liaison_instance = create_liaison(NODE_ID)
+        except Exception:
+            return None
+    return _liaison_instance
+
+
+def fleet_liaison_status() -> dict:
+    """Return liaison state: pending reviews, active rebuttals, unread count, summary."""
+    liaison = _get_liaison()
+    if liaison is None:
+        return {"error": "Liaison not available", "status": "unavailable"}
+    return liaison.to_dict()
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
@@ -1870,6 +2089,26 @@ TOOLS = [
             "required": [],
         },
         "fn": fleet_race_status,
+    },
+    {
+        "name": "fleet_liaison_status",
+        "description": "Fleet Liaison Agent state — pending reviews, active rebuttals, unread message count, and one-line summary. Lightweight status check for the liaison background agent.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": fleet_liaison_status,
+    },
+    {
+        "name": "fleet_cross_rebuttal",
+        "description": "Orchestrate cross-machine rebuttal protocol — the 4-phase cycle (task_brief -> local verdicts -> cross-critique -> chief synthesis). Actions: start, verdict, critique, status, synthesize, list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "verdict", "critique", "status", "synthesize", "list"], "description": "Rebuttal action"},
+                "task_id": {"type": "string", "description": "Task ID (required for verdict, critique, status, synthesize)"},
+                "payload": {"type": "string", "description": "JSON payload (task_brief for start, verdict/critique data for verdict/critique)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_cross_rebuttal,
     },
 ]
 

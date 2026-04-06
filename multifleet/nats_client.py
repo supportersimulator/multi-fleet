@@ -152,7 +152,7 @@ from .channels import (  # noqa: E402
 )
 from .discovery import FleetDiscoveryManager  # noqa: E402
 from .self_heal import SelfHealManager  # noqa: E402
-from .sessions import SessionManager  # noqa: E402
+from .sessions import SessionManager, normalize_session_id  # noqa: E402
 
 
 # ── Subjects ──
@@ -1370,8 +1370,9 @@ class FleetNerveNATS:
             idle.sort(key=lambda x: x[0], reverse=True)
             if idle:
                 chosen = idle[0][1]
-                session_target = chosen.get('sessionId', '?')[:12]
-                message['_target_session'] = session_target
+                full_sid = chosen.get('sessionId', '?')
+                session_target = full_sid[:12]  # display only
+                message['_target_session'] = full_sid
                 routing = 'task_to_idle_session'
             else:
                 routing = 'task_no_idle'
@@ -1379,8 +1380,9 @@ class FleetNerveNATS:
         elif msg_type in ('context', 'reply'):
             if sessions:
                 primary = min(sessions, key=lambda s: s.get('idle_s', 9999))
-                session_target = primary.get('sessionId', '?')[:12]
-                message['_target_session'] = session_target
+                full_sid = primary.get('sessionId', '?')
+                session_target = full_sid[:12]  # display only
+                message['_target_session'] = full_sid
                 routing = 'context_to_primary'
 
         result = await self.send_with_fallback(target, message)
@@ -1833,7 +1835,8 @@ class FleetNerveNATS:
                     # Direct --resume injection for testing
                     # Accepts: {"session_id": "...", "message": "..."} or {"message": "..."}
                     # If session_id omitted, auto-detects active session
-                    session_id = body.get("session_id") or daemon._get_active_session_full_id()
+                    raw_sid = body.get("session_id", "")
+                    session_id = normalize_session_id(raw_sid) if raw_sid else daemon._get_active_session_full_id()
                     message = body.get("message", "")
                     if not message:
                         self._json_response(400, {"error": "missing 'message' field"})

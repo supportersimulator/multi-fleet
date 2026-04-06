@@ -12,6 +12,7 @@ The engine:
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -61,6 +62,15 @@ class ChiefSynthesis:
         )
         self._analyzers: list[Callable] = []
         self._default_analyzer = self._basic_confidence_analyzer
+        self._evidence_ledger = None
+
+        # Auto-register evidence ledger if available
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            self._evidence_ledger = EvidenceLedger()
+            logger.info("Evidence ledger connected to synthesis")
+        except (ImportError, Exception) as e:
+            logger.debug("Evidence ledger not available: %s", e)
 
         # Auto-register ContextDNA analyzer if available
         try:
@@ -113,11 +123,13 @@ class ChiefSynthesis:
             if results:
                 best = max(results, key=lambda r: r.confidence)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
+                self._record_evidence(best)
                 return best
 
         # Fallback to basic confidence-weighted scoring
         result = self._default_analyzer(task_id, verdicts)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
+        self._record_evidence(result)
         return result
 
     def _basic_confidence_analyzer(
@@ -217,6 +229,26 @@ class ChiefSynthesis:
                 f.write(json.dumps(entry) + "\n")
         except Exception as e:
             logger.error("Failed to log decision: %s", e)
+
+    def _record_evidence(self, result: SynthesisResult):
+        """Record synthesis decision to the evidence ledger (hash-chain)."""
+        if not self._evidence_ledger:
+            return
+        try:
+            self._evidence_ledger.append(
+                event_type="merge_decision",
+                data={
+                    "task_id": result.task_id,
+                    "decision": result.decision,
+                    "winner_branch": result.winner_branch,
+                    "confidence": round(result.confidence, 4),
+                    "dissent_count": len(result.dissent_preserved),
+                    "cherry_pick_count": len(result.cherry_pick_from),
+                },
+                node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+            )
+        except Exception as e:
+            logger.warning("Evidence ledger record failed: %s", e)
 
     def recent_decisions(self, limit: int = 10) -> list[dict]:
         """Read recent decisions from ledger."""

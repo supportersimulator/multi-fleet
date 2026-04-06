@@ -27,6 +27,71 @@ logger = logging.getLogger("fleet_nats")
 SEED_DIR = "/tmp"
 REPO_ROOT = Path(__file__).parent.parent
 
+# UUID v4 format: 8-4-4-4-12 hex chars = 36 chars total
+_UUID_LEN = 36
+
+
+def normalize_session_id(sid: str, active_sessions: list | None = None) -> str:
+    """Ensure session ID is full UUID format.
+
+    If already a full UUID (>=36 chars), return as-is.
+    If truncated, try to resolve from active sessions list.
+    Returns the original string if no match found (graceful degradation).
+
+    Args:
+        sid: Session ID, possibly truncated.
+        active_sessions: List of session dicts with 'sessionId' key.
+            If None, attempts to detect active sessions automatically.
+    """
+    if not sid or len(sid) >= _UUID_LEN:
+        return sid
+
+    # Try to find matching full ID from provided sessions
+    if active_sessions is not None:
+        matches = [
+            s.get("sessionId", "")
+            for s in active_sessions
+            if s.get("sessionId", "").startswith(sid)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return sid  # ambiguous or no match — return original
+
+    # Auto-detect: scan PID session files for a match
+    sessions_dir = Path.home() / ".claude" / "sessions"
+    if sessions_dir.exists():
+        for pid_file in sessions_dir.glob("*.json"):
+            try:
+                pid = int(pid_file.stem)
+                os.kill(pid, 0)
+                data = json.loads(pid_file.read_text())
+                full_id = data.get("sessionId", "")
+                if full_id.startswith(sid):
+                    return full_id
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+
+    # Fallback: scan JSONL filenames
+    projects_dir = Path.home() / ".claude" / "projects"
+    if projects_dir.exists():
+        cutoff = time.time() - 1800
+        for proj_dir in projects_dir.iterdir():
+            if not proj_dir.is_dir():
+                continue
+            for jsonl in proj_dir.glob("*.jsonl"):
+                try:
+                    if jsonl.stat().st_mtime > cutoff and jsonl.stem.startswith(sid):
+                        return jsonl.stem
+                except OSError:
+                    pass
+
+    return sid  # no match — return original
+
+
+def display_session_id(sid: str) -> str:
+    """Truncate session ID for human-readable display (12 chars)."""
+    return sid[:12] if sid else "?"
+
 
 class SessionManager:
     """Session detection, injection, and notification manager.
@@ -111,23 +176,26 @@ class SessionManager:
         """Inject message into active Claude session via `claude --resume`.
 
         Args:
-            session_id: Full session UUID
+            session_id: Full session UUID (or truncated — will be normalized)
             message: Pre-formatted message text
 
         Returns:
             True if injection succeeded, False otherwise.
             Never logs message content -- only type and delivery status.
         """
+        # Ensure we have full UUID for --resume
+        session_id = normalize_session_id(session_id)
+        display_id = display_session_id(session_id)
         try:
             cmd = ["claude", "--resume", session_id, "--message", message]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
-                logger.info(f"resume-inject: success session={session_id[:12]}")
+                logger.info(f"resume-inject: success session={display_id}")
                 return True
-            logger.warning(f"resume-inject: failed rc={result.returncode} session={session_id[:12]}")
+            logger.warning(f"resume-inject: failed rc={result.returncode} session={display_id}")
             return False
         except Exception as e:
-            logger.warning(f"resume-inject: error session={session_id[:12]}: {e}")
+            logger.warning(f"resume-inject: error session={display_id}: {e}")
             return False
 
     # ── Seed / Injection ──
@@ -382,7 +450,7 @@ class SessionManager:
                     os.kill(pid, 0)
                     data = json.loads(pid_file.read_text())
                     sessions.append({
-                        "sessionId": data.get("sessionId", pid_file.stem)[:12],
+                        "sessionId": data.get("sessionId", pid_file.stem),
                         "pid": pid,
                         "kind": data.get("kind", "?"),
                         "entrypoint": data.get("entrypoint", "?"),
@@ -402,9 +470,11 @@ class SessionManager:
                     try:
                         mtime = jsonl.stat().st_mtime
                         if mtime > cutoff:
-                            sid = jsonl.stem[:12]
+                            sid = jsonl.stem
                             # Update idle_s on existing session or add new one
-                            existing = next((s for s in sessions if s["sessionId"] == sid), None)
+                            existing = next((s for s in sessions
+                                             if s["sessionId"] == sid
+                                             or s["sessionId"].startswith(sid[:12])), None)
                             if existing:
                                 existing["idle_s"] = int(time.time() - mtime)
                                 existing["project"] = proj_dir.name
