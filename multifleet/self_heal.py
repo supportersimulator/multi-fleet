@@ -51,6 +51,8 @@ class SelfHealManager:
         # Repair lock: target -> timestamp. Prevents concurrent repairs on same target.
         self._repair_locks: dict[str, float] = {}
         self._repair_lock_ttl = 300  # 5 min lock duration
+        # Track online/offline state to only emit peer.offline on transition
+        self._peer_online_state: dict[str, bool] = {}
 
     # ── Repair Lock (cascade prevention) ──
 
@@ -657,11 +659,22 @@ class SelfHealManager:
                 last_seen = now - self._nerve._peers[peer_id].get("_received_at", 0)
                 if last_seen > 90:  # 90s = 9 missed heartbeats
                     logger.warning(f"Watchdog: {peer_id} heartbeat stale ({int(last_seen)}s)")
+                    # Emit peer.offline on transition (was online -> now offline)
+                    if self._peer_online_state.get(peer_id, True):
+                        self._peer_online_state[peer_id] = False
+                        if self._nerve._eventbus:
+                            try:
+                                self._nerve._eventbus.peer_offline(peer_id, last_seen_s=last_seen)
+                            except Exception:
+                                pass
                     self._repair_in_progress[peer_id] = {"started_at": now, "level": 1}
                     asyncio.create_task(
                         self.repair_with_escalation(peer_id, ["P1_nats"], "restart_nats"))
                 elif last_seen > 45:  # Warning threshold
                     logger.info(f"Watchdog: {peer_id} heartbeat slow ({int(last_seen)}s)")
+                else:
+                    # Peer is healthy — mark as online (for transition tracking)
+                    self._peer_online_state[peer_id] = True
             else:
                 # Never seen this peer -- they might not be online yet
                 # Only escalate if we've been running >5min (past startup window)
