@@ -33,6 +33,7 @@ Usage:
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import random
 import signal
@@ -62,12 +63,20 @@ try:
 except ImportError:
     fleet_historian_nats = None  # type: ignore[assignment]
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [fleet-nats/%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger("fleet_nats")
+
+# ── Log rotation: 10MB max, 3 backups ──
+_log_file = os.environ.get("FLEET_NATS_LOG", "/tmp/fleet-nats.log")
+_log_formatter = logging.Formatter(
+    "%(asctime)s [fleet-nats/%(levelname)s] %(message)s", datefmt="%H:%M:%S"
+)
+_rotating_handler = logging.handlers.RotatingFileHandler(
+    _log_file, maxBytes=10 * 1024 * 1024, backupCount=3
+)
+_rotating_handler.setFormatter(_log_formatter)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_rotating_handler, _console_handler])
 
 # ── Config ──
 NODE_ID = os.environ.get("MULTIFLEET_NODE_ID") or socket.gethostname().split(".")[0]
@@ -612,6 +621,39 @@ class FleetNerveNATS:
                           json.dumps({"chain_id": chain_id, "success": success, "result": result[:2000]})),
                 self._loop,
             )
+
+    # ── Memory Cleanup (30-day survival) ──
+
+    def _cleanup_completed(self, max_age_s: int = 86400):
+        """Remove terminal _chains and _dispatches older than max_age_s (default 24h).
+
+        Terminal statuses: done, failed, completed, error.
+        Called hourly from the watchdog loop to prevent unbounded memory growth.
+        """
+        now = time.time()
+        terminal = {"done", "failed", "completed", "error"}
+
+        stale_chains = [
+            cid for cid, c in self._chains.items()
+            if c.get("status") in terminal
+            and (now - c.get("created_at", now)) > max_age_s
+        ]
+        for cid in stale_chains:
+            del self._chains[cid]
+        if stale_chains:
+            logger.info(f"Cleanup: evicted {len(stale_chains)} completed chains")
+
+        stale_dispatches = [
+            did for did, d in self._dispatches.items()
+            if d.get("status") in terminal
+            and (now - d.get("completed_at", d.get("sent_at", now))) > max_age_s
+        ]
+        for did in stale_dispatches:
+            del self._dispatches[did]
+        if stale_dispatches:
+            logger.info(f"Cleanup: evicted {len(stale_dispatches)} completed dispatches")
+
+        return {"chains_evicted": len(stale_chains), "dispatches_evicted": len(stale_dispatches)}
 
     # ── Remote Worker Dispatch ──
 

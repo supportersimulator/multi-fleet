@@ -41,8 +41,48 @@ class SelfHealManager:
     ACK_TIMEOUT_S = 60.0
     ACK_MAX_RETRIES = 3
 
+    # ── Repair cascade prevention ──
+    # Only the chief node (mac1) is allowed to execute L4 SSH repairs.
+    # Non-chief nodes escalate L4 to chief via fleet message instead.
+    L4_CHIEF_ONLY = os.environ.get("FLEET_REPAIR_L4_CHIEF_ONLY", "true").lower() in ("true", "1", "yes")
+
     def __init__(self, nerve: FleetNerveNATS):
         self._nerve = nerve
+        # Repair lock: target -> timestamp. Prevents concurrent repairs on same target.
+        self._repair_locks: dict[str, float] = {}
+        self._repair_lock_ttl = 300  # 5 min lock duration
+
+    # ── Repair Lock (cascade prevention) ──
+
+    def _is_repair_locked(self, target: str) -> bool:
+        """Check if a repair is already in progress for target."""
+        lock_time = self._repair_locks.get(target)
+        if lock_time is None:
+            return False
+        if time.time() - lock_time > self._repair_lock_ttl:
+            # Lock expired — clean up
+            del self._repair_locks[target]
+            return False
+        return True
+
+    def _acquire_repair_lock(self, target: str) -> bool:
+        """Try to acquire the repair lock for target. Returns True if acquired."""
+        if self._is_repair_locked(target):
+            return False
+        self._repair_locks[target] = time.time()
+        return True
+
+    def _release_repair_lock(self, target: str):
+        """Release the repair lock for target."""
+        self._repair_locks.pop(target, None)
+
+    def _is_chief(self) -> bool:
+        """Check if this node is the chief (mac1)."""
+        chief = getattr(self._nerve, '_chief', None)
+        if chief:
+            return self._nerve.node_id == chief
+        # Fallback: mac1 is always chief
+        return self._nerve.node_id == "mac1"
 
     # ── Repair Actions ──
 
@@ -196,11 +236,18 @@ class SelfHealManager:
         Level 2 GUIDE: Send specific repair command (30s wait)
         Level 3 ASSIST: Send auto-exec repair action (30s wait)
         Level 4 REMOTE: SSH direct intervention (~90s after detection)
+          - Chief-only: non-chief nodes escalate L4 to chief via fleet message
+          - Repair lock: only one repair per target at a time
 
         All repair messages use type:"repair" (NOT "context") to avoid
         seed file writes and keystroke injection spam on the target.
         Each level uses send_with_fallback() for delivery.
         """
+        # Repair lock: skip if another repair is in progress for this target
+        if not self._acquire_repair_lock(target):
+            logger.info(f"Repair skipped for {target}: repair already in progress")
+            return {"repaired": False, "reason": "repair_locked"}
+
         logger.info(f"Repair escalation for {target}: broken={broken_channels}, action={action}")
 
         # Level 1: NOTIFY -- silent repair msg (no seed/keystroke), 2min wait
@@ -224,6 +271,7 @@ class SelfHealManager:
             probe = await self._nerve._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
             if probe.get("delivered"):
                 logger.info(f"Repair SUCCESS: {target} back on P1 after L1 notify")
+                self._release_repair_lock(target)
                 return {"repaired": True, "level": 1}
 
         # Level 2: GUIDE -- auto-executable repair command (still silent, no seed/keystroke)
@@ -247,6 +295,7 @@ class SelfHealManager:
             probe = await self._nerve._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
             if probe.get("delivered"):
                 logger.info(f"Repair SUCCESS: {target} back on P1 after L2 guide")
+                self._release_repair_lock(target)
                 return {"repaired": True, "level": 2}
 
         # Level 3: ASSIST -- send auto-executable repair action (mac1's handlers)
@@ -270,9 +319,34 @@ class SelfHealManager:
             probe = await self._nerve._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
             if probe.get("delivered"):
                 logger.info(f"Repair SUCCESS: {target} back on P1 after L3 assist")
+                self._release_repair_lock(target)
                 return {"repaired": True, "level": 3}
 
         # Level 4: REMOTE -- SSH direct intervention (last resort, ~90s after first detection)
+        # Chief-only gate: non-chief nodes escalate L4 to chief instead of executing directly
+        if self.L4_CHIEF_ONLY and not self._is_chief():
+            logger.info(f"Repair L4: non-chief node, escalating to chief for {target}")
+            try:
+                chief_id = getattr(self._nerve, '_chief', None) or "mac1"
+                escalation_msg = {
+                    "type": "repair", "from": self._nerve.node_id, "to": chief_id,
+                    "payload": {
+                        "subject": "l4_escalation",
+                        "body": json.dumps({
+                            "action": action,
+                            "target": target,
+                            "reporter": self._nerve.node_id,
+                            "broken_channels": broken_channels,
+                            "level": 4,
+                            "escalated": True,
+                        }),
+                    },
+                }
+                await self._nerve.send_with_fallback(chief_id, escalation_msg)
+            except Exception as e:
+                logger.warning(f"Repair L4 escalation to chief failed: {e}")
+            self._release_repair_lock(target)
+            return {"repaired": False, "level": 4, "reason": "escalated_to_chief"}
         logger.info(f"Repair L4 REMOTE -> {target} (~90s failure, all local attempts exhausted)")
         peer = self._nerve._resolve_peer(target)
         user, ip = peer.get("user"), peer.get("ip")
@@ -295,6 +369,7 @@ class SelfHealManager:
                         ["ssh", "-o", "ConnectTimeout=3", f"{user}@{ip}",
                          f"echo '{b64_notice}' | base64 -d > /tmp/fleet-seed-{safe_target}.md"],
                         capture_output=True, timeout=8)
+                    self._release_repair_lock(target)
                     return {"repaired": False, "level": 4, "reason": "active_session_detected"}
                 else:
                     # No active session -- safe to remote restart
@@ -309,10 +384,12 @@ class SelfHealManager:
                     probe = await self._nerve._send_p1_nats(target, {"type": "sync", "payload": {"subject": "ping"}})
                     if probe.get("delivered"):
                         logger.info(f"Repair SUCCESS: {target} back on P1 after L4 remote restart")
+                        self._release_repair_lock(target)
                         return {"repaired": True, "level": 4}
             except Exception as e:
                 logger.warning(f"Repair L4 SSH failed: {e}")
 
+        self._release_repair_lock(target)
         logger.warning(f"Repair FAILED: all 4 levels exhausted for {target}")
         return {"repaired": False, "level": 4, "reason": "all_levels_failed"}
 
@@ -339,6 +416,8 @@ class SelfHealManager:
         self._nerve._last_activity_at = time.time()  # updated on send/receive
         self._idle_wake_sent = {}  # peer_id -> timestamp of last idle-wake sent
         self._last_suggestion_scan = 0.0  # productive idle rate limit
+        self._last_maintenance_run = 0.0  # hourly maintenance tracking
+        self._maintenance_interval = 3600  # 1 hour
 
         while self._nerve._running:
             try:
@@ -349,6 +428,8 @@ class SelfHealManager:
                 await self._watchdog_check_tunnels()
                 await self._watchdog_check_idle()
                 await self._watchdog_check_pending_acks()
+                # Hourly maintenance: chain/dispatch cleanup + store maintenance
+                await self._watchdog_run_maintenance()
             except Exception as e:
                 logger.debug(f"Watchdog cycle error: {e}")
             await asyncio.sleep(30)

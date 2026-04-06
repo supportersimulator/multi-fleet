@@ -7,6 +7,7 @@ is owned by whatever consumes it (Context DNA IDE, 3-surgeons, etc.).
 """
 
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
@@ -120,20 +121,31 @@ def validate_packet(data: Any) -> FleetPacket:
 
 
 class DedupTracker:
-    """In-memory set of seen packet IDs. Bounded to prevent unbounded growth."""
+    """In-memory LRU tracker of seen packet IDs. Bounded to prevent unbounded growth.
+
+    Uses OrderedDict for true LRU eviction — oldest entries are evicted first
+    when capacity is reached, not random entries from a set.
+    """
 
     def __init__(self, max_size: int = 10_000):
-        self._seen: set[str] = set()
+        self._seen: OrderedDict[str, None] = OrderedDict()
         self._max_size = max_size
 
     def is_duplicate(self, packet_id: str) -> bool:
-        return packet_id in self._seen
+        if packet_id in self._seen:
+            # Move to end (most recently used)
+            self._seen.move_to_end(packet_id)
+            return True
+        return False
 
     def mark_seen(self, packet_id: str):
+        if packet_id in self._seen:
+            self._seen.move_to_end(packet_id)
+            return
         if len(self._seen) >= self._max_size:
-            to_keep = list(self._seen)[self._max_size // 2:]
-            self._seen = set(to_keep)
-        self._seen.add(packet_id)
+            # Evict oldest (first) entry — true LRU
+            self._seen.popitem(last=False)
+        self._seen[packet_id] = None
 
     def check_and_mark(self, packet_id: str) -> bool:
         """Returns True if duplicate (already seen). Marks as seen if new."""

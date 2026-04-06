@@ -62,6 +62,17 @@ class ChiefSynthesis:
         self._analyzers: list[Callable] = []
         self._default_analyzer = self._basic_confidence_analyzer
 
+        # Auto-register ContextDNA analyzer if available
+        try:
+            from multifleet.contextdna_analyzer import create_contextdna_analyzer
+
+            analyzer = create_contextdna_analyzer()
+            if analyzer:
+                self.register_analyzer(analyzer)
+                logger.info("ContextDNA memory analyzer registered")
+        except ImportError:
+            pass  # ContextDNA not available — use default scoring only
+
     def register_analyzer(self, fn: Callable):
         """Register a semantic analyzer. Called with (task_id, verdicts) -> SynthesisResult."""
         self._analyzers.append(fn)

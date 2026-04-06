@@ -27,6 +27,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "unit: fast, isolated unit tests (no I/O, no network)")
     config.addinivalue_line("markers", "integration: tests that require running services (daemon, NATS, etc.)")
     config.addinivalue_line("markers", "security: security-focused tests (HMAC, validation, sanitization)")
+    config.addinivalue_line("markers", "slow: long-running stress tests (30-day simulations)")
 
 
 # ── Sample config data ──

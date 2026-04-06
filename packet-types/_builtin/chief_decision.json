@@ -24,7 +24,23 @@
         }
       },
       "followups": {"type": "array", "items": {"type": "string"}},
-      "dissent_preserved": {"type": "array", "items": {"type": "string"}}
+      "dissent_preserved": {
+        "type": "array",
+        "items": {
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "object",
+              "properties": {
+                "surgeon": {"type": "string"},
+                "claim": {"type": "string"},
+                "severity": {"type": "string"},
+                "machine": {"type": "string"}
+              }
+            }
+          ]
+        }
+      }
     }
   },
   "ttl_s": 7200,
