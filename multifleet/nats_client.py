@@ -141,6 +141,7 @@ from .channels import (  # noqa: E402
     ChannelState,
     CommunicationProtocol,
 )
+from .discovery import FleetDiscoveryManager  # noqa: E402
 from .self_heal import SelfHealManager  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
 
@@ -216,6 +217,8 @@ class FleetNerveNATS:
         self.protocol = CommunicationProtocol(self)
         # Self-healing, watchdog, and repair escalation
         self._healer = SelfHealManager(self)
+        # Discovery, gossip, and heartbeat
+        self._disco = FleetDiscoveryManager(self)
         # Session management (injection, detection, notifications)
         self._sessions = SessionManager(self)
 
@@ -446,27 +449,7 @@ class FleetNerveNATS:
             self._stats["errors"] += 1
 
     async def _handle_heartbeat(self, msg):
-        """Track peer heartbeats. Auto-adds unknown peers. Clears stale repair/channel state."""
-        try:
-            data = json.loads(msg.data.decode())
-            node = data.get("node", "unknown")
-            if node != self.node_id:
-                was_unknown = node not in self._peers and node not in self._peers_config
-                self._peers[node] = {**data, "_received_at": time.time()}
-                # Fresh heartbeat = peer is alive on NATS. Clear any stale repair state.
-                if hasattr(self, '_repair_in_progress'):
-                    self._repair_in_progress.pop(node, None)
-                if hasattr(self, 'protocol') and self.protocol:
-                    self.protocol.channel_state.record_success(node, "P1_nats", 0)
-                # Auto-add unknown peers to discovery (don't reject)
-                if was_unknown:
-                    logger.info(f"Auto-discovered new peer via NATS heartbeat: {node}")
-                if hasattr(self, '_discovery') and self._discovery:
-                    peer_ip = data.get("ip", "")
-                    peer_port = data.get("port", 8855)
-                    self._discovery.add_nats_peer(node, ip=peer_ip, port=peer_port)
-        except Exception:
-            pass
+        return await self._disco.handle_heartbeat(msg)
 
     # ── Self-healing / Repair — delegated to SelfHealManager ──
 
@@ -1406,192 +1389,25 @@ class FleetNerveNATS:
         results.sort(key=lambda r: r["node"])
         return results
 
-    # ── Heartbeat ──
+    # ── Heartbeat / Discovery / Gossip — delegated to FleetDiscoveryManager ──
 
     async def _heartbeat_loop(self):
-        """Publish heartbeat every 10s."""
-        while self._running:
-            try:
-                detected = self._detect_sessions()
-                hb = {
-                    "node": self.node_id,
-                    "timestamp": time.time(),
-                    "ip": self._get_local_ip(),
-                    "sessions": len(detected),
-                    "session_list": [
-                        {"sessionId": s.get("sessionId", ""), "idle_s": s.get("idle_s", 0)}
-                        for s in detected
-                    ],
-                    "vscode": self._detect_vscode_state(),
-                    "git": self._get_git_context(),
-                }
-                await self.nc.publish("fleet.heartbeat", json.dumps(hb).encode())
-
-                # Publish session historian data (change-driven, piggybacked on heartbeat)
-                if fleet_historian_nats:
-                    try:
-                        await fleet_historian_nats.publish_all_session_data(self)
-                    except Exception as e:
-                        logger.debug(f"Session publish failed: {e}")
-
-            except Exception as e:
-                logger.debug(f"Heartbeat publish failed: {e}")
-            await asyncio.sleep(10)
+        return await self._disco.heartbeat_loop()
 
     def _get_local_ip(self) -> str:
-        """Get LAN IP for heartbeat advertisement."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return ""
-
-    # ── UDP Gossip Heartbeat ──
+        return self._disco.get_local_ip()
 
     def _get_known_peer_ips(self) -> dict[str, str]:
-        """Return {node_id: ip} for all known peers (from heartbeats + config)."""
-        peers = {}
-        # From NATS heartbeat data (runtime-discovered)
-        for node, data in self._peers.items():
-            ip = data.get("ip")
-            if ip and node != self.node_id:
-                peers[node] = ip
-        # From static peer config (fleet_nerve_config)
-        for node, cfg in self._peers_config.items():
-            if node != self.node_id and node not in peers:
-                ip = cfg.get("ip") or cfg.get("host")
-                if ip:
-                    peers[node] = ip
-        return peers
+        return self._disco.get_known_peer_ips()
 
     def _select_gossip_targets(self, exclude_nodes: set[str] | None = None) -> list[tuple[str, str]]:
-        """Select up to GOSSIP_FANOUT random peers to gossip to.
-
-        Returns list of (node_id, ip) tuples. Excludes self and any nodes in exclude_nodes.
-        """
-        peer_ips = self._get_known_peer_ips()
-        if exclude_nodes:
-            peer_ips = {n: ip for n, ip in peer_ips.items() if n not in exclude_nodes}
-        candidates = list(peer_ips.items())
-        if len(candidates) <= GOSSIP_FANOUT:
-            return candidates
-        return random.sample(candidates, GOSSIP_FANOUT)
+        return self._disco.select_gossip_targets(exclude_nodes=exclude_nodes)
 
     async def _udp_gossip_loop(self):
-        """Send UDP gossip heartbeats every 10s to GOSSIP_FANOUT random peers."""
-        # Wait for initial NATS heartbeats to populate peer list
-        await asyncio.sleep(15)
-        logger.info(f"UDP gossip heartbeat started (fanout={GOSSIP_FANOUT}, ttl={GOSSIP_TTL}, port={UDP_GOSSIP_PORT})")
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
-
-        while self._running:
-            try:
-                targets = self._select_gossip_targets()
-                if not targets:
-                    await asyncio.sleep(10)
-                    continue
-
-                detected = self._detect_sessions()
-                hb = {
-                    "node": self.node_id,
-                    "timestamp": time.time(),
-                    "ip": self._get_local_ip(),
-                    "sessions": len(detected),
-                    "session_list": [
-                        {"sessionId": s.get("sessionId", ""), "idle_s": s.get("idle_s", 0)}
-                        for s in detected
-                    ],
-                    "vscode": self._detect_vscode_state(),
-                    "git": self._get_git_context(),
-                    # Gossip metadata
-                    "_gossip_ttl": GOSSIP_TTL,
-                    "_gossip_path": [self.node_id],
-                    "_gossip_origin": self.node_id,
-                }
-                payload = json.dumps(hb).encode()
-
-                for node_id, ip in targets:
-                    try:
-                        sock.sendto(payload, (ip, UDP_GOSSIP_PORT))
-                        logger.debug(f"Gossip heartbeat sent to {node_id} ({ip}:{UDP_GOSSIP_PORT})")
-                    except Exception as e:
-                        logger.debug(f"Gossip send to {node_id} ({ip}) failed: {e}")
-            except Exception as e:
-                logger.debug(f"UDP gossip loop error: {e}")
-            await asyncio.sleep(10)
+        return await self._disco.udp_gossip_loop()
 
     async def _udp_gossip_listener(self):
-        """Listen for UDP gossip heartbeats and forward to more peers (with TTL)."""
-        loop = asyncio.get_running_loop()
-
-        # Create UDP socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(("0.0.0.0", UDP_GOSSIP_PORT))
-        except OSError as e:
-            logger.warning(f"UDP gossip listener bind failed on port {UDP_GOSSIP_PORT}: {e}")
-            return
-        sock.setblocking(False)
-
-        logger.info(f"UDP gossip listener started on port {UDP_GOSSIP_PORT}")
-
-        # Forward socket for gossip relay
-        fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        fwd_sock.setblocking(False)
-
-        while self._running:
-            try:
-                # Non-blocking recv via asyncio
-                data, addr = await loop.run_in_executor(None, lambda: sock.recvfrom(65535))
-                hb = json.loads(data.decode())
-
-                node = hb.get("node", "unknown")
-                if node == self.node_id:
-                    continue  # Ignore own heartbeats
-
-                # Update peer state (same as NATS _handle_heartbeat)
-                self._peers[node] = {**hb, "_received_at": time.time(), "_via": "udp_gossip"}
-                if hasattr(self, '_repair_in_progress'):
-                    self._repair_in_progress.pop(node, None)
-                if hasattr(self, 'protocol') and self.protocol:
-                    self.protocol.channel_state.record_success(node, "P1_nats", 0)
-
-                # Gossip forwarding: decrement TTL, forward to more peers
-                ttl = hb.get("_gossip_ttl", 0)
-                gossip_path = hb.get("_gossip_path", [])
-
-                if ttl > 0:
-                    # Add ourselves to the path
-                    new_path = gossip_path + [self.node_id]
-                    hb["_gossip_ttl"] = ttl - 1
-                    hb["_gossip_path"] = new_path
-
-                    # Don't forward back to sender, origin, or anyone in the path
-                    exclude = set(new_path) | {hb.get("_gossip_origin", "")}
-                    targets = self._select_gossip_targets(exclude_nodes=exclude)
-
-                    if targets:
-                        fwd_payload = json.dumps(hb).encode()
-                        for fwd_node, fwd_ip in targets:
-                            try:
-                                fwd_sock.sendto(fwd_payload, (fwd_ip, UDP_GOSSIP_PORT))
-                                logger.debug(f"Gossip forwarded {node}'s heartbeat to {fwd_node} (ttl={ttl - 1})")
-                            except Exception as e:
-                                logger.debug(f"Gossip forward to {fwd_node} failed: {e}")
-
-            except json.JSONDecodeError:
-                logger.debug("UDP gossip: invalid JSON received")
-            except BlockingIOError:
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.debug(f"UDP gossip listener error: {e}")
-                await asyncio.sleep(1)
+        return await self._disco.udp_gossip_listener()
 
     # ── Proactive Fleet Watchdog — delegated to SelfHealManager ──
 
