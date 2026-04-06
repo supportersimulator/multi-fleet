@@ -7,7 +7,7 @@ well-designed but disconnected. This module wires the pipeline end-to-end.
 Usage:
     from multifleet.race_orchestrator import run_race
     result = run_race("Implement auth refresh", nodes=["mac1", "mac2", "mac3"])
-    print(result.summary())
+    print(result["decision"])
 """
 
 import json
@@ -16,6 +16,9 @@ import time
 import urllib.request
 import urllib.error
 from typing import Optional
+
+from multifleet.cross_rebuttal import RebuttalManager, RebuttalPhase
+from multifleet.synthesis import ChiefSynthesis
 
 logger = logging.getLogger("fleet-nerve.race-orchestrator")
 
@@ -50,13 +53,15 @@ def run_race(
     nodes: list[str] = None,
     timeout_s: int = 600,
     poll_interval_s: int = 10,
+    deadline_minutes: int = 30,
 ) -> dict:
     """Run a complete race: dispatch → collect → debate → synthesize.
 
-    This is the orchestrator that wires the three modules together.
-    Blocks until all verdicts arrive or timeout.
+    This is the orchestrator that wires RebuttalManager and ChiefSynthesis
+    into a single blocking pipeline.
 
-    Returns dict with: race_id, decision, winner, verdicts, critiques, synthesis, elapsed_s
+    Returns dict with: status, decision, winner, verdicts, critiques,
+    synthesis, elapsed_s, rebuttal_session
     """
     if nodes is None:
         nodes = ["mac1", "mac2", "mac3"]
@@ -64,15 +69,26 @@ def run_race(
     t0 = time.time()
     logger.info("Race starting: %d nodes, timeout=%ds", len(nodes), timeout_s)
 
-    # Step 1: Dispatch to all nodes
+    # Initialize rebuttal session
+    mgr = RebuttalManager()
+    session = mgr.start_session({
+        "assigned_to": nodes,
+        "deadline_minutes": deadline_minutes,
+    })
+    task_id = session.task_id
+
+    # Step 1: Advance to LOCAL_SURGERY and dispatch to all nodes
+    mgr.advance_session(task_id)  # ASSIGNED -> LOCAL_SURGERY
+
     dispatched = {}
     for node in nodes:
         result = _daemon_post("message", {
             "type": "task",
             "to": node,
             "payload": {
-                "subject": f"race-task",
+                "subject": f"race-task:{task_id[:8]}",
                 "body": prompt,
+                "task_id": task_id,
                 "timeout_s": timeout_s,
             },
         })
@@ -80,10 +96,10 @@ def run_race(
         logger.info("Dispatched to %s: %s", node, "ok" if result else "failed")
 
     # Step 2: Collect verdicts (poll until all arrive or timeout)
-    verdicts = {}
     deadline = time.time() + timeout_s
+    verdicts_received = 0
 
-    while len(verdicts) < len(nodes) and time.time() < deadline:
+    while not session.all_verdicts_in() and time.time() < deadline:
         time.sleep(poll_interval_s)
 
         # Check daemon for verdict messages
@@ -91,66 +107,147 @@ def run_race(
         if not health:
             continue
 
-        # Check for any fleet messages that look like verdicts
-        # In production, this would use the packet registry
-        # For now, we check if nodes have reported results
+        # Check for incoming verdict packets (in production, the daemon
+        # routes these via packet_registry; here we poll for completeness)
+        for node in nodes:
+            if node in session.verdicts:
+                continue
+            # Check if node has sent a verdict via fleet message
+            # The daemon would route local_verdict packets here
+            # For now, check if the node reports completion in health
+            peer_info = health.get("peers", {}).get(node, {})
+            if peer_info and peer_info.get("lastSeen", 999) < 30:
+                # Peer is alive — check for task completion signals
+                pass
+
         elapsed = time.time() - t0
-        logger.info("Polling: %d/%d verdicts collected (%.0fs elapsed)",
-                     len(verdicts), len(nodes), elapsed)
+        logger.info(
+            "Polling: %d/%d verdicts (%.0fs elapsed, phase=%s)",
+            len(session.verdicts), len(nodes), elapsed, session.phase.value,
+        )
 
-    # Step 3: Rebuttal phase (if we have verdicts)
-    critiques = []
-    if len(verdicts) >= 2:
-        try:
-            from multifleet.cross_rebuttal import RebuttalManager
-            mgr = RebuttalManager()
-            # Would run pairwise critiques here
-            logger.info("Rebuttal phase: %d verdicts to debate", len(verdicts))
-        except ImportError:
-            logger.warning("cross_rebuttal not available — skipping debate")
+    # If we timed out with partial verdicts, advance anyway
+    if session.verdicts and session.phase == RebuttalPhase.LOCAL_SURGERY:
+        mgr.advance_session(task_id)  # -> VERDICTS_COLLECTED
 
-    # Step 4: Synthesis
+    # Step 3: Cross-review phase (pairwise critiques)
+    critiques = {}
+    if len(session.verdicts) >= 2:
+        mgr.advance_session(task_id)  # VERDICTS_COLLECTED -> UNDER_REVIEW
+
+        # Generate pairwise critiques: each node reviews others' verdicts
+        for reviewer_node in session.verdicts:
+            other_verdicts = {
+                k: v for k, v in session.verdicts.items() if k != reviewer_node
+            }
+            # Send critique request to each node
+            _daemon_post("message", {
+                "type": "task",
+                "to": reviewer_node,
+                "payload": {
+                    "subject": f"race-critique:{task_id[:8]}",
+                    "body": json.dumps({
+                        "action": "critique",
+                        "task_id": task_id,
+                        "verdicts_to_review": other_verdicts,
+                    }),
+                },
+            })
+            logger.info("Critique request sent to %s", reviewer_node)
+
+        # Poll for critiques (shorter timeout — critiques are faster)
+        critique_deadline = time.time() + min(timeout_s / 3, 120)
+        while not session.all_critiques_in() and time.time() < critique_deadline:
+            time.sleep(poll_interval_s)
+            logger.info(
+                "Critiques: %d/%d collected",
+                len(session.critiques), len(nodes),
+            )
+
+        critiques = dict(session.critiques)
+
+        # Advance past critique collection
+        if session.phase == RebuttalPhase.UNDER_REVIEW and session.critiques:
+            mgr.advance_session(task_id)  # -> CRITIQUES_COLLECTED
+
+    # Step 4: Chief Synthesis
     synthesis_result = None
-    if verdicts:
-        try:
-            from multifleet.synthesis import ChiefSynthesis
-            chief = ChiefSynthesis()
-            # Would synthesize verdicts here
-            logger.info("Synthesis: producing merge decision")
-        except ImportError:
-            logger.warning("synthesis not available — skipping")
+    chief = ChiefSynthesis()
+
+    if session.verdicts:
+        synthesis_result = chief.synthesize(task_id, session.verdicts)
+        chief_decision = synthesis_result.to_chief_decision()
+
+        # Feed decision into rebuttal session
+        mgr.handle_incoming_packet("chief_decision", {
+            **chief_decision,
+            "task_id": task_id,
+        })
+
+        logger.info(
+            "Synthesis complete: decision=%s winner=%s confidence=%.3f",
+            synthesis_result.decision,
+            synthesis_result.winner_branch,
+            synthesis_result.confidence,
+        )
 
     elapsed = time.time() - t0
 
     result = {
-        "status": "completed" if len(verdicts) == len(nodes) else "partial",
+        "task_id": task_id,
+        "status": "completed" if len(session.verdicts) == len(nodes) else "partial",
         "nodes": nodes,
         "dispatched": len(dispatched),
-        "verdicts_collected": len(verdicts),
-        "verdicts": verdicts,
+        "verdicts_collected": len(session.verdicts),
+        "verdicts": session.verdicts,
         "critiques": critiques,
-        "synthesis": synthesis_result,
+        "rebuttal_phase": session.phase.value,
         "elapsed_s": round(elapsed, 1),
         "timeout_hit": time.time() >= deadline,
     }
 
     if synthesis_result:
-        result["decision"] = synthesis_result.get("decision", "needs_human")
-        result["winner"] = synthesis_result.get("winner_branch")
+        result["decision"] = synthesis_result.decision
+        result["winner"] = synthesis_result.winner_branch
+        result["confidence"] = synthesis_result.confidence
+        result["reasoning"] = synthesis_result.reasoning
+        result["cherry_pick_from"] = synthesis_result.cherry_pick_from
+        result["dissent_preserved"] = synthesis_result.dissent_preserved
+        result["followups"] = synthesis_result.followups
+        result["synthesis"] = synthesis_result.to_chief_decision()
     else:
         result["decision"] = "needs_human"
         result["winner"] = None
+        result["confidence"] = 0.0
+        result["synthesis"] = None
 
     logger.info("Race complete: %s (%.1fs)", result["status"], elapsed)
     return result
 
 
-def force_complete(race_id: str = None) -> dict:
-    """Force-complete a race with whatever verdicts are available.
+def submit_verdict(task_id: str, node: str, verdict: dict) -> dict:
+    """Submit a verdict for an active race.
 
-    Use when a node doesn't respond and you want to synthesize
-    with partial results rather than waiting for timeout.
+    Called by nodes when they complete their race task.
+    The verdict should contain: confidence, summary, branch, risks,
+    strengths, dissent, findings, commit.
     """
+    verdict["from"] = node
+    verdict["machine"] = node
+    verdict["task_id"] = task_id
+    return _daemon_post("message", {
+        "type": "context",
+        "to": "chief",
+        "payload": {
+            "subject": f"race-verdict:{task_id[:8]}",
+            "body": json.dumps(verdict),
+            "packet_type": "local_verdict",
+        },
+    }) or {"error": "daemon unreachable"}
+
+
+def force_complete(race_id: str = None) -> dict:
+    """Force-complete a race with whatever verdicts are available."""
     logger.info("Force-completing race %s", race_id or "current")
     return {"action": "force_complete", "race_id": race_id, "status": "not_implemented_yet"}
 
@@ -163,4 +260,4 @@ if __name__ == "__main__":
     print(f"Starting race: {prompt}")
     print(f"Nodes: {nodes}")
     result = run_race(prompt, nodes, timeout_s=120, poll_interval_s=5)
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2, default=str))

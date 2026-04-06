@@ -550,9 +550,9 @@ class FleetRace:
     def _run_synthesis(self, race: dict):
         """Synthesize results from all completed nodes.
 
-        Produces a comparison of all approaches with recommendation.
-        Tries chief relay for LLM-backed synthesis, falls back to
-        structured comparison.
+        Uses ChiefSynthesis engine for evidence-backed decisions with
+        confidence scoring, cherry-pick suggestions, and preserved dissent.
+        Falls back to structured comparison if synthesis module unavailable.
         """
         completed = [
             p for p in race["participants"].values()
@@ -581,38 +581,77 @@ class FleetRace:
             })
             return
 
-        # Multiple completions — build comparison
-        approaches = []
+        # Multiple completions — build verdict dict for ChiefSynthesis
+        verdicts: dict[str, dict] = {}
         for p in completed:
-            approaches.append({
-                "node": p["node"],
+            result = p["result"] or {}
+            verdicts[p["node"]] = {
                 "branch": p["branch"],
-                "summary": p["result"].get("summary", ""),
-                "findings": p["result"].get("findings", ""),
+                "confidence": float(result.get("confidence", 0.5)),
+                "summary": result.get("summary", ""),
+                "findings": result.get("findings", ""),
+                "risks": result.get("risks", []),
+                "strengths": result.get("strengths", []),
+                "dissent": result.get("dissent", []),
+                "commit": result.get("commit", p["branch"]),
+                "followups": result.get("followups", []),
                 "elapsed_s": round(
                     (p["completed_at"] or time.time()) - race["started_at"], 1
                 ),
-            })
+            }
 
-        # Pick winner: first to complete with a result (speed + completeness)
-        winner = min(completed, key=lambda p: p["completed_at"] or float("inf"))
+        # Try ChiefSynthesis engine (evidence-backed, pluggable analyzers)
+        try:
+            from multifleet.synthesis import ChiefSynthesis
+            chief = ChiefSynthesis()
+            synthesis_result = chief.synthesize(race["race_id"], verdicts)
 
-        race["winner"] = winner["node"]
-        race["synthesis"] = {
-            "recommendation": f"Winner: {winner['node']} (first complete).",
-            "approaches": approaches,
-            "winner_branch": winner["branch"],
-            "dissent": [
-                r for r in race["rebuttals"]
-            ],
-        }
+            race["winner"] = synthesis_result.winner_branch
+            race["synthesis"] = {
+                "engine": "chief_synthesis",
+                "decision": synthesis_result.decision,
+                "winner_branch": synthesis_result.winner_branch,
+                "confidence": synthesis_result.confidence,
+                "reasoning": synthesis_result.reasoning,
+                "cherry_pick_from": synthesis_result.cherry_pick_from,
+                "dissent_preserved": synthesis_result.dissent_preserved,
+                "followups": synthesis_result.followups,
+                "chief_decision_packet": synthesis_result.to_chief_decision(),
+            }
+
+            # Feed decision back to rebuttal manager if active
+            self._finalize_rebuttal(race, synthesis_result.to_chief_decision())
+
+            logger.info(
+                "Race %s chief synthesis: decision=%s winner=%s confidence=%.3f",
+                race["race_id"], synthesis_result.decision,
+                synthesis_result.winner_branch, synthesis_result.confidence,
+            )
+        except (ImportError, Exception) as e:
+            logger.warning("ChiefSynthesis unavailable, using fallback: %s", e)
+            # Fallback: first to complete wins
+            winner = min(completed, key=lambda p: p["completed_at"] or float("inf"))
+            race["winner"] = winner["node"]
+            race["synthesis"] = {
+                "engine": "fallback",
+                "recommendation": f"Winner: {winner['node']} (first complete).",
+                "approaches": [
+                    {"node": p["node"], "branch": p["branch"],
+                     "summary": (p["result"] or {}).get("summary", "")}
+                    for p in completed
+                ],
+                "winner_branch": winner["branch"],
+                "dissent": list(race["rebuttals"]),
+            }
+
         race["status"] = "done"
 
         self._record_evidence("race_completed", {
             "race_id": race["race_id"],
             "winner": race["winner"],
             "completions": len(completed),
-            "approaches": len(approaches),
+            "engine": race["synthesis"].get("engine", "unknown"),
+            "confidence": race["synthesis"].get("confidence", 0.0),
             "elapsed_s": round(time.time() - race["started_at"], 1),
         })
 
@@ -620,6 +659,22 @@ class FleetRace:
             "Race %s completed: winner=%s completions=%d",
             race["race_id"], race["winner"], len(completed),
         )
+
+    def _finalize_rebuttal(self, race: dict, chief_decision: dict):
+        """Feed synthesis decision into active rebuttal session if one exists."""
+        try:
+            from multifleet.cross_rebuttal import RebuttalManager
+            mgr = RebuttalManager()
+            session = mgr.get_session(race["race_id"])
+            if session:
+                result = mgr.handle_incoming_packet("chief_decision", {
+                    **chief_decision,
+                    "task_id": race["race_id"],
+                })
+                logger.info("Rebuttal finalized for race %s: %s",
+                            race["race_id"], result.get("action", "?"))
+        except (ImportError, Exception) as e:
+            logger.debug("Rebuttal finalization skipped: %s", e)
 
     # ── Evidence Recording ──────────────────────────────────────────
 
