@@ -25,6 +25,8 @@ Tools:
   fleet_discover         — discover fleet peers from config + heartbeats
   fleet_send_smart       — session-aware smart routing to a peer
   fleet_doctor           — run 6 diagnostic health checks on this node
+  fleet_race             — start a Competitive Branch Race across fleet nodes
+  fleet_race_status      — check race progress or list all races
 
 Usage:
   python3 tools/fleet_nerve_mcp.py
@@ -1337,11 +1339,8 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
     elif action == "list":
         leases = mgr.list_active(node_id=resource_id if resource_id else None)
         return {"leases": leases, "count": len(leases), "stats": mgr.stats}
-    elif action == "cleanup":
-        cleaned = mgr.cleanup_expired()
-        return {"cleaned": cleaned, "stats": mgr.stats}
     else:
-        return {"error": f"unknown action: {action}, expected: acquire|release|renew|query|list|cleanup"}
+        return {"error": f"unknown action: {action}, expected: acquire|release|renew|query|list"}
 
 
 def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
@@ -1480,66 +1479,91 @@ def fleet_evidence(action: str, event_type: str = "", node_id: str = "",
         return {"error": f"unknown action: {action}, expected: record|query|verify|latest|stats"}
 
 
-def fleet_synthesize(task_id: str, verdicts: str = "") -> dict:
-    """Run chief synthesis on collected verdicts to produce a merge decision.
+# ── Fleet Race ──
 
-    If verdicts are not provided inline, reads local_verdict packets from the
-    packet store for the given task_id.
+_fleet_race = None
+
+def _get_fleet_race():
+    """Get or create a FleetRace instance (lazy init)."""
+    global _fleet_race
+    if _fleet_race is not None:
+        return _fleet_race
+    try:
+        from multifleet.fleet_race import FleetRace
+        _fleet_race = FleetRace(daemon_port=FLEET_NERVE_PORT, node_id=NODE_ID)
+        return _fleet_race
+    except Exception as e:
+        logger.warning(f"FleetRace init failed: {e}")
+        return None
+
+
+def fleet_race(task: str, nodes: str = "", timeout: str = "600") -> dict:
+    """Start a Competitive Branch Race across fleet nodes.
+
+    Each node works in an isolated worktree on the same task.
+    First to finish triggers cross-review. Fleet debates and converges.
+
+    Args:
+        task: The task/problem description to race on.
+        nodes: Comma-separated node IDs (default: all available).
+        timeout: Max seconds for the race (default 600).
     """
-    from multifleet.synthesis import ChiefSynthesis
+    racer = _get_fleet_race()
+    if racer is None:
+        return {"error": "FleetRace not available"}
 
-    engine = ChiefSynthesis()
-    t0 = time.monotonic()
+    node_list = [n.strip() for n in nodes.split(",") if n.strip()] if nodes else None
+    try:
+        timeout_s = int(timeout)
+    except ValueError:
+        timeout_s = 600
 
-    # Parse inline verdicts or read from packet store
-    verdict_map: dict[str, dict] = {}
-    if verdicts:
-        try:
-            verdict_map = json.loads(verdicts)
-        except json.JSONDecodeError:
-            return {"error": "verdicts must be valid JSON: {machine_id: verdict_payload}"}
-    else:
-        # Read from packet store
-        try:
-            from multifleet.packet_store import PacketStore
-            store = PacketStore()
-            raw = store.recent(packet_type="local_verdict", limit=50)
-            for pkt in raw:
-                payload = pkt.get("payload", pkt)
-                pkt_task = payload.get("task_id", "")
-                node = pkt.get("nodeId", pkt.get("from_node", "unknown"))
-                if pkt_task == task_id or not task_id:
-                    verdict_map[node] = payload
-        except Exception as e:
-            logger.warning("Could not read packet store: %s", e)
-            if not verdict_map:
-                return {"error": f"No inline verdicts and packet store unavailable: {e}"}
-
-    if not verdict_map:
-        return {"error": f"No verdicts found for task_id={task_id}"}
-
-    result = engine.synthesize(task_id, verdict_map)
-    decision = result.to_chief_decision()
-    latency = round((time.monotonic() - t0) * 1000, 1)
-
-    # Audit trail
+    # Record in audit
     audit = _get_audit()
     if audit:
-        audit.record("synthesis", task_id, "", "ok", latency,
-                      metadata={"decision": result.decision, "confidence": result.confidence})
+        audit.record("race_start", "fleet_race", "", "starting", 0,
+                      metadata={"task": task[:100], "nodes": nodes})
 
-    # Evidence ledger
-    try:
-        ledger = _get_evidence_ledger()
-        if ledger:
-            ledger.record("synthesis_decision", NODE_ID, f"task={task_id} decision={result.decision}",
-                          {"task_id": task_id, "decision": result.decision,
-                           "confidence": result.confidence, "dissent_count": len(result.dissent_preserved)})
-    except Exception as e:
-        logger.warning("Evidence ledger write failed: %s", e)
+    result = racer.start(task, nodes=node_list, timeout_s=timeout_s)
 
-    decision["latency_ms"] = latency
-    return decision
+    # Emit event
+    eventbus = _get_eventbus()
+    if eventbus:
+        eventbus.emit("race.started", {
+            "race_id": result.get("race_id"),
+            "task": task[:100],
+            "participants": list(result.get("participants", {}).keys()),
+            "status": result.get("status"),
+        }, broadcast=True)
+
+    return result
+
+
+def fleet_race_status(race_id: str = "", action: str = "status") -> dict:
+    """Check race progress or list all races.
+
+    Args:
+        race_id: Race ID to check (required for status/submit).
+        action: status (default), list, or submit.
+    """
+    racer = _get_fleet_race()
+    if racer is None:
+        return {"error": "FleetRace not available"}
+
+    if action == "list":
+        races = racer.list_races()
+        return {"races": races, "count": len(races)}
+    elif action == "status":
+        if not race_id:
+            return {"error": "race_id required for status"}
+        return racer.status(race_id)
+    elif action == "submit":
+        if not race_id:
+            return {"error": "race_id required for submit"}
+        # submit_result is called internally or via daemon endpoint
+        return {"error": "use POST /race/<id>/submit to submit results"}
+    else:
+        return {"error": f"unknown action: {action}, expected: status|list|submit"}
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
@@ -1776,7 +1800,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["acquire", "release", "renew", "query", "list", "cleanup"], "description": "Lease action"},
+                "action": {"type": "string", "enum": ["acquire", "release", "renew", "query", "list"], "description": "Lease action"},
                 "resource_id": {"type": "string", "description": "Resource to lease (branch name, file path, task ID)"},
                 "lease_type": {"type": "string", "enum": ["heartbeat", "short_task", "long_task", "exclusive"], "default": "short_task"},
             },
@@ -1821,17 +1845,31 @@ TOOLS = [
         "fn": fleet_evidence,
     },
     {
-        "name": "fleet_synthesize",
-        "description": "Run chief synthesis on fleet verdicts to produce an evidence-informed merge decision. Reads verdicts from the packet store or accepts them inline as JSON. Returns a chief_decision payload with winner, confidence, cherry-picks, and preserved dissent.",
+        "name": "fleet_race",
+        "description": "Start a Competitive Branch Race — parallel problem-solving across fleet nodes. Each node works in an isolated worktree, then the fleet debates and converges to the best solution. The hero feature.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string", "description": "Task ID to synthesize verdicts for"},
-                "verdicts": {"type": "string", "description": "Optional inline JSON: {machine_id: verdict_payload}. If omitted, reads from packet store."},
+                "task": {"type": "string", "description": "The task/problem to race on"},
+                "nodes": {"type": "string", "description": "Comma-separated node IDs (default: all available)"},
+                "timeout": {"type": "string", "description": "Max seconds for the race (default 600)", "default": "600"},
             },
-            "required": ["task_id"],
+            "required": ["task"],
         },
-        "fn": fleet_synthesize,
+        "fn": fleet_race,
+    },
+    {
+        "name": "fleet_race_status",
+        "description": "Check race progress or list all races. Actions: status (get race state by ID), list (all races).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "race_id": {"type": "string", "description": "Race ID to check"},
+                "action": {"type": "string", "enum": ["status", "list"], "description": "Action: status (default) or list", "default": "status"},
+            },
+            "required": [],
+        },
+        "fn": fleet_race_status,
     },
 ]
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "race_start",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Competitive Branch Race start — broadcasts task to all participants for parallel solving",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "race_id": {
+        "type": "string",
+        "description": "Unique race identifier (8-char UUID prefix)"
+      },
+      "task": {
+        "type": "string",
+        "description": "The task/problem description to race on"
+      },
+      "branch_prefix": {
+        "type": "string",
+        "description": "Git branch prefix for race worktrees (default: race)",
+        "default": "race"
+      },
+      "participants": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Node IDs participating in the race"
+      },
+      "timeout_s": {
+        "type": "integer",
+        "description": "Max wall-clock seconds for the race",
+        "default": 600
+      },
+      "started_by": {
+        "type": "string",
+        "description": "Node ID that initiated the race"
+      }
+    },
+    "required": ["race_id", "task"]
+  },
+  "ttl_s": 3600,
+  "priority": "critical"
+}

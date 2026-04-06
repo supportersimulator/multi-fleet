@@ -1745,6 +1745,21 @@ class FleetNerveNATS:
                         self._json_response(200, ledger.stats)
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/races":
+                    racer = self._get_race_manager()
+                    if racer:
+                        self._json_response(200, {"races": racer.list_races(), "count": len(racer.list_races())})
+                    else:
+                        self._json_response(503, {"error": "FleetRace not available"})
+                elif self.path.startswith("/race/"):
+                    racer = self._get_race_manager()
+                    if not racer:
+                        self._json_response(503, {"error": "FleetRace not available"})
+                    else:
+                        race_id = self.path.split("/")[2]
+                        result = racer.status(race_id)
+                        code = 404 if "error" in result else 200
+                        self._json_response(code, result)
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -1773,6 +1788,22 @@ class FleetNerveNATS:
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            _race_manager = None
+
+            def _get_race_manager(self):
+                """Lazy-init FleetRace instance."""
+                if Handler._race_manager is not None:
+                    return Handler._race_manager
+                try:
+                    from .fleet_race import FleetRace
+                    Handler._race_manager = FleetRace(
+                        daemon_port=8855, node_id=daemon.node_id
+                    )
+                    return Handler._race_manager
+                except Exception as e:
+                    logger.warning("FleetRace init failed: %s", e)
+                    return None
 
             def do_POST(self):
                 # CV-001: Peer IP validation on all POST endpoints
@@ -1908,6 +1939,35 @@ class FleetNerveNATS:
                         self._json_response(200, entry)
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/race":
+                    racer = self._get_race_manager()
+                    if not racer:
+                        self._json_response(503, {"error": "FleetRace not available"})
+                        return
+                    task = body.get("task", "")
+                    if not task:
+                        self._json_response(400, {"error": "missing 'task'"})
+                        return
+                    nodes = body.get("nodes")
+                    timeout_s = int(body.get("timeout_s", 600))
+                    result = racer.start(task, nodes=nodes, timeout_s=timeout_s)
+                    self._json_response(200, result)
+                elif self.path.startswith("/race/") and self.path.endswith("/submit"):
+                    racer = self._get_race_manager()
+                    if not racer:
+                        self._json_response(503, {"error": "FleetRace not available"})
+                        return
+                    # /race/<id>/submit
+                    parts = self.path.split("/")
+                    race_id = parts[2] if len(parts) >= 4 else ""
+                    node = body.get("node", daemon.node_id)
+                    result_data = body.get("result", {})
+                    if not race_id:
+                        self._json_response(400, {"error": "missing race_id"})
+                        return
+                    result = racer.submit_result(race_id, node, result_data)
+                    code = 404 if "error" in result else 200
+                    self._json_response(code, result)
                 else:
                     self.send_response(404)
                     self.end_headers()
