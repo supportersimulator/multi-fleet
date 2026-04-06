@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [5.0.0] - 2026-04-05
+
+### Highlights
+- **Liaison agent** — autonomous inter-node coordination without human intervention
+- **Cross-machine rebuttal** — 7-phase state machine for structured disagreement resolution
+- **Chief synthesis engine** — pluggable analyzers with confidence scoring for multi-node consensus
+- **100-node hierarchy** — scalable fleet topology supporting massive deployments
+- **Invariance gates** — hard gates for architectural, pre-implementation, and post-implementation verification
+- **Productive waiting** — nodes do useful work while awaiting fleet responses
+- **Status aggregator + SSE event stream** — real-time fleet-wide observability
+- **1142+ tests** — comprehensive coverage across 55 test files and 49 modules
+
+### Added
+- Liaison agent architecture for autonomous cross-node task negotiation
+- Cross-machine rebuttal protocol with 7-phase state machine (`cross_rebuttal.py`)
+- Chief synthesis engine with pluggable analyzers (`synthesis.py`)
+- 100-node hierarchy support (`hierarchy.py`)
+- Invariance gates for architectural and implementation review (`invariance_gates.py`)
+- Productive wait system — useful work during fleet idle (`productive_wait.py`)
+- Status aggregator for fleet-wide state collection (`status_aggregator.py`)
+- SSE event stream for real-time dashboard updates (`event_stream.py`)
+- Rate limiting for fleet operations (`rate_limit.py`)
+- Packet store for durable message persistence (`packet_store.py`)
+- Lease management for distributed resource coordination (`leases.py`)
+- Metrics collection and reporting (`metrics.py`)
+- MCP resources endpoint (`mcp_resources.py`)
+- Replay system for message debugging (`replay.py`)
+- Rebuttal protocol (`rebuttal.py`)
+
+### Changed
+- Version bumped from 4.0.0 to 5.0.0
+- Module count grew from ~35 to 49
+- Test count grew from 900+ to 1142+
+
+---
+
 ## [4.0.0] - 2026-04-06
 
 ### Added

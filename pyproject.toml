@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "multifleet"
-version = "2.0.0"
+version = "5.0.0"
 description = "Multi-machine fleet coordination for Claude Code sessions via NATS pub/sub"
 readme = "README.md"
 license = "MIT"

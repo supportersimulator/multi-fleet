@@ -1,4 +1,192 @@
 #!/bin/bash
-# Fleet CLI wrapper — run from anywhere
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec python3 -m multifleet.cli "$@"
+# fleet — unified CLI for multi-fleet operations
+# Usage: fleet <command> [args]
+#
+# Wraps multifleet.cli (Python) + direct curl fallbacks + shell-only commands.
+# Works even when Python deps are broken (curl fallbacks).
+
+set -euo pipefail
+
+FLEET_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_DIR="$(cd "$FLEET_DIR/.." && pwd)"
+DAEMON_URL="${FLEET_DAEMON_URL:-http://127.0.0.1:8855}"
+
+# Colors (skip if not tty)
+if [ -t 1 ]; then
+  GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'
+  CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+else
+  GREEN=''; RED=''; YELLOW=''; CYAN=''; BOLD=''; RESET=''
+fi
+
+usage() {
+  cat <<EOF
+${BOLD}fleet${RESET} — unified multi-fleet CLI
+
+${BOLD}COMMANDS${RESET}
+  ${CYAN}status${RESET}        Fleet health overview (daemon + peers)
+  ${CYAN}probe${RESET}         Quick daemon reachability check
+  ${CYAN}peers${RESET}         List discovered fleet peers
+  ${CYAN}channels${RESET}      Show communication channel health
+  ${CYAN}send${RESET}          Send a fleet message (fleet send <to> <subject> <body>)
+  ${CYAN}broadcast${RESET}     Broadcast to all nodes (fleet broadcast <subject> <body>)
+  ${CYAN}race${RESET}          Start a competitive branch race
+  ${CYAN}doctor${RESET}        Run fleet diagnostics
+  ${CYAN}gains-gate${RESET}    Run gains gate checks
+  ${CYAN}dashboard${RESET}     Show fleet dashboard
+  ${CYAN}evidence${RESET}      Evidence ledger operations
+  ${CYAN}lease${RESET}         Distributed lease operations
+  ${CYAN}rebuttal${RESET}      Cross-rebuttal operations
+  ${CYAN}liaison${RESET}       Launch fleet liaison agent
+  ${CYAN}maintenance${RESET}   Run store maintenance (compact, prune)
+  ${CYAN}inbox${RESET}         Check fleet inbox (.fleet-messages)
+  ${CYAN}help${RESET}          Show this help
+
+EOF
+}
+
+# --- Direct commands (no Python needed) ---
+
+cmd_probe() {
+  local resp
+  if resp=$(curl -sf --max-time 3 "$DAEMON_URL/health" 2>/dev/null); then
+    echo -e "${GREEN}ALIVE${RESET} — daemon responding at $DAEMON_URL"
+    echo "$resp" | python3 -m json.tool 2>/dev/null || echo "$resp"
+    return 0
+  else
+    echo -e "${RED}DEAD${RESET} — daemon not responding at $DAEMON_URL"
+    return 1
+  fi
+}
+
+cmd_status() {
+  # Try Python CLI first, fall back to curl
+  if PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -m multifleet.cli status "$@" 2>/dev/null; then
+    return 0
+  fi
+  echo -e "${YELLOW}Python CLI unavailable, using curl fallback${RESET}"
+  cmd_probe
+}
+
+cmd_send() {
+  if [ $# -lt 3 ]; then
+    echo "Usage: fleet send <to> <subject> <body>"
+    return 1
+  fi
+  local to="$1" subject="$2" body="$3"
+  # Try Python CLI
+  if PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -m multifleet.cli send --to "$to" --subject "$subject" --body "$body" 2>/dev/null; then
+    return 0
+  fi
+  # Curl fallback
+  echo -e "${YELLOW}Python CLI unavailable, using curl fallback${RESET}"
+  local payload
+  payload=$(python3 -c "import json; print(json.dumps({'type':'context','to':'$to','payload':{'subject':'$subject','body':'$body'}}))")
+  if curl -sf -X POST "$DAEMON_URL/message" -H "Content-Type: application/json" -d "$payload" 2>/dev/null; then
+    echo -e "${GREEN}Sent${RESET} to $to: $subject"
+  else
+    echo -e "${RED}Failed${RESET} — daemon unreachable. Try P7 (git) instead."
+    return 1
+  fi
+}
+
+cmd_broadcast() {
+  if [ $# -lt 2 ]; then
+    echo "Usage: fleet broadcast <subject> <body>"
+    return 1
+  fi
+  local subject="$1" body="$2"
+  PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -m multifleet.cli broadcast --subject "$subject" --body "$body" 2>/dev/null \
+    || cmd_send "all" "$subject" "$body"
+}
+
+cmd_liaison() {
+  local script="$FLEET_DIR/scripts/fleet-liaison.sh"
+  if [ -f "$script" ]; then
+    bash "$script" "${1:-}"
+  else
+    echo -e "${RED}fleet-liaison.sh not found${RESET}"
+    return 1
+  fi
+}
+
+cmd_maintenance() {
+  PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -c "
+from multifleet.store import PacketStore
+store = PacketStore()
+before = store.count_all() if hasattr(store, 'count_all') else '?'
+if hasattr(store, 'run_maintenance'):
+    store.run_maintenance()
+elif hasattr(store, 'compact'):
+    store.compact()
+elif hasattr(store, 'prune'):
+    store.prune()
+else:
+    print('No maintenance methods found on PacketStore')
+    import sys; sys.exit(1)
+after = store.count_all() if hasattr(store, 'count_all') else '?'
+print(f'Maintenance complete. Packets: {before} -> {after}')
+" 2>&1
+}
+
+cmd_inbox() {
+  local node_id="${MULTIFLEET_NODE_ID:-$(hostname -s)}"
+  local inbox_dir="$REPO_DIR/.fleet-messages/$node_id"
+  local all_dir="$REPO_DIR/.fleet-messages/all"
+
+  echo -e "${BOLD}Fleet Inbox${RESET} (node: $node_id)"
+  echo "---"
+
+  local count=0
+  for dir in "$inbox_dir" "$all_dir"; do
+    if [ -d "$dir" ]; then
+      for f in "$dir"/*.md "$dir"/*.yaml "$dir"/*.yml; do
+        [ -f "$f" ] 2>/dev/null || continue
+        count=$((count + 1))
+        echo -e "${CYAN}$(basename "$f")${RESET} ($(basename "$(dirname "$f")"))"
+        head -8 "$f"
+        echo "---"
+      done
+    fi
+  done
+
+  if [ "$count" -eq 0 ]; then
+    echo -e "${GREEN}Inbox empty${RESET}"
+  else
+    echo -e "${YELLOW}$count message(s) pending${RESET}"
+  fi
+}
+
+cmd_doctor() {
+  PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -m multifleet.cli doctor "$@" 2>/dev/null \
+    || {
+      echo -e "${YELLOW}Python doctor unavailable, running basic checks${RESET}"
+      echo -n "Daemon: "; cmd_probe 2>/dev/null && echo "OK" || echo "DOWN"
+      echo -n "NATS: "; curl -sf --max-time 2 http://127.0.0.1:8222/varz >/dev/null 2>&1 && echo "OK" || echo "DOWN"
+      echo -n "Git remote: "; git -C "$REPO_DIR" remote -v 2>/dev/null | head -1 || echo "NONE"
+    }
+}
+
+# --- Dispatch ---
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  status)       cmd_status "$@" ;;
+  probe)        cmd_probe ;;
+  peers|channels|race|gains-gate|dashboard|evidence|lease|rebuttal)
+                PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -m multifleet.cli "$cmd" "$@" ;;
+  send)         cmd_send "$@" ;;
+  broadcast)    cmd_broadcast "$@" ;;
+  doctor)       cmd_doctor "$@" ;;
+  liaison)      cmd_liaison "$@" ;;
+  maintenance)  cmd_maintenance ;;
+  inbox)        cmd_inbox ;;
+  help|--help|-h)  usage ;;
+  *)
+    echo -e "${RED}Unknown command:${RESET} $cmd"
+    usage
+    exit 1
+    ;;
+esac

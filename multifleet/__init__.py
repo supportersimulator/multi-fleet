@@ -6,4 +6,4 @@ peer discovery, HMAC security, worker dispatch, and visual rendering for
 coordinating Claude Code sessions across multiple machines.
 """
 
-__version__ = "2.0.0"
+__version__ = "5.0.0"
