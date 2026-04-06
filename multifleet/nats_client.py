@@ -1621,6 +1621,15 @@ class FleetNerveNATS:
                         self._json_response(200, fleet_historian_nats.get_peer_sessions(daemon))
                     else:
                         self._json_response(503, {"error": "fleet_historian_nats module not loaded"})
+                elif self.path.startswith("/gains-gate"):
+                    try:
+                        from .gains_gate import FleetGainsGate
+                        quick = "quick=1" in self.path or "quick=true" in self.path.lower()
+                        gate = FleetGainsGate(daemon_port=8855)
+                        result = gate.run(quick=quick)
+                        self._json_response(200, result.to_dict())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e), "passed": False})
                 elif self.path == "/watchdog/suggestions":
                     sug_path = Path("/tmp/fleet-watchdog-suggestions.json")
                     if sug_path.exists():
@@ -1644,6 +1653,50 @@ class FleetNerveNATS:
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+                elif self.path == "/evidence" or self.path.startswith("/evidence?"):
+                    try:
+                        from .evidence_ledger import EvidenceLedger
+                        ledger = EvidenceLedger()
+                        # Parse query params
+                        params = {}
+                        if "?" in self.path:
+                            from urllib.parse import parse_qs, urlparse
+                            qs = parse_qs(urlparse(self.path).query)
+                            if "event_type" in qs:
+                                params["event_type"] = qs["event_type"][0]
+                            if "node_id" in qs:
+                                params["node_id"] = qs["node_id"][0]
+                            if "since" in qs:
+                                params["since"] = float(qs["since"][0])
+                            if "limit" in qs:
+                                params["limit"] = int(qs["limit"][0])
+                        entries = ledger.query(**params)
+                        self._json_response(200, {"entries": entries, "count": len(entries)})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/evidence/latest":
+                    try:
+                        from .evidence_ledger import EvidenceLedger
+                        ledger = EvidenceLedger()
+                        entries = ledger.latest(count=10)
+                        self._json_response(200, {"entries": entries, "count": len(entries)})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/evidence/verify":
+                    try:
+                        from .evidence_ledger import EvidenceLedger
+                        ledger = EvidenceLedger()
+                        result = ledger.verify_chain()
+                        self._json_response(200, result)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/evidence/stats":
+                    try:
+                        from .evidence_ledger import EvidenceLedger
+                        ledger = EvidenceLedger()
+                        self._json_response(200, ledger.stats)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -1792,6 +1845,21 @@ class FleetNerveNATS:
                     except Exception as e:
                         daemon._dispatches[dispatch_id]["status"] = "send_failed"
                         self._json_response(500, {"dispatch_id": dispatch_id, "error": str(e)})
+                elif self.path == "/evidence":
+                    try:
+                        from .evidence_ledger import EvidenceLedger
+                        ledger = EvidenceLedger()
+                        event_type = body.get("event_type", "")
+                        ev_node_id = body.get("node_id", daemon.node_id)
+                        subject = body.get("subject", "")
+                        payload = body.get("payload", {})
+                        if not event_type:
+                            self._json_response(400, {"error": "missing event_type"})
+                            return
+                        entry = ledger.record(event_type, ev_node_id, subject, payload)
+                        self._json_response(200, entry)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
