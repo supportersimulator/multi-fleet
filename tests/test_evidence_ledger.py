@@ -190,6 +190,38 @@ class TestStats:
         assert s["chain_valid"] is True
 
 
+class TestPayloadParsing:
+    def test_query_returns_parsed_payload(self, ledger):
+        """Query results should have payload as dict, not raw JSON string."""
+        ledger.record("merge_decision", "mac1", "test",
+                      {"branch": "feature-x", "count": 42})
+        results = ledger.query(event_type="merge_decision")
+        assert isinstance(results[0]["payload"], dict)
+        assert results[0]["payload"]["count"] == 42
+
+    def test_latest_returns_parsed_payload(self, ledger):
+        ledger.record("lease_granted", "mac1", "test", {"resource": "main"})
+        results = ledger.latest(count=1)
+        assert isinstance(results[0]["payload"], dict)
+        assert results[0]["payload"]["resource"] == "main"
+
+
+class TestPrevHashTampering:
+    def test_verify_detects_prev_hash_tampering(self, ledger):
+        """Modifying prev_hash without changing entry_hash should be caught."""
+        ledger.record("lease_granted", "mac1", "a", {"r": 1})
+        ledger.record("lease_granted", "mac1", "b", {"r": 2})
+
+        conn = sqlite3.connect(ledger._db_path)
+        conn.execute("UPDATE evidence SET prev_hash = 'bogus' WHERE seq = 2")
+        conn.commit()
+        conn.close()
+
+        result = ledger.verify_chain()
+        assert result["valid"] is False
+        assert result["broken_at"] == 2
+
+
 class TestConcurrency:
     def test_concurrent_writes_maintain_chain(self, ledger_factory):
         """Multiple threads writing simultaneously should produce a valid chain."""

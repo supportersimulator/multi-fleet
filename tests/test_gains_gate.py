@@ -181,3 +181,117 @@ class TestRecommendation:
         with patch("urllib.request.urlopen", side_effect=_patch_urlopen(health)):
             result = gate.run(quick=True)
         assert "PASSED" in result.recommendation
+
+    def test_recommendation_on_pass_with_non_critical_issues(self):
+        gate = FleetGainsGate()
+        health = _mock_health()
+        with patch("urllib.request.urlopen",
+                   side_effect=_patch_urlopen(health, eventbus_ok=False)):
+            result = gate.run(quick=True)
+        assert "PASSED" in result.recommendation
+        assert "non-critical" in result.recommendation.lower()
+
+
+class TestIndividualChecks:
+    """Verify individual check methods return correct results."""
+
+    def test_nats_connected_when_transport_nats(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(transport="nats", nats_url="nats://1.2.3.4:4222"))
+        result = gate._check_nats_connected()
+        assert result.passed is True
+        assert result.critical is True
+
+    def test_nats_disconnected_when_transport_fallback(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(transport="http", nats_url=""))
+        result = gate._check_nats_connected()
+        assert result.passed is False
+
+    def test_peer_reachability_with_peers(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(peers={"mac1": {}, "mac2": {}}))
+        result = gate._check_peer_reachability()
+        assert result.passed is True
+        assert "2" in result.message
+
+    def test_peer_reachability_no_peers(self):
+        gate = FleetGainsGate()
+        health = _mock_health()
+        health["peers"] = {}
+        health["channel_health"] = {}
+        _patch_health(gate, health)
+        result = gate._check_peer_reachability()
+        assert result.passed is False
+
+    def test_packet_registry_loaded(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(registered_types=8))
+        result = gate._check_packet_registry()
+        assert result.passed is True
+        assert "8" in result.message
+
+    def test_packet_registry_empty(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(registered_types=0))
+        result = gate._check_packet_registry()
+        assert result.passed is False
+
+    def test_dedup_healthy(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(dedup_size=100))
+        result = gate._check_dedup_health()
+        assert result.passed is True
+        assert result.critical is False
+
+    def test_dedup_overflow(self):
+        gate = FleetGainsGate()
+        _patch_health(gate, _mock_health(dedup_size=15000))
+        result = gate._check_dedup_health()
+        assert result.passed is False
+        assert "large" in result.message.lower()
+
+
+class TestHealthCaching:
+    """Health response should be cached within a single gate run."""
+
+    def test_health_cached_per_run(self):
+        gate = FleetGainsGate()
+        health = _mock_health()
+        call_count = {"n": 0}
+        original_urlopen = _patch_urlopen(health)
+
+        def counting_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "/health" in url and "8031" not in url:
+                call_count["n"] += 1
+            return original_urlopen(req, timeout=timeout)
+
+        with patch("urllib.request.urlopen", side_effect=counting_urlopen):
+            gate.run(quick=True)
+        # Daemon /health should be called at most once (cached after first)
+        assert call_count["n"] <= 1
+
+
+class TestEvidenceLedgerIntegration:
+    """Gate should record its result in the evidence ledger."""
+
+    def test_gate_records_to_ledger(self, tmp_path):
+        gate = FleetGainsGate()
+        health = _mock_health()
+        health["nodeId"] = "mac2"
+        _patch_health(gate, health)
+
+        db_path = str(tmp_path / "evidence.db")
+        from multifleet.evidence_ledger import EvidenceLedger
+        real_ledger = EvidenceLedger(db_path=db_path)
+
+        with patch("urllib.request.urlopen", side_effect=_patch_urlopen(health)):
+            with patch("multifleet.evidence_ledger.EvidenceLedger",
+                       return_value=real_ledger):
+                gate.run(quick=True)
+
+        entries = real_ledger.query(event_type="gains_gate_result")
+        assert len(entries) == 1
+        assert entries[0]["node_id"] == "mac2"
+        assert entries[0]["payload"]["passed"] is True
