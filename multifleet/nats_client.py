@@ -680,11 +680,13 @@ class FleetNerveNATS:
 
     def _build_health(self) -> dict:
         """Build health response with VS Code state and session idle times."""
+        from multifleet.protocol import PROTOCOL_VERSION
         git = self._get_git_context()
         sessions = self._detect_sessions()
         return {
             "nodeId": self.node_id,
             "status": "ok",
+            "protocol_version": PROTOCOL_VERSION,
             "transport": "nats",
             "natsUrl": self.nats_url,
             "vscode": self._detect_vscode_state(),

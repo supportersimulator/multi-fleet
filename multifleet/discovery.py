@@ -40,7 +40,13 @@ class FleetDiscoveryManager:
             node = data.get("node", "unknown")
             if node != nerve.node_id:
                 was_unknown = node not in nerve._peers and node not in nerve._peers_config
-                nerve._peers[node] = {**data, "_received_at": time.time()}
+                # Protocol version negotiation
+                from multifleet.protocol import check_peer_version
+                peer_ver = data.get("protocol_version")
+                compat, ver_status = check_peer_version(peer_ver)
+                nerve._peers[node] = {**data, "_received_at": time.time(), "_version_status": ver_status}
+                if not compat:
+                    logger.warning(f"Peer {node} has incompatible protocol: {peer_ver} ({ver_status})")
                 # Fresh heartbeat = peer is alive on NATS. Clear any stale repair state.
                 if hasattr(nerve, '_repair_in_progress'):
                     nerve._repair_in_progress.pop(node, None)
@@ -70,10 +76,12 @@ class FleetDiscoveryManager:
         while nerve._running:
             try:
                 detected = nerve._detect_sessions()
+                from multifleet.protocol import PROTOCOL_VERSION
                 hb = {
                     "node": nerve.node_id,
                     "timestamp": time.time(),
                     "ip": self.get_local_ip(),
+                    "protocol_version": PROTOCOL_VERSION,
                     "sessions": len(detected),
                     "session_list": [
                         {"sessionId": s.get("sessionId", ""), "idle_s": s.get("idle_s", 0)}
@@ -158,10 +166,12 @@ class FleetDiscoveryManager:
                     continue
 
                 detected = nerve._detect_sessions()
+                from multifleet.protocol import PROTOCOL_VERSION as _PV
                 hb = {
                     "node": nerve.node_id,
                     "timestamp": time.time(),
                     "ip": self.get_local_ip(),
+                    "protocol_version": _PV,
                     "sessions": len(detected),
                     "session_list": [
                         {"sessionId": s.get("sessionId", ""), "idle_s": s.get("idle_s", 0)}

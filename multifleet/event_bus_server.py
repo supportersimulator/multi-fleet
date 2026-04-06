@@ -377,8 +377,10 @@ class EventBusServer:
         or None to proceed with WebSocket upgrade.
         """
         if path == "/health":
+            from multifleet.protocol import PROTOCOL_VERSION
             body = json.dumps({
                 "status": "ok",
+                "protocol_version": PROTOCOL_VERSION,
                 "clients": len(self._clients),
                 "sse_clients": len(self._sse_clients),
                 "bus_stats": self._bus.stats,
@@ -448,7 +450,8 @@ class SSEHandler:
         if "GET /events" in request_str:
             await self._stream_events(writer)
         elif "GET /health" in request_str:
-            body = json.dumps({"status": "ok", "sse_clients": len(self._clients)}).encode()
+            from multifleet.protocol import PROTOCOL_VERSION as _PV
+            body = json.dumps({"status": "ok", "protocol_version": _PV, "sse_clients": len(self._clients)}).encode()
             response = (
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: application/json\r\n"

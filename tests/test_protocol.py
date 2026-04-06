@@ -1,12 +1,7 @@
 """Tests for protocol version negotiation."""
-
 import logging
-
 from multifleet.protocol import (
-    PROTOCOL_VERSION,
-    check_peer_version,
-    parse_major,
-    protocol_compatible,
+    PROTOCOL_VERSION, check_peer_version, parse_major, protocol_compatible,
 )
 
 
@@ -60,26 +55,16 @@ class TestProtocolCompatible:
 
 class TestCheckPeerVersion:
     def test_ok(self):
-        compat, status = check_peer_version(PROTOCOL_VERSION)
-        assert compat is True
-        assert status == "ok"
+        assert check_peer_version(PROTOCOL_VERSION) == (True, "ok")
 
     def test_legacy_none(self):
-        compat, status = check_peer_version(None)
-        assert compat is True
-        assert status == "legacy"
+        assert check_peer_version(None) == (True, "legacy")
 
     def test_legacy_empty(self):
-        compat, status = check_peer_version("")
-        assert compat is True
-        assert status == "legacy"
+        assert check_peer_version("") == (True, "legacy")
 
     def test_mismatch(self):
-        compat, status = check_peer_version("fleet/v999")
-        assert compat is False
-        assert status == "version_mismatch"
+        assert check_peer_version("fleet/v999") == (False, "version_mismatch")
 
     def test_unparseable(self):
-        compat, status = check_peer_version("bogus")
-        assert compat is False
-        assert status == "unparseable"
+        assert check_peer_version("bogus") == (False, "unparseable")
