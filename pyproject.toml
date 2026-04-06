@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "nats-py>=2.6.0",
+    "jsonschema>=4.0.0",
 ]
 
 [project.optional-dependencies]
