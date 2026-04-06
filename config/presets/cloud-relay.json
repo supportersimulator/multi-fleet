@@ -1,5 +1,6 @@
 {
   "fleetId": "cloud-fleet",
+  "description": "Nodes with no direct network connectivity. All communication via cloud chief relay (P0) and git push (P7). No NATS, no HTTP direct, no SSH.",
   "nodes": {
     "home-mac": {
       "host": "dynamic",
@@ -20,18 +21,33 @@
       "role": "chief"
     }
   },
+  "transport": {
+    "primary": "chief-relay",
+    "fallback_order": ["git"],
+    "channel_priority_overrides": {
+      "P0": "chief-relay",
+      "P7": "git"
+    },
+    "disabled_channels": ["nats", "http", "ssh", "wol", "seed-file"]
+  },
   "nats": {
-    "server": "nats://chief.example.com:4222",
-    "credentials_file": "~/.multifleet/nats.creds",
-    "cluster_name": "fleet"
+    "server": "",
+    "credentials_file": "",
+    "cluster_name": ""
+  },
+  "chief": {
+    "url": "https://chief.example.com:8844",
+    "api_key_env": "FLEET_CHIEF_API_KEY",
+    "poll_interval_s": 30
   },
   "ssh_tunnels": {
     "enabled": false,
     "targets": []
   },
-  "chief": {
-    "url": "http://chief.example.com:8844",
-    "api_key_env": "FLEET_CHIEF_API_KEY"
+  "heartbeat": {
+    "interval_s": 60,
+    "timeout_s": 180,
+    "missed_before_unreachable": 5
   },
   "daemon": {
     "auto_start": true,

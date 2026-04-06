@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [4.0.0] - 2026-04-06
+
+### Added
+- Competitive Branch Racing (`fleet_race`, `race_orchestrator`) — 3 machines race same problem
+- Chief synthesis engine (`synthesis.py`) — pluggable analyzers, confidence scoring
+- Cross-machine rebuttal state machine (`cross_rebuttal.py`) — 7-phase protocol
+- Superset integration — bridge, MCP, presets, setup/teardown hooks
+- Fleet Doctor — 14 structured diagnostic checks
+- Rich TUI Dashboard — live peer/race/stats display
+- Durable task state machine (`task_state.py`) — SQLite-backed lifecycle
+- Generic packet envelope (`packets.py`) — fleet/v1 protocol, opaque payload
+- Pluggable packet registry — JSON Schema validation, 9 types
+- Evidence ledger + gains gate (Phase 4)
+- EventBus WebSocket server for IDE integration
+- xbar menubar widget for glanceable fleet status
+- VS Code extension fleet wiring (fleet.* events)
+- Fleet Liaison agent architecture
+- Pre-demo checklist script
+- Hourly maintenance loop (WAL checkpoint, stale peer eviction)
+- 5 branch coordination packet schemas
+
+### Fixed
+- All silent `except: pass` eliminated in production code
+- All 12 failing tests fixed (cascade, MCP tool count, hook output, seed path)
+- WebSocket reconnect re-subscribes (was silently dropping events)
+- NATS connect_timeout bumped to 10s (was 2s — too tight for WiFi)
+- Mac3 IP updated in config (was stale)
+- Superset MCP Accept header (requires both application/json + text/event-stream)
+
+### Changed
+- Architecture: multi-fleet = standalone transport with deep integration surface
+- Hybrid evidence store: transport owns delivery, IDE owns meaning
+- Packet payload is opaque — consumers own their schemas
+- Monolith decomposed: nats_client.py → channels, sessions, self_heal, discovery
+- Tests: 160 → 900+ (all passing)
+
+---
+
 ## [3.0.0] - 2026-04-05
 
 Major release: chain orchestration, dispatch gates, security hardening, and 5 new skills.

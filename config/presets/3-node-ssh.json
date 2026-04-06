@@ -1,5 +1,6 @@
 {
   "fleetId": "ssh-fleet",
+  "description": "3 MacBooks connected via SSH tunnels. NATS traffic tunneled over SSH for secure cross-network communication.",
   "nodes": {
     "mac1": {
       "host": "mac1.local",
@@ -18,6 +19,15 @@
       "port": 8855,
       "user": "carol",
       "role": "worker"
+    }
+  },
+  "transport": {
+    "primary": "nats-over-ssh",
+    "fallback_order": ["ssh", "git"],
+    "channel_priority_overrides": {
+      "P1": "nats-over-ssh",
+      "P5": "ssh",
+      "P7": "git"
     }
   },
   "nats": {
@@ -45,6 +55,11 @@
         "local_bind_port": 4224
       }
     ]
+  },
+  "heartbeat": {
+    "interval_s": 15,
+    "timeout_s": 45,
+    "missed_before_unreachable": 3
   },
   "daemon": {
     "auto_start": true,
