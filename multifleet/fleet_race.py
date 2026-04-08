@@ -20,6 +20,13 @@ from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.race")
 
+# Optional theatrical output — never required for race logic
+try:
+    from multifleet.theatrical import FleetTheater
+    _theater = FleetTheater()
+except ImportError:
+    _theater = None
+
 
 class FleetRace:
     """Orchestrates competitive branch racing across fleet nodes.
@@ -85,6 +92,13 @@ class FleetRace:
             self._races[race_id] = race
             return race
 
+        # Theatrical: show race banner
+        if _theater:
+            try:
+                _theater.race_banner(task, nodes)
+            except Exception:
+                pass  # Theatrical output must never break race logic
+
         # 2. Broadcast race start to all participants
         self._broadcast_race_start(race_id, task, nodes, branch_prefix, timeout_s)
 
@@ -128,6 +142,13 @@ class FleetRace:
         if dispatched == 0:
             race["error"] = "no nodes accepted dispatch"
         self._races[race_id] = race
+
+        # Theatrical: show initial scoreboard
+        if _theater:
+            try:
+                _theater.race_scoreboard(race)
+            except Exception:
+                pass
 
         # Record in evidence ledger
         self._record_evidence("race_started", {
@@ -654,6 +675,19 @@ class FleetRace:
             "confidence": race["synthesis"].get("confidence", 0.0),
             "elapsed_s": round(time.time() - race["started_at"], 1),
         })
+
+        # Theatrical: announce winner
+        if _theater and race.get("winner"):
+            try:
+                synth = race.get("synthesis", {})
+                reason = synth.get("decision", synth.get("recommendation", "First to complete"))
+                evidence_items = synth.get("cherry_pick_from", [])
+                if synth.get("reasoning"):
+                    evidence_items = [synth["reasoning"]] + evidence_items
+                _theater.race_winner(race["winner"], reason, evidence_items[:5])
+                _theater.race_scoreboard(race)
+            except Exception:
+                pass
 
         logger.info(
             "Race %s completed: winner=%s completions=%d",
