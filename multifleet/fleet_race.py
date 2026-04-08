@@ -52,8 +52,9 @@ class FleetRace:
         nodes: list[str] | None = None,
         branch_prefix: str = "race",
         timeout_s: int = 600,
+        run_probes: bool = True,
     ) -> dict:
-        """Start a competitive branch race.
+        """Start a competitive branch race with evidence-bearing dispatch.
 
         Args:
             task: The task/problem description.
@@ -81,7 +82,20 @@ class FleetRace:
             "synthesis": None,
             "winner": None,
             "error": None,
+            "epistemic_packet": None,
         }
+
+        # 0. Build EpistemicPacket (evidence-bearing dispatch)
+        if run_probes:
+            try:
+                from multifleet.epistemic_packet import EpistemicPacketBuilder
+                builder = EpistemicPacketBuilder(node_id=self._node_id)
+                packet = builder.build(task_intent=task)
+                race["epistemic_packet"] = packet.to_dict()
+                race["surgeon_intensity"] = packet.required_surgeon_intensity
+                logger.info("Race %s: %s", race_id, packet.summary())
+            except Exception as e:
+                logger.warning("EpistemicPacket build failed: %s", e)
 
         # 1. Discover nodes
         if not nodes:
