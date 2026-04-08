@@ -2535,6 +2535,15 @@ def fleet_invariance(action: str = "check_all", rule_id: str = "",
     }
 
 
+def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
+    """Start/stop/status the fleet web server."""
+    try:
+        from multifleet.web_server import fleet_server_tool
+        return fleet_server_tool(action=action, port=port)
+    except ImportError as e:
+        return {"error": f"web_server module not available: {e}"}
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [

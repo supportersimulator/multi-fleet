@@ -72,8 +72,8 @@ def _get_ide_bridge():
     return _ide_bridge
 
 
-def _fetch_daemon(path: str, timeout: float = 3.0) -> Optional[dict]:
-    """Fetch JSON from fleet daemon."""
+def _fetch_daemon(path: str, timeout: float = 1.5) -> Optional[dict]:
+    """Fetch JSON from fleet daemon. Short timeout to avoid blocking."""
     import urllib.request
     try:
         url = f"http://127.0.0.1:{DAEMON_PORT}{path}"
@@ -154,8 +154,12 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         try:
             from multifleet.prometheus_export import generate_prometheus_text
             node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
-            text = generate_prometheus_text(node_id=node_id)
-        except ImportError:
+            text = generate_prometheus_text(
+                node_id=node_id,
+                daemon_url=f"http://127.0.0.1:{self.daemon_port}",
+                include_health=False,  # avoid blocking on daemon timeout
+            )
+        except Exception:
             text = "# fleet_web_server_up 1\n"
         self._send(200, text.encode("utf-8"),
                    "text/plain; version=0.0.4; charset=utf-8")
@@ -211,20 +215,16 @@ class FleetWebHandler(BaseHTTPRequestHandler):
     # ── Data fetchers ──
 
     def _get_status(self) -> dict:
-        agg = _get_aggregator()
-        if agg:
-            try:
-                return agg.snapshot()
-            except Exception as e:
-                return {"error": str(e)}
-        # Fallback: direct daemon query
-        health = _fetch_daemon("/health")
-        return health or {"error": "daemon unreachable", "status": "offline"}
+        # Direct daemon query with short timeout — avoids blocking
+        health = _fetch_daemon("/health", timeout=2.0)
+        if health:
+            return health
+        return {"status": "offline", "error": "daemon unreachable"}
 
     def _get_probes(self) -> dict:
-        daemon_data = _fetch_daemon("/health")
+        daemon_data = _fetch_daemon("/health", timeout=2.0)
         if not daemon_data:
-            return {"probes": [], "error": "daemon unreachable"}
+            return {"probes": [], "count": 0, "error": "daemon unreachable"}
         probes = daemon_data.get("probes", daemon_data.get("probe_results", []))
         return {"probes": probes, "count": len(probes)}
 
