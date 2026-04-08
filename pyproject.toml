@@ -38,12 +38,15 @@ dev = [
 ]
 
 [project.scripts]
+fleet = "multifleet.cli:main"
 fleet-nerve-mcp = "multifleet.mcp:main"
 fleet-nerve = "multifleet.nats_client:main"
+fleet-dashboard = "multifleet.web_dashboard:main"
 
 [project.urls]
-Homepage = "https://github.com/<user>/multifleet"
-Repository = "https://github.com/<user>/multifleet"
+Homepage = "https://multi-fleet.dev"
+Repository = "https://github.com/supportersimulator/er-simulator-superrepo"
+Documentation = "https://multi-fleet.dev/docs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["multifleet"]
