@@ -309,6 +309,21 @@ def create_contextdna_analyzer():
                         })
                     break
 
+        # Query strategic planner for blind spots (high-value, zero-caller module)
+        try:
+            from memory.strategic_planner import StrategicPlanner
+            planner = StrategicPlanner()
+            task_context = next((v.get("summary", "") for v in verdicts.values() if v.get("summary")), "")
+            if task_context:
+                reminder = planner.get_big_picture_reminder(current_context=task_context)
+                if reminder:
+                    memory_reasons_detail.append({
+                        "source": "strategic_analyst",
+                        "findings": [reminder[:300]],
+                    })
+        except Exception:
+            pass
+
         # If no adjustments have non-zero delta, let the default analyzer handle it
         if all(a["delta"] == NO_MEMORY_MATCH for a in adjustments.values()):
             # Even if all deltas are zero, if we have professor wisdom, still return

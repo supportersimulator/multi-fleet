@@ -144,6 +144,130 @@ def render_dashboard(snapshot: dict, *, prefer_web: bool = True) -> str:
     return _render_static_dashboard(snapshot)
 
 
+def _render_probe_review(snapshot: dict) -> str:
+    """Render probe review results section (Zone 2 — Local Theater)."""
+    pr = snapshot.get("probe_review", {})
+    if not pr or pr.get("error"):
+        error_msg = pr.get("error", "") if pr else ""
+        note = f" ({_esc(error_msg)})" if error_msg else ""
+        return f'<section><h2>Probe Review</h2><p class="muted">No probe review data{note}</p></section>'
+
+    # Probe findings
+    probes = pr.get("probes", {})
+    total_probes = probes.get("total", 0)
+    findings_count = probes.get("findings", 0)
+    blocking = probes.get("blocking", 0)
+    intensity = _esc(probes.get("surgeon_intensity", "unknown"))
+
+    findings_html = ""
+    for result in probes.get("results", [])[:5]:
+        for finding in result.get("findings", [])[:3]:
+            severity = finding.get("severity", finding.get("blast_radius", "low"))
+            title = _esc(finding.get("title", "untitled"))
+            sev_colors = {"critical": "#ef4444", "high": "#f97316", "medium": "#eab308", "low": "#22c55e"}
+            color = sev_colors.get(severity, "#6b7280")
+            findings_html += f'<li><span style="color:{color};font-weight:600;">[{_esc(severity)}]</span> {title}</li>'
+
+    # Surgeon verdict
+    verdict = pr.get("surgeon_verdict", {})
+    verdict_html = ""
+    if verdict and not verdict.get("skipped"):
+        v = _esc(str(verdict.get("verdict", "unknown")))
+        conf = verdict.get("confidence", 0.0)
+        verdict_html = f'<p>Surgeon verdict: <strong>{v}</strong> (confidence: {conf:.0%})</p>'
+    elif verdict.get("skipped"):
+        reason = _esc(verdict.get("reason", ""))
+        verdict_html = f'<p class="muted">Surgeon review skipped: {reason}</p>'
+
+    # Acceptance gate
+    acceptance = pr.get("acceptance", {})
+    gate_html = ""
+    if acceptance and not acceptance.get("error"):
+        decision = acceptance.get("decision", acceptance.get("accepted", "unknown"))
+        gate_color = "#22c55e" if str(decision).lower() in ("accept", "true", "pass") else "#ef4444"
+        gate_html = f'<p>Acceptance gate: <span style="color:{gate_color};font-weight:600;">{_esc(str(decision).upper())}</span></p>'
+    elif acceptance.get("error"):
+        gate_html = f'<p class="muted">Acceptance gate error: {_esc(acceptance["error"])}</p>'
+
+    elapsed = pr.get("elapsed_s", "?")
+
+    return f"""<section>
+    <h2>Probe Review</h2>
+    <table>
+        <tr><td>Probes run</td><td><strong>{total_probes}</strong></td></tr>
+        <tr><td>Findings</td><td><strong>{findings_count}</strong> ({blocking} blocking)</td></tr>
+        <tr><td>Surgeon intensity</td><td><code>{intensity}</code></td></tr>
+        <tr><td>Elapsed</td><td>{_esc(str(elapsed))}s</td></tr>
+    </table>
+    {f'<ul>{findings_html}</ul>' if findings_html else ''}
+    {verdict_html}
+    {gate_html}
+</section>"""
+
+
+def _render_surgeon_status(snapshot: dict) -> str:
+    """Render surgeon adapter status section (Zone 3 — Chief Synthesis)."""
+    ss = snapshot.get("surgeon_status", {})
+    if not ss:
+        return '<section><h2>3-Surgeon Status</h2><p class="muted">No surgeon data</p></section>'
+
+    available = ss.get("available", False)
+    state = ss.get("state", {})
+    counters = ss.get("counters", {})
+    phase = _esc(state.get("phase", "unknown"))
+    disagreement = state.get("disagreement_score", 0.0)
+
+    avail_dot = _health_dot("green" if available else "red")
+
+    # Surgeon availability rows
+    surgeons = ss.get("surgeons", {})
+    surgeon_rows = ""
+    for name in ("atlas", "cardiologist", "neurologist"):
+        info = surgeons.get(name, {})
+        s_avail = info.get("available", False)
+        dot = _health_dot("green" if s_avail else "red")
+        surgeon_rows += f"<tr><td>{dot}</td><td>{_esc(name)}</td><td>{'ready' if s_avail else 'offline'}</td></tr>"
+
+    # If no individual surgeon data, show aggregate
+    if not surgeons:
+        surgeon_rows = f"""<tr><td>{avail_dot}</td><td>bridge</td><td>{'connected' if available else 'unavailable'}</td></tr>"""
+
+    # Recent cross-exam / counters
+    queries = counters.get("queries", 0)
+    reviews = counters.get("reviews", 0)
+    errors = counters.get("bridge_errors", 0)
+    fallbacks = counters.get("degraded_fallbacks", 0)
+
+    # Acceptance gate history
+    gate_history = ss.get("gate_history", [])
+    gate_html = ""
+    if gate_history:
+        items = []
+        for entry in gate_history[:5]:
+            decision = _esc(str(entry.get("decision", "?")))
+            ts = _format_ts(entry.get("timestamp", ""))
+            color = "#22c55e" if decision.lower() in ("accept", "pass") else "#ef4444"
+            items.append(f'<li><code>{ts}</code> <span style="color:{color};">{decision}</span></li>')
+        gate_html = f'<p style="margin-top:0.5rem;"><strong>Gate History</strong></p><ul>{"".join(items)}</ul>'
+
+    return f"""<section>
+    <h2>3-Surgeon Status</h2>
+    <table>
+        <thead><tr><th></th><th>Surgeon</th><th>Status</th></tr></thead>
+        <tbody>{surgeon_rows}</tbody>
+    </table>
+    <table style="margin-top:0.5rem;">
+        <tr><td>Phase</td><td><code>{phase}</code></td></tr>
+        <tr><td>Disagreement</td><td>{disagreement:.0%}</td></tr>
+        <tr><td>Queries</td><td>{queries}</td></tr>
+        <tr><td>Reviews</td><td>{reviews}</td></tr>
+        <tr><td>Errors</td><td>{errors}</td></tr>
+        <tr><td>Fallbacks</td><td>{fallbacks}</td></tr>
+    </table>
+    {gate_html}
+</section>"""
+
+
 def _render_static_dashboard(snapshot: dict) -> str:
     """Original static dashboard renderer (fallback)."""
     ts = _format_ts(snapshot.get("timestamp", time.time()))
@@ -154,6 +278,8 @@ def _render_static_dashboard(snapshot: dict) -> str:
     liaison = _render_liaison(snapshot)
     rebuttals = _render_rebuttals(snapshot)
     events = _render_events(snapshot)
+    probe_review = _render_probe_review(snapshot)
+    surgeon_status = _render_surgeon_status(snapshot)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -184,7 +310,9 @@ def _render_static_dashboard(snapshot: dict) -> str:
 </div>
 {node_grid}
 {liaison}
+{probe_review}
 {rebuttals}
+{surgeon_status}
 {events}
 </body>
 </html>"""

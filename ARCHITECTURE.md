@@ -322,3 +322,57 @@ The cycle is continuous. Probes run on triggers (message received, session idle,
 | Coverage areas | Transport, protocol, probes, synthesis, rebuttal, leases, liaison, dashboard, IDE bridge, evidence, security, invariance, chaos, stress, E2E pipeline |
 
 Tests include chaos testing (random failures during cascade), stress testing (30-day simulation), and full E2E pipeline tests (probe -> score -> evidence -> synthesize -> inject).
+
+---
+
+## Product Integration (ProductBridge)
+
+Multi-Fleet serves as the transport backbone connecting five ContextDNA products. The `ProductBridge` (`multifleet/product_bridge.py`) is the central routing hub.
+
+### Products
+
+| Product | Port | Type | Role |
+|---------|------|------|------|
+| multi-fleet | 8855 | transport | Message delivery, probe engine, evidence pipeline |
+| 3-surgeons | — | consensus | Cross-exam, gates, multi-model verdicts |
+| superpowers | — | workflow | Skill orchestration, workflow phases |
+| context-dna | 8029 | memory | Evidence store, webhook injection, memory |
+| admin-panel | 3000 | dashboard | Monitoring UI, fleet visualization |
+
+### Bridge Routes
+
+```
+multi-fleet ──→ 3-surgeons    Fleet decision → cross-exam verdict
+3-surgeons  ──→ multi-fleet   Verdict → fleet broadcast packet
+multi-fleet ──→ context-dna   Evidence → memory store (HTTP or local ledger)
+context-dna ──→ multi-fleet   Memory query → fleet synthesis context
+multi-fleet ──→ superpowers   Probe findings → workflow adjustments
+3-surgeons  ──→ context-dna   Cross-exam results → evidence archive
+context-dna ──→ 3-surgeons    Memory context → cross-exam input
+```
+
+### Discovery
+
+Products are auto-discovered via port probing (networked) or Python import checks (library). Discovery results are cached for 60 seconds. Manual registration is also supported for custom capabilities.
+
+### Graceful Degradation
+
+Every bridge handler degrades gracefully when its target is unavailable:
+- **fleet→surgeons**: Returns `{fallback: true}` when 3-surgeons not importable
+- **fleet→memory**: Falls back from HTTP (port 8029) to local EvidenceLedger
+- **memory→fleet**: Returns empty results instead of raising
+- **probes→superpowers**: Maps findings to workflow recommendations locally
+
+### Usage
+
+```python
+from multifleet.product_bridge import get_bridge
+
+bridge = get_bridge()
+available = bridge.discover_products()
+
+# Typed adapter methods
+verdict = bridge.fleet_to_surgeons({"claim": "branch A better", "evidence": {...}})
+bridge.fleet_to_memory({"event_type": "merge", "node_id": "mac1", "evidence": {...}})
+adjustments = bridge.probes_to_superpowers([{"title": "Security surface", "blast_radius": "high"}])
+```

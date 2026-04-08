@@ -37,6 +37,20 @@ class ProductiveWaiter:
         state = WaitState(waiting_for=task_id)
         self._active_waits[task_id] = state
         logger.info("Waiting for %s — checking backlog for productive work", task_id)
+
+        # Use anticipation engine to predict what we'll need (high-value, zero-caller module)
+        try:
+            from memory.anticipation_engine import run_anticipation_cycle
+            predictions = run_anticipation_cycle()
+            if predictions and predictions.get("sections_computed"):
+                for section in predictions["sections_computed"][:3]:
+                    self.add_backlog_item({
+                        "type": "anticipated",
+                        "description": f"Pre-computed section: {section}",
+                    })
+        except Exception:
+            pass
+
         return state
 
     def add_backlog_item(self, item: dict):

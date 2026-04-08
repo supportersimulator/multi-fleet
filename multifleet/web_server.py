@@ -119,6 +119,10 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_json(self._get_decisions())
         elif path == "/api/branches":
             self._serve_json(self._get_branches())
+        elif path == "/api/probe-review":
+            self._serve_json(self._get_probe_review())
+        elif path == "/api/surgeon-status":
+            self._serve_json(self._get_surgeon_status())
         elif path == "/metrics":
             self._serve_prometheus()
         elif path == "/events":
@@ -245,6 +249,37 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             return data if isinstance(data, dict) else {"branches": data}
         except Exception as e:
             return {"branches": [], "error": str(e)}
+
+    def _get_probe_review(self) -> dict:
+        """Run probe_review and return results as JSON."""
+        try:
+            from multifleet.probe_review import run_probe_review
+            repo_root = os.environ.get("MULTIFLEET_REPO_ROOT", ".")
+            result = run_probe_review(
+                repo_root=repo_root,
+                task_intent="Fleet health check",
+                consult_surgeons=False,
+            )
+            return result
+        except Exception as e:
+            logger.warning("probe-review endpoint failed: %s", e)
+            return {"error": str(e), "probes": {}, "acceptance": {}}
+
+    def _get_surgeon_status(self) -> dict:
+        """Return surgeon adapter status."""
+        try:
+            from multifleet.surgeon_adapter import SurgeonAdapter
+            adapter = SurgeonAdapter()
+            return {
+                "available": adapter.is_available(),
+                "state": adapter.get_state(),
+                "counters": adapter.get_counters(),
+            }
+        except ImportError:
+            return {"available": False, "error": "surgeon_adapter not importable"}
+        except Exception as e:
+            logger.warning("surgeon-status endpoint failed: %s", e)
+            return {"available": False, "error": str(e)}
 
     # ── Helpers ──
 

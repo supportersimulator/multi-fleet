@@ -152,6 +152,24 @@ class ChiefSynthesis:
             result.metadata["probe_summary"] = probe_summary
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
+        # Track outcome for learning (high-value, zero-caller module)
+        try:
+            from memory.outcome_tracker import OutcomeTracker
+            tracker = OutcomeTracker()
+            outcome_id = tracker.start_tracking(
+                task=result.task_id,
+                approach=result.decision,
+                expected_outcome=f"confidence={result.confidence:.3f}",
+                related_patterns=[],
+            )
+            tracker.record_outcome(
+                outcome_id=outcome_id,
+                success=result.confidence >= 0.5,
+                actual_outcome=result.reasoning[:200],
+                verification_method="synthesis_confidence",
+            )
+        except Exception:
+            pass
         return result
 
     def _basic_confidence_analyzer(

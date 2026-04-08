@@ -222,9 +222,34 @@ class ProductBridge:
     def fleet_to_surgeons(self, verdict_request: Dict[str, Any]) -> Dict[str, Any]:
         """Multi-fleet asks 3-surgeons for cross-exam on a fleet decision.
 
+        Tries SurgeonAdapter first (direct bridge), falls back to generic routing.
+
         Input: {task_id, claim, evidence, files?, severity?}
         Output: {verdict, confidence, reasoning, dissent}
         """
+        try:
+            from multifleet.surgeon_adapter import SurgeonAdapter
+            adapter = SurgeonAdapter()
+            if adapter.is_available():
+                claim = verdict_request.get("claim", "fleet decision review")
+                evidence = verdict_request.get("evidence", [])
+                review = adapter.request_review(claim, evidence if isinstance(evidence, list) else [str(evidence)])
+                # Normalize to expected output format
+                return {
+                    "verdict": review.get("status", "unknown"),
+                    "confidence": 0.0,
+                    "reasoning": review.get("output", ""),
+                    "dissent": [],
+                    "source": "surgeon_adapter",
+                    "review_type": review.get("review_type", "unknown"),
+                }
+            # Adapter imported but bridge unavailable — fall through to generic route
+            logger.debug("SurgeonAdapter available but bridge not connected, using generic route")
+        except ImportError:
+            logger.debug("SurgeonAdapter not importable, using generic route")
+        except Exception as exc:
+            logger.warning("SurgeonAdapter error, falling back to generic route: %s", exc)
+
         return self.route("multi-fleet", "3-surgeons", verdict_request)
 
     def surgeons_to_fleet(self, verdict: Dict[str, Any]) -> Dict[str, Any]:
