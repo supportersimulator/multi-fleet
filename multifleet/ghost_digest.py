@@ -186,6 +186,24 @@ class GhostDigest:
         # Persist candidates to disk
         self._persist(result)
 
+        # Emit event to EventBus
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            emit_typed(
+                EventType.GHOST_SESSION_DIGESTED,
+                EventSource.GHOST,
+                payload={
+                    "task_id": task_id,
+                    "candidates": len(candidates),
+                    "objections": len(objections),
+                    "warnings": len(warnings),
+                },
+                task_id=task_id,
+            )
+        except (ImportError, Exception):
+            pass  # Event emission is best-effort
+
         logger.info("ghost_digest %s", result.summary())
         return result
 
