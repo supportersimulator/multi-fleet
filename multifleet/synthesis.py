@@ -112,6 +112,22 @@ class ChiefSynthesis:
 
         t0 = time.monotonic()
 
+        # Run probes on the task context to get fresh evidence before analyzing
+        probe_summary = None
+        try:
+            from multifleet.probe_engine import ProbeEngine
+            engine = ProbeEngine()
+            probe_results = engine.scan(trigger="synthesis", context={"task_id": task_id})
+            if probe_results:
+                probe_summary = engine.findings_summary()
+                logger.info(
+                    "Pre-synthesis probe scan: %d probes, %d findings",
+                    probe_summary.get("total_probes", 0),
+                    probe_summary.get("total_findings", 0),
+                )
+        except Exception as e:
+            logger.debug("Pre-synthesis probe scan failed: %s", e)
+
         if self._analyzers:
             # Run registered analyzers, take highest-confidence result
             results = []
@@ -124,12 +140,16 @@ class ChiefSynthesis:
                     logger.warning("Analyzer %s failed: %s", analyzer.__name__, e)
             if results:
                 best = max(results, key=lambda r: r.confidence)
+                if probe_summary:
+                    best.metadata["probe_summary"] = probe_summary
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
                 self._record_evidence(best)
                 return best
 
         # Fallback to basic confidence-weighted scoring
         result = self._default_analyzer(task_id, verdicts)
+        if probe_summary:
+            result.metadata["probe_summary"] = probe_summary
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
         return result
@@ -237,9 +257,11 @@ class ChiefSynthesis:
         if not self._evidence_ledger:
             return
         try:
-            self._evidence_ledger.append(
+            self._evidence_ledger.record(
                 event_type="merge_decision",
-                data={
+                node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                subject=f"synthesis:{result.task_id} decision:{result.decision}",
+                payload={
                     "task_id": result.task_id,
                     "decision": result.decision,
                     "winner_branch": result.winner_branch,
@@ -247,7 +269,6 @@ class ChiefSynthesis:
                     "dissent_count": len(result.dissent_preserved),
                     "cherry_pick_count": len(result.cherry_pick_from),
                 },
-                node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
             )
         except Exception as e:
             logger.warning("Evidence ledger record failed: %s", e)

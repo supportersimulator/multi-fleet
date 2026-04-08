@@ -168,6 +168,16 @@ def create_contextdna_analyzer():
         if not verdicts:
             return None
 
+        # Query evidence ledger for recent probe findings to inform scoring
+        probe_evidence: list[dict] = []
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            ledger = EvidenceLedger()
+            recent = ledger.query(event_type="probe_finding", limit=20)
+            probe_evidence = recent
+        except Exception as e:
+            logger.debug("Evidence ledger probe query failed: %s", e)
+
         # Collect adjustments per machine
         adjustments: dict[str, dict] = {}
         # Collect memory reasons explaining WHY memory influenced the decision
@@ -232,6 +242,37 @@ def create_contextdna_analyzer():
             if arch_decisions and delta == NO_MEMORY_MATCH:
                 # Arch decisions give a small boost (approach aligns with prior decisions)
                 delta = ARCH_DECISION_BOOST
+
+            # 4. Cross-reference probe evidence for files this verdict touches
+            if probe_evidence and files_touched:
+                touched_set = set(files_touched)
+                for pe in probe_evidence:
+                    payload = pe.get("payload", {})
+                    if isinstance(payload, dict):
+                        probe_files = set()
+                        for ft in payload.get("finding_titles", []):
+                            # Finding titles may reference files
+                            for f in files_touched:
+                                if f in str(ft):
+                                    probe_files.add(f)
+                        if probe_files:
+                            sev = payload.get("severity", "")
+                            if sev == "critical":
+                                delta -= PRIOR_FAILURE_PENALTY
+                                memory_reasons_detail.append({
+                                    "machine": mid,
+                                    "source": "probe_evidence",
+                                    "severity": sev,
+                                    "detail": f"Critical probe finding on {probe_files}",
+                                })
+                            elif sev == "high":
+                                delta -= PRIOR_FAILURE_PENALTY * 0.5
+                                memory_reasons_detail.append({
+                                    "machine": mid,
+                                    "source": "probe_evidence",
+                                    "severity": sev,
+                                    "detail": f"High probe finding on {probe_files}",
+                                })
 
             adjustments[mid] = {
                 "delta": delta,

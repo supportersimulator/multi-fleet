@@ -34,6 +34,10 @@ class OnboardingWizard:
     """Run onboarding checks and render a setup guide."""
 
     def __init__(self, node_id: str = ""):
+        import re
+        if node_id and not re.match(r'^[a-z][a-z0-9_-]{0,31}$', node_id):
+            logger.warning("Invalid node_id format, using hostname")
+            node_id = ""
         self.node_id = node_id or os.environ.get(
             "MULTIFLEET_NODE_ID",
             socket.gethostname().split(".")[0].lower(),

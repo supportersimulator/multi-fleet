@@ -3,11 +3,16 @@
 Reads audit trail (~/.fleet-nerve/audit-*.jsonl) for error events.
 Groups by tool+target pattern. If same error appears 3+ times across
 sessions, it's a systemic issue worth blocking on.
+
+Also performs cross-session clustering: when the same failure pattern
+appears in 2+ distinct sessions, it's promoted as a systemic issue
+and (at 3+ sessions) recorded in the evidence ledger.
 """
 
 import glob
 import json
 import logging
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -49,6 +54,46 @@ def _cluster_key(event: dict) -> str:
     tool = event.get("tool") or event.get("action") or event.get("type", "unknown")
     target = event.get("target") or event.get("subject") or event.get("node", "unknown")
     return f"{tool}::{target}"
+
+
+def _cluster_by_session(errors: list[dict]) -> list[dict]:
+    """Group failures by session, detect cross-session patterns."""
+    pattern_sessions: dict[str, set] = {}
+    for e in errors:
+        sid = e.get("metadata", {}).get("session_id") if isinstance(e.get("metadata"), dict) else None
+        if sid is None:
+            sid = e.get("session_id", "unknown")
+        pattern = f"{_cluster_key(e)}"
+        pattern_sessions.setdefault(pattern, set()).add(sid)
+
+    cross_session = []
+    for pattern, sids in pattern_sessions.items():
+        if len(sids) >= 2:
+            cross_session.append({
+                "pattern": pattern,
+                "session_count": len(sids),
+                "sessions": list(sids)[:5],
+                "severity": "high" if len(sids) >= 3 else "medium",
+            })
+
+    return cross_session
+
+
+def _promote_to_evidence(cross_session_clusters: list[dict]) -> None:
+    """Promote cross-session failure clusters (3+ sessions) to evidence ledger."""
+    try:
+        from multifleet.evidence_ledger import EvidenceLedger
+        ledger = EvidenceLedger()
+        for cluster in cross_session_clusters:
+            if cluster["session_count"] >= 3:
+                ledger.record(
+                    event_type="failure_cluster",
+                    node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                    subject=f"cross-session failure: {cluster['pattern']}",
+                    payload=cluster,
+                )
+    except Exception:
+        pass
 
 
 def probe_repeated_failure_cluster(context: dict) -> ProbeResult:
@@ -101,9 +146,32 @@ def probe_repeated_failure_cluster(context: dict) -> ProbeResult:
             ],
         ))
 
+    # Cross-session clustering
+    cross_session = _cluster_by_session(errors)
+    for cluster in cross_session:
+        findings.append(ProbeFinding(
+            title=f"Cross-session failure: {cluster['pattern']} ({cluster['session_count']} sessions)",
+            evidence=[
+                f"Sessions affected: {cluster['session_count']}",
+                f"Severity: {cluster['severity']}",
+                f"Sessions: {', '.join(cluster['sessions'][:3])}",
+            ],
+            blast_radius="high" if cluster["severity"] == "high" else "medium",
+            suggested_injections=[
+                f"Systemic issue: {cluster['pattern']} persists across sessions",
+            ],
+        ))
+
+    # Promote high-severity cross-session clusters to evidence ledger
+    if cross_session:
+        _promote_to_evidence(cross_session)
+
     severity = "info"
     if findings:
-        max_count = max(len(c[1]) for c in blocking_clusters)
+        max_count = max(
+            max((len(c[1]) for c in blocking_clusters), default=0),
+            max((c["session_count"] for c in cross_session), default=0),
+        )
         if max_count >= 10:
             severity = "critical"
         elif max_count >= 5:

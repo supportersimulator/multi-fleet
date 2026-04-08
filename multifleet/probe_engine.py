@@ -18,6 +18,8 @@ Probe categories:
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
+import math
+import subprocess
 import time
 import json
 import logging
@@ -202,6 +204,9 @@ class ProbeRegistry:
 
     def run_one(self, probe_id: str, context: Optional[dict] = None) -> ProbeResult:
         """Run a single probe by ID."""
+        import re
+        if not re.match(r'^[a-z][a-z0-9_]{0,63}$', probe_id):
+            return ProbeResult.error(probe_id, "unknown", "Invalid probe_id format")
         entry = self._probes.get(probe_id)
         if not entry:
             return ProbeResult.error(probe_id, "unknown", f"Probe '{probe_id}' not registered")
@@ -229,11 +234,151 @@ class ProbeRegistry:
         ]
 
 
+class SignalScorer:
+    """Ranks and filters probe findings by priority.
+
+    Score = confidence * severity_weight * recurrence_bonus * freshness_decay
+    """
+
+    SEVERITY_WEIGHTS = {
+        "critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.2, "info": 0.1
+    }
+
+    def __init__(self, evidence_ledger=None):
+        self._ledger = evidence_ledger
+
+    def score_results(self, results: list[ProbeResult]) -> list[tuple[float, ProbeResult]]:
+        """Score and rank probe results by priority. Returns [(score, result)]."""
+        scored = []
+        for result in results:
+            base = result.confidence * self.SEVERITY_WEIGHTS.get(result.severity, 0.3)
+            recurrence = self._recurrence_bonus(result.probe_id)
+            freshness = self._freshness_decay(result)
+            scored.append((base * recurrence * freshness, result))
+        return sorted(scored, key=lambda x: -x[0])
+
+    def top_n(self, results: list[ProbeResult], n: int = 5) -> list[ProbeResult]:
+        """Return top N highest-priority results."""
+        ranked = self.score_results(results)
+        return [r for _, r in ranked[:n]]
+
+    def _recurrence_bonus(self, probe_id: str) -> float:
+        """Bonus for recurring findings (same probe flagging repeatedly)."""
+        if not self._ledger:
+            return 1.0
+        try:
+            count = self._ledger.count_by_probe(probe_id)
+            # Logarithmic bonus: 1 occurrence = 1.0, 5 = ~1.6, 20 = ~2.0
+            return 1.0 + math.log1p(count) * 0.3
+        except Exception:
+            return 1.0
+
+    def _freshness_decay(self, result: ProbeResult) -> float:
+        """Decay score for older results. Recent = 1.0, >1h old = decays."""
+        try:
+            generated = time.mktime(time.strptime(result.generated_at, "%Y-%m-%dT%H:%M:%SZ"))
+            age_hours = (time.time() - generated) / 3600
+            if age_hours <= 0:
+                return 1.0
+            # Half-life of 6 hours
+            return math.exp(-0.1155 * age_hours)
+        except Exception:
+            return 1.0
+
+    def filter_noise(self, results: list[ProbeResult], threshold: float = 0.3) -> list[ProbeResult]:
+        """Remove results below scoring threshold."""
+        scored = self.score_results(results)
+        return [r for score, r in scored if score >= threshold]
+
+
+# ── File-pattern to probe mapping for incremental triggers ──
+
+def _match_ext(ext: str) -> Callable[[str], bool]:
+    return lambda f: f.endswith(ext)
+
+
+def _match_name(name: str) -> Callable[[str], bool]:
+    return lambda f: f.endswith("/" + name) or f == name
+
+
+def _match_contains(fragment: str) -> Callable[[str], bool]:
+    return lambda f: fragment in f
+
+
+FILE_PROBE_MAP: list[tuple[Callable[[str], bool], list[str]]] = [
+    (_match_ext(".py"), ["structure_imports", "agent_readiness"]),
+    (_match_name("pyproject.toml"), ["dependency_drift"]),
+    (_match_name("CLAUDE.md"), ["mirror_drift"]),
+    (_match_contains("test"), ["reliability_flaky", "reliability_repeated"]),
+    (_match_ext(".toml"), ["dependency_drift"]),
+    (_match_ext(".yaml"), ["context_quality"]),
+    (_match_ext(".yml"), ["context_quality"]),
+    (_match_ext(".json"), ["context_quality"]),
+    (_match_ext(".md"), ["mirror_drift"]),
+    (_match_ext(".sh"), ["security_scripts"]),
+]
+
+
+class IncrementalTrigger:
+    """Triggers probes based on git diff — only scan what changed."""
+
+    def __init__(self, repo_path: str = "."):
+        self.repo_path = repo_path
+
+    def changed_files(self, since: str = "HEAD~1") -> list[str]:
+        """Get files changed since a reference."""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", since],
+                capture_output=True, text=True, timeout=10,
+                cwd=self.repo_path,
+            )
+            if result.returncode != 0:
+                logger.warning("git diff failed: %s", result.stderr.strip())
+                return []
+            return [f for f in result.stdout.strip().split("\n") if f]
+        except Exception as e:
+            logger.error("incremental_trigger git_error=%s", e)
+            return []
+
+    def map_to_probes(self, files: list[str], registry: ProbeRegistry) -> list[str]:
+        """Map changed files to relevant probe IDs.
+
+        Uses FILE_PROBE_MAP patterns, then intersects with registered probes.
+        """
+        candidate_ids: set[str] = set()
+        for filepath in files:
+            for matcher, probe_ids in FILE_PROBE_MAP:
+                if matcher(filepath):
+                    candidate_ids.update(probe_ids)
+
+        # Only return IDs that are actually registered
+        registered_ids = {p["probe_id"] for p in registry.list_probes()}
+        return sorted(candidate_ids & registered_ids)
+
+    def scan_incremental(self, engine: "ProbeEngine", since: str = "HEAD~1") -> list[ProbeResult]:
+        """Run only probes relevant to changed files."""
+        files = self.changed_files(since)
+        if not files:
+            logger.info("incremental_trigger no_changes since=%s", since)
+            return []
+        probe_ids = self.map_to_probes(files, engine.registry)
+        if not probe_ids:
+            logger.info("incremental_trigger no_matching_probes files=%d", len(files))
+            return []
+        context = {"changed_files": files, "since": since}
+        results = []
+        for pid in probe_ids:
+            results.append(engine.registry.run_one(pid, context))
+        return results
+
+
 class ProbeEngine:
     """Orchestrates probe execution and result routing."""
 
-    def __init__(self, registry: Optional[ProbeRegistry] = None):
+    def __init__(self, registry: Optional[ProbeRegistry] = None, repo_path: str = "."):
         self.registry = registry or ProbeRegistry()
+        self._repo_path = repo_path
         self._results_cache: list[ProbeResult] = []
         self._last_scan_trigger: str = ""
         self._last_scan_at: float = 0.0
@@ -257,6 +402,10 @@ class ProbeEngine:
             len(results),
             sum(len(r.findings) for r in results),
         )
+
+        # Record HIGH+ findings to evidence ledger (probe → evidence pipeline)
+        self._record_high_findings(results)
+
         return results
 
     def scan_category(
@@ -336,6 +485,36 @@ class ProbeEngine:
         if has_high_severity:
             return "standard"
         return "light"
+
+    def _record_high_findings(self, results: list[ProbeResult]) -> None:
+        """Record HIGH/CRITICAL probe findings to the evidence ledger.
+
+        Only findings at severity HIGH or CRITICAL with actual findings
+        are recorded, keeping the ledger signal-rich.
+        """
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            import os
+            ledger = EvidenceLedger()
+            for result in results:
+                if result.severity in ("high", "critical") and result.findings:
+                    ledger.record(
+                        event_type="probe_finding",
+                        node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                        subject=f"probe:{result.probe_id} severity:{result.severity}",
+                        payload={
+                            "probe_id": result.probe_id,
+                            "severity": result.severity,
+                            "findings_count": len(result.findings),
+                            "confidence": result.confidence,
+                            "category": result.category,
+                            "finding_titles": [f.title for f in result.findings],
+                        },
+                    )
+            logger.debug("Evidence ledger: recorded %d HIGH+ probe findings",
+                         sum(1 for r in results if r.severity in ("high", "critical") and r.findings))
+        except Exception as e:
+            logger.debug("Evidence ledger recording failed: %s", e)
 
     def blocking_findings(self) -> list[ProbeFinding]:
         """Return all findings with high blast radius (blocking)."""

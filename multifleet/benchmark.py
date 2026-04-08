@@ -41,6 +41,12 @@ def _percentile(data: list[float], pct: float) -> float:
 
 def _run_bench(name: str, fn: Callable, iterations: int) -> BenchmarkResult:
     """Execute fn for iterations, collect timings, return result."""
+    if iterations <= 0:
+        return BenchmarkResult(
+            name=name, iterations=0, mean_ms=0.0,
+            p50_ms=0.0, p95_ms=0.0, p99_ms=0.0,
+            min_ms=0.0, max_ms=0.0,
+        )
     timings: list[float] = []
     for _ in range(iterations):
         t0 = time.perf_counter()

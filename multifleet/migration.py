@@ -114,17 +114,21 @@ class FleetMigration:
         try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS evidence (
-                    id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL,
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id TEXT UNIQUE NOT NULL,
                     timestamp REAL NOT NULL,
-                    node_id TEXT,
-                    payload TEXT,
-                    prev_hash TEXT,
-                    hash TEXT NOT NULL
+                    event_type TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    subject TEXT,
+                    payload TEXT NOT NULL,
+                    prev_hash TEXT NOT NULL,
+                    entry_hash TEXT NOT NULL,
+                    verified INTEGER DEFAULT 1
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_ts ON evidence(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_type ON evidence(event_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_node ON evidence(node_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_ts ON evidence(timestamp)")
             conn.commit()
         finally:
             conn.close()

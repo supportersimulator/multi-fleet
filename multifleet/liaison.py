@@ -150,43 +150,65 @@ class FleetLiaison:
 
         return level
 
+    def get_probe_injection(self) -> Optional[str]:
+        """Get probe-recommended context for injection into next systemMessage."""
+        try:
+            from multifleet.probes import create_engine
+            engine = create_engine()
+            result = engine.scan_one("injection_prioritizer")
+            if result and result.findings:
+                lines = ["[PROBE] Recommended context:"]
+                for f in result.findings[:3]:  # Top 3 only
+                    lines.append(f"  - {f.title}")
+                return "\n".join(lines)
+        except Exception:
+            pass
+        return None
+
     def get_batch_for_injection(self) -> Optional[str]:
         """Get accumulated messages for next systemMessage injection.
 
         Returns formatted markdown string or None if nothing to report.
         Clears the unread queue after generating the batch.
         """
-        if not self.state.unread_messages:
-            return None
+        parts: List[str] = []
 
-        lines: List[str] = ["## Fleet Update"]
+        if self.state.unread_messages:
+            lines: List[str] = ["## Fleet Update"]
 
-        # Group by escalation level for readability
-        by_level: Dict[str, List[Dict[str, Any]]] = {}
-        for msg in self.state.unread_messages:
-            lvl = msg.get("escalation", "info")
-            by_level.setdefault(lvl, []).append(msg)
+            # Group by escalation level for readability
+            by_level: Dict[str, List[Dict[str, Any]]] = {}
+            for msg in self.state.unread_messages:
+                lvl = msg.get("escalation", "info")
+                by_level.setdefault(lvl, []).append(msg)
 
-        # Render in priority order: critical > urgent > info > silent
-        for lvl_value in ("critical", "urgent", "info", "silent"):
-            msgs = by_level.get(lvl_value, [])
-            if not msgs:
-                continue
-            lines.append(f"\n### [{lvl_value.upper()}]")
-            for m in msgs:
-                sender = m.get("from", "?")
-                summary = m.get("summary", "no summary")
-                lines.append(f"- **{sender}** ({m.get('type', '?')}): {summary}")
+            # Render in priority order: critical > urgent > info > silent
+            for lvl_value in ("critical", "urgent", "info", "silent"):
+                msgs = by_level.get(lvl_value, [])
+                if not msgs:
+                    continue
+                lines.append(f"\n### [{lvl_value.upper()}]")
+                for m in msgs:
+                    sender = m.get("from", "?")
+                    summary = m.get("summary", "no summary")
+                    lines.append(f"- **{sender}** ({m.get('type', '?')}): {summary}")
 
-        # Append state summary
-        state_summary = self.state.summary()
-        if state_summary != "Fleet quiet":
-            lines.append(f"\n**State:** {state_summary}")
+            # Append state summary
+            state_summary = self.state.summary()
+            if state_summary != "Fleet quiet":
+                lines.append(f"\n**State:** {state_summary}")
 
-        # Clear the queue
-        self.state.unread_messages.clear()
+            # Clear the queue
+            self.state.unread_messages.clear()
 
-        return "\n".join(lines)
+            parts.append("\n".join(lines))
+
+        # Add probe injection recommendations
+        probe_ctx = self.get_probe_injection()
+        if probe_ctx:
+            parts.append(probe_ctx)
+
+        return "\n".join(parts) if parts else None
 
     def mark_read(self, count: Optional[int] = None) -> None:
         """Mark messages as read (clear from unread queue).
