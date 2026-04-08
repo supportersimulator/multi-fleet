@@ -1502,6 +1502,23 @@ class FleetNerveNATS:
     async def _ack_retry_loop(self):
         return await self._healer._ack_retry_loop()
 
+    # ── Memory Bridge Promotion Loop ──
+
+    async def _memory_promotion_loop(self):
+        """Run evidence→memory promotion every ~100s (10 heartbeat cycles)."""
+        while self._running:
+            try:
+                await asyncio.sleep(100)
+                if self._memory_bridge:
+                    result = self._memory_bridge.run_promotion_cycle()
+                    if result.get("promoted_count", 0) > 0:
+                        logger.info("Memory promotion: %d entries promoted",
+                                     result["promoted_count"])
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Memory promotion cycle failed: %s", e)
+
     # ── Main Loop ──
 
     async def serve(self):
@@ -1543,6 +1560,20 @@ class FleetNerveNATS:
             logger.info("Fleet health monitor started (interval=30s)")
         except Exception as e:
             logger.warning("Health monitor failed to start: %s", e)
+
+        # Start memory bridge promotion loop (every ~100s)
+        try:
+            from .memory_bridge import MemoryBridge
+            from .evidence_ledger import EvidenceLedger
+            self._memory_bridge = MemoryBridge(
+                evidence_ledger=EvidenceLedger(),
+                eventbus=self._event_bus if hasattr(self, '_event_bus') else None,
+            )
+            asyncio.create_task(self._memory_promotion_loop())
+            logger.info("Memory bridge started (promotion every ~100s)")
+        except Exception as e:
+            logger.warning("Memory bridge failed to start: %s", e)
+            self._memory_bridge = None
 
         # Keep running
         try:
@@ -1728,6 +1759,15 @@ class FleetNerveNATS:
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+                elif self.path == "/wisdom":
+                    try:
+                        if hasattr(daemon, '_memory_bridge') and daemon._memory_bridge:
+                            stats = daemon._memory_bridge.get_wisdom_stats()
+                            self._json_response(200, stats)
+                        else:
+                            self._json_response(503, {"error": "memory bridge not started"})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/evidence" or self.path.startswith("/evidence?"):
                     try:
                         from .evidence_ledger import EvidenceLedger
@@ -2050,6 +2090,22 @@ class FleetNerveNATS:
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+                elif self.path == "/wisdom/promote":
+                    try:
+                        if hasattr(daemon, '_memory_bridge') and daemon._memory_bridge:
+                            hours = body.get("hours", 24)
+                            min_severity = body.get("min_severity", "medium")
+                            promoted = daemon._memory_bridge.promote_recent(
+                                hours=hours, min_severity=min_severity
+                            )
+                            self._json_response(200, {
+                                "promoted_count": len(promoted),
+                                "promoted_ids": [e.get("entry_id", "")[:8] for e in promoted],
+                            })
+                        else:
+                            self._json_response(503, {"error": "memory bridge not started"})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/inject":
                     # Direct --resume injection for testing
                     # Accepts: {"session_id": "...", "message": "..."} or {"message": "..."}

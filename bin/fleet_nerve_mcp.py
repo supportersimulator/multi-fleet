@@ -2535,6 +2535,52 @@ def fleet_invariance(action: str = "check_all", rule_id: str = "",
     }
 
 
+def fleet_wisdom(action: str = "stats", hours: str = "24",
+                  min_severity: str = "medium") -> dict:
+    """Evidence → ContextDNA Memory Bridge — promotes fleet evidence into persistent memory.
+
+    Actions:
+        stats:   Show wisdom promotion stats (total, by type, last promotion)
+        promote: Trigger immediate promotion cycle
+        files:   List recent wisdom files
+
+    This is THE MOAT — transforms fleet evidence from disposable data
+    into compounding institutional intelligence.
+    """
+    try:
+        from multifleet.memory_bridge import MemoryBridge
+        from multifleet.evidence_ledger import EvidenceLedger
+    except ImportError as e:
+        return {"error": f"memory_bridge not available: {e}"}
+
+    bridge = MemoryBridge(evidence_ledger=EvidenceLedger())
+
+    if action == "stats":
+        return bridge.get_wisdom_stats()
+
+    if action == "promote":
+        result = bridge.run_promotion_cycle()
+        result["stats"] = bridge.get_wisdom_stats()
+        return result
+
+    if action == "files":
+        from pathlib import Path
+        wisdom_dir = Path(bridge._memory_path)
+        files = sorted(wisdom_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        files = [f for f in files if f.name != ".promoted.json"][:20]
+        return {
+            "files": [
+                {"name": f.name, "size": f.stat().st_size,
+                 "modified": f.stat().st_mtime}
+                for f in files
+            ],
+            "total": len(list(wisdom_dir.glob("*.json"))) - 1,
+            "path": str(wisdom_dir),
+        }
+
+    return {"error": f"Unknown action: {action}. Use: stats, promote, files"}
+
+
 def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
     """Start/stop/status the fleet web server."""
     try:
@@ -2849,6 +2895,20 @@ TOOLS = [
             "required": ["action"],
         },
         "fn": fleet_evidence,
+    },
+    {
+        "name": "fleet_wisdom",
+        "description": "Evidence → ContextDNA Memory Bridge — THE MOAT. Promotes fleet evidence into persistent institutional memory. Actions: stats (promotion stats), promote (trigger promotion cycle), files (list wisdom files). This transforms fleet evidence from disposable data into compounding intelligence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["stats", "promote", "files"], "description": "Action: stats (default), promote, files", "default": "stats"},
+                "hours": {"type": "string", "description": "Time window for promotion in hours (default 24)", "default": "24"},
+                "min_severity": {"type": "string", "description": "Minimum severity to promote: low, medium, high, critical (default medium)", "default": "medium"},
+            },
+            "required": [],
+        },
+        "fn": fleet_wisdom,
     },
     {
         "name": "fleet_race",
