@@ -151,16 +151,31 @@ class FleetLiaison:
         return level
 
     def get_probe_injection(self) -> Optional[str]:
-        """Get probe-recommended context for injection into next systemMessage."""
+        """Get probe-recommended context for injection into next systemMessage.
+
+        Uses ProbeInterpreter for human-readable insights instead of raw findings.
+        Falls back to basic title listing if interpreter is unavailable.
+        """
         try:
             from multifleet.probes import create_engine
             engine = create_engine()
             result = engine.scan_one("injection_prioritizer")
-            if result and result.findings and result.status not in ("error", "skipped"):
-                lines = ["[PROBE] Recommended context:"]
-                for f in result.findings[:3]:  # Top 3 only
-                    lines.append(f"  - {f.title}")
-                return "\n".join(lines)
+            if not result or not result.findings or result.status in ("error", "skipped"):
+                return None
+
+            # Use interpreter for rich context
+            try:
+                from multifleet.probe_interpreter import ProbeInterpreter
+                interpreter = ProbeInterpreter()
+                return interpreter.generate_injection_context([result])
+            except Exception:
+                pass
+
+            # Fallback: basic title listing
+            lines = ["[PROBE] Recommended context:"]
+            for f in result.findings[:3]:
+                lines.append(f"  - {f.title}")
+            return "\n".join(lines)
         except Exception:
             pass
         return None
