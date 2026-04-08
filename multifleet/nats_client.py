@@ -1530,6 +1530,20 @@ class FleetNerveNATS:
         # Start CommunicationProtocol self-heal loop (works with or without NATS)
         self.protocol.start()
 
+        # Start fleet health monitor (background thread)
+        try:
+            from .health_monitor import FleetHealthMonitor
+            self._health_monitor = FleetHealthMonitor(
+                daemon_port=self._http_port if hasattr(self, '_http_port') else 8855,
+                node_id=self.node_id,
+            )
+            if hasattr(self, '_event_bus') and self._event_bus:
+                self._health_monitor.wire_eventbus(self._event_bus)
+            self._health_monitor.start_background()
+            logger.info("Fleet health monitor started (interval=30s)")
+        except Exception as e:
+            logger.warning("Health monitor failed to start: %s", e)
+
         # Keep running
         try:
             while self._running:
@@ -1835,6 +1849,32 @@ class FleetNerveNATS:
                             self._json_response(200, overlay.to_dict())
                         else:
                             self._json_response(404, {"error": f"no overlay for node '{node_id}'"})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/fleet/health":
+                    try:
+                        from .health_monitor import FleetHealthMonitor
+                        if not hasattr(Handler, '_health_monitor') or Handler._health_monitor is None:
+                            Handler._health_monitor = FleetHealthMonitor(
+                                daemon_port=daemon._http_port if hasattr(daemon, '_http_port') else 8855,
+                                node_id=daemon.node_id,
+                            )
+                        self._json_response(200, Handler._health_monitor.get_fleet_status())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/fleet/alerts":
+                    try:
+                        from .health_monitor import FleetHealthMonitor
+                        if not hasattr(Handler, '_health_monitor') or Handler._health_monitor is None:
+                            Handler._health_monitor = FleetHealthMonitor(
+                                daemon_port=daemon._http_port if hasattr(daemon, '_http_port') else 8855,
+                                node_id=daemon.node_id,
+                            )
+                        monitor = Handler._health_monitor
+                        self._json_response(200, {
+                            "alerts": monitor._alerts[-50:],
+                            "count": len(monitor._alerts),
+                        })
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
                 elif self.path == "/scan/results":
