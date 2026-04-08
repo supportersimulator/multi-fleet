@@ -255,6 +255,19 @@ class AcceptanceGate:
             unresolved_objection_ids=objections,
         )
 
+        # Emit event (best-effort, non-blocking)
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            et = EventType.TASK_ACCEPTED if decision.accepted else EventType.TASK_BLOCKED
+            emit_typed(et, EventSource.CONTEXTDNA, payload={
+                "accepted": decision.accepted,
+                "reason": decision.reason,
+                "blocking_count": len(decision.blocking_issues),
+            })
+        except (ImportError, Exception):
+            pass
+
         logger.info("acceptance_gate %s", decision.summary())
         return decision
 

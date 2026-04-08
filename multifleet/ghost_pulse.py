@@ -116,6 +116,20 @@ class GhostPulse:
         result.duration_ms = (time.monotonic() - t0) * 1000
         self._last_pulse_at = time.time()
 
+        # Emit pulse completed event (best-effort)
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            emit_typed(EventType.GHOST_PULSE_COMPLETED, EventSource.GHOST, payload={
+                "stale_expired": result.stale_beliefs_expired,
+                "contradictions": result.contradictions_found,
+                "repeated_failures": result.repeated_failures_detected,
+                "warnings": len(result.warnings),
+                "duration_ms": round(result.duration_ms, 1),
+            })
+        except (ImportError, Exception):
+            pass
+
         logger.info("ghost_pulse complete: %s (%.0fms)", result.summary(), result.duration_ms)
         return result
 

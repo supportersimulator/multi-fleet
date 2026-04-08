@@ -96,6 +96,9 @@ class GhostDigest:
     they become evidence that influences future decisions.
     """
 
+    # Feedback loop protection (3-surgeon recommendation: CV-FLC)
+    _digest_seen: set = set()
+
     def __init__(self, evidence_dir: Optional[str] = None, node_id: str = "unknown"):
         self._evidence_dir = Path(
             evidence_dir or str(Path.home() / ".fleet-nerve" / "evidence-candidates")
@@ -114,6 +117,9 @@ class GhostDigest:
     ) -> DigestResult:
         """Digest a completed task into evidence candidates.
 
+        Includes feedback loop protection (CV-FLC): tasks already digested
+        are skipped to prevent ghost → probes → ghost cycles.
+
         Args:
             task_id: The task that completed.
             task_intent: What the task was trying to do.
@@ -122,6 +128,15 @@ class GhostDigest:
             acceptance_decision: AcceptanceGate decision.
             diff_summary: Summary of code changes.
         """
+        # Feedback loop protection: skip already-digested tasks
+        if task_id in GhostDigest._digest_seen:
+            logger.debug("Skipping already-digested task %s (loop protection)", task_id[:8])
+            return DigestResult(task_id=task_id)
+        GhostDigest._digest_seen.add(task_id)
+        # Cap seen set to prevent memory leak
+        if len(GhostDigest._digest_seen) > 1000:
+            GhostDigest._digest_seen = set(list(GhostDigest._digest_seen)[-500:])
+
         t0 = time.monotonic()
         candidates = []
         objections = []
