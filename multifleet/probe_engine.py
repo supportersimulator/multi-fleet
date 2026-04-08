@@ -198,8 +198,19 @@ class ProbeRegistry:
             return result
 
     def run_all(self, context: Optional[dict] = None) -> list[ProbeResult]:
-        """Run every registered probe and return results."""
-        ctx = context or {}
+        """Run every registered probe and return results.
+
+        If no context is provided, auto-builds one from live git state
+        via probe_context_factory.
+        """
+        if context is None:
+            try:
+                from multifleet.probe_context_factory import build_probe_context
+                ctx = build_probe_context().to_dict()
+            except Exception:
+                ctx = {}
+        else:
+            ctx = context
         results = []
         for probe_id, entry in self._probes.items():
             results.append(self._run_probe(probe_id, entry, ctx))

@@ -136,6 +136,23 @@ def _get_node_id() -> str:
     return socket.gethostname().split(".")[0].lower()
 
 
+# ── Data Layer singleton (shared SQLite connection pool) ──
+_data_layer = None
+
+
+def _get_data_layer():
+    """Get or create the singleton FleetDataLayer for connection pooling."""
+    global _data_layer
+    if _data_layer is None:
+        try:
+            from multifleet.data_layer import get_data_layer
+            _data_layer = get_data_layer()
+            logger.info("FleetDataLayer initialized: %s", _data_layer.data_dir)
+        except Exception as e:
+            logger.warning("FleetDataLayer init failed: %s", e)
+    return _data_layer
+
+
 def _http_probe(url: str, timeout: int = 3) -> dict:
     """Probe a URL, return {"reachable": bool, "latency_ms": N, "error": ...}."""
     start = time.time()
@@ -1413,7 +1430,8 @@ def _get_lease_manager():
         from multifleet.store import FleetNerveStore
         config = _load_config()
         chief_id = config.get("chief", {}).get("nodeId", "")
-        store = FleetNerveStore()
+        dl = _get_data_layer()
+        store = FleetNerveStore(data_layer=dl)
         _lease_manager = LeaseManager(store, NODE_ID, chief_node_id=chief_id or None,
                                        daemon_port=FLEET_NERVE_PORT)
         return _lease_manager
@@ -1432,7 +1450,8 @@ def _get_rebuttal_manager():
     try:
         from multifleet.rebuttal import RebuttalManager
         from multifleet.store import FleetNerveStore
-        store = FleetNerveStore()
+        dl = _get_data_layer()
+        store = FleetNerveStore(data_layer=dl)
         _rebuttal_manager = RebuttalManager(store, NODE_ID)
         return _rebuttal_manager
     except Exception as e:
@@ -1449,7 +1468,8 @@ def _get_evidence_ledger():
         pass
     try:
         from multifleet.evidence_ledger import EvidenceLedger
-        _evidence_ledger = EvidenceLedger()
+        dl = _get_data_layer()
+        _evidence_ledger = EvidenceLedger(data_layer=dl)
         return _evidence_ledger
     except Exception as e:
         logger.warning(f"EvidenceLedger init failed: {e}")
@@ -3316,6 +3336,33 @@ def handle_request(request: dict) -> dict:
     return {"error": {"code": -32601, "message": f"Method not found: {method}"}}
 
 
+def _run_startup_migration():
+    """Run FleetMigration.check_version() on startup and auto-migrate if needed."""
+    try:
+        from multifleet.migration import FleetMigration
+        mig = FleetMigration()
+        status = mig.check_version()
+        if status.get("needs_migration"):
+            logger.info("Migration needed: %s -> %s", status["current_version"], status["expected_version"])
+            result = mig.migrate()
+            logger.info("Migration result: %s", result.get("status"))
+        else:
+            logger.debug("Fleet state up to date: %s", status.get("current_version", "unknown"))
+    except Exception as e:
+        logger.warning("Startup migration check failed: %s", e)
+
+
+def _run_shutdown_backup():
+    """Create a backup snapshot on graceful shutdown."""
+    try:
+        from multifleet.backup import FleetBackup
+        backup = FleetBackup()
+        path = backup.create_snapshot()
+        logger.info("Shutdown backup created: %s", path)
+    except Exception as e:
+        logger.warning("Shutdown backup failed: %s", e)
+
+
 def main():
     """Run as MCP server on stdin/stdout (JSON-RPC)."""
     logging.basicConfig(
@@ -3324,27 +3371,39 @@ def main():
         datefmt="%H:%M:%S",
         stream=sys.stderr,  # MCP uses stdout for JSON-RPC
     )
+
+    # Startup: initialize data layer + run migrations
+    _get_data_layer()
+    _run_startup_migration()
+
     import io
     reader = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8")
     writer = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-    for line in reader:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-            response = handle_request(request)
-            if response is None:
-                continue  # notification, no response
-            response["jsonrpc"] = "2.0"
-            response["id"] = request.get("id")
-            writer.write(json.dumps(response) + "\n")
-            writer.flush()
-        except Exception as e:
-            error = {"jsonrpc": "2.0", "id": None, "error": {"code": -1, "message": str(e)}}
-            writer.write(json.dumps(error) + "\n")
-            writer.flush()
+    try:
+        for line in reader:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+                response = handle_request(request)
+                if response is None:
+                    continue  # notification, no response
+                response["jsonrpc"] = "2.0"
+                response["id"] = request.get("id")
+                writer.write(json.dumps(response) + "\n")
+                writer.flush()
+            except Exception as e:
+                error = {"jsonrpc": "2.0", "id": None, "error": {"code": -1, "message": str(e)}}
+                writer.write(json.dumps(error) + "\n")
+                writer.flush()
+    finally:
+        # Graceful shutdown: backup + close data layer
+        _run_shutdown_backup()
+        dl = _get_data_layer()
+        if dl:
+            dl.close_all()
 
 
 if __name__ == "__main__":

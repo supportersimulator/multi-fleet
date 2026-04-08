@@ -62,10 +62,27 @@ cmd_probe() {
 cmd_status() {
   # Try Python CLI first, fall back to curl
   if PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -m multifleet.cli status "$@" 2>/dev/null; then
-    return 0
+    :
+  else
+    echo -e "${YELLOW}Python CLI unavailable, using curl fallback${RESET}"
+    cmd_probe
   fi
-  echo -e "${YELLOW}Python CLI unavailable, using curl fallback${RESET}"
-  cmd_probe
+
+  # Show onboarding progress after status
+  echo ""
+  PYTHONPATH="$FLEET_DIR:$REPO_DIR" python3 -c "
+from multifleet.onboarding import OnboardingWizard
+w = OnboardingWizard()
+s = w.check_all()
+total = len(s['completed']) + len(s['remaining'])
+print(f'Onboarding: {s[\"progress_pct\"]:.0f}% ({len(s[\"completed\"])}/{total})')
+if s['remaining']:
+    for r in s['remaining'][:3]:
+        req = ' (required)' if r['required'] else ''
+        print(f'  - {r[\"name\"]}{req}: {r[\"message\"]}')
+    if len(s['remaining']) > 3:
+        print(f'  ... and {len(s[\"remaining\"]) - 3} more')
+" 2>/dev/null || true
 }
 
 cmd_send() {
