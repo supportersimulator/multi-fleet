@@ -42,6 +42,7 @@ fleet = "multifleet.cli:main"
 fleet-nerve-mcp = "multifleet.mcp:main"
 fleet-nerve = "multifleet.nats_client:main"
 fleet-dashboard = "multifleet.web_dashboard:main"
+fleet-nats-cluster = "multifleet.nats_cluster:main"
 
 [project.urls]
 Homepage = "https://multi-fleet.dev"

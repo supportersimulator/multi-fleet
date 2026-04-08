@@ -640,6 +640,52 @@ def cmd_orchestrate(args):
             print(f"  [{status_sym}] {t['id']}  {t['description']}  ({mode}, {t.get('elapsed_s', '?')}s)")
 
 
+def cmd_nats_cluster(args):
+    """NATS cluster management — generate config, start/stop server, check status."""
+    from multifleet.nats_cluster import (
+        write_config, generate_config, start_server, stop_server,
+        server_status, client_urls,
+    )
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    action = args.action
+    node_id = getattr(args, "node_id", None)
+
+    if action == "generate":
+        path = write_config(node_id)
+        print(f"Config written to {path}")
+        print(generate_config(node_id))
+    elif action == "start":
+        pid = start_server(node_id, foreground=getattr(args, "foreground", False))
+        if pid:
+            print(f"NATS cluster server started (PID {pid})")
+        else:
+            print("Server already running or failed to start")
+    elif action == "stop":
+        if stop_server():
+            print("NATS server stopped")
+        else:
+            print("No managed server to stop")
+    elif action == "restart":
+        stop_server()
+        import time
+        time.sleep(1)
+        pid = start_server(node_id)
+        print(f"NATS cluster server restarted (PID {pid})" if pid else "Failed to restart")
+    elif action == "status":
+        s = server_status()
+        if s.get("running"):
+            print(f"NATS: {s['server_name']} v{s['version']} | {s['connections']} conns | {s['routes']} routes")
+            for r in s.get("route_details", []):
+                print(f"  -> {r['ip']}:{r['port']}")
+        else:
+            print("NATS server: not running (or no monitoring endpoint)")
+    elif action == "client-urls":
+        for url in client_urls():
+            print(url)
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -743,6 +789,13 @@ def main():
     theater_p.add_argument("--port", type=int, default=8855, help="Daemon port")
     theater_p.add_argument("--refresh", type=float, default=2.0, help="Refresh rate (seconds)")
 
+    # nats-cluster — NATS cluster management
+    nc_p = sub.add_parser("nats-cluster", help="NATS cluster management (generate/start/stop/status)")
+    nc_p.add_argument("action", choices=["generate", "start", "stop", "status", "client-urls", "restart"],
+                       help="Cluster action")
+    nc_p.add_argument("--node-id", help="Override node ID detection")
+    nc_p.add_argument("--foreground", action="store_true", help="Run server in foreground")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -769,6 +822,7 @@ def main():
         "probe": cmd_probe,
         "orchestrate": cmd_orchestrate,
         "theater": cmd_theater,
+        "nats-cluster": cmd_nats_cluster,
     }
 
     handler = handlers.get(args.command)
