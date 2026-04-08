@@ -108,7 +108,15 @@ def register_all(registry: ProbeRegistry) -> None:
 
 
 def create_engine() -> ProbeEngine:
-    """Create a ProbeEngine with all built-in probes registered."""
+    """Create a ProbeEngine with all built-in probes + bridged scanner probes."""
     registry = ProbeRegistry()
     register_all(registry)
+
+    # Bridge code_scanner probes into unified registry
+    try:
+        from multifleet.probes.scanner_bridge import register_scanner_probes
+        register_scanner_probes(registry)
+    except (ImportError, Exception):
+        pass  # Scanner bridge optional — graceful degradation
+
     return ProbeEngine(registry=registry)
