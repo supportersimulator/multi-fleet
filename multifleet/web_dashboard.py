@@ -923,14 +923,24 @@ def build_dashboard_html(daemon_port: int = DAEMON_PORT, eventbus_port: int = EV
       }}
       renderNodes(nodes);
 
-      // Message stats
-      const stats = health.stats || {{}};
-      renderMessages({{
-        sent: stats.sent || 0,
-        received: stats.received || 0,
-        broadcasts: stats.broadcasts || 0,
-        errors: stats.errors || 0,
-      }});
+      // Message stats — prefer fleet-wide aggregation, fall back to local
+      const fleetMetrics = await fetchJSON('/fleet-metrics');
+      if (fleetMetrics && !fleetMetrics.error) {{
+        renderMessages({{
+          sent: fleetMetrics.total_messages_sent || 0,
+          received: fleetMetrics.total_messages_received || 0,
+          broadcasts: 0,
+          errors: fleetMetrics.total_errors || 0,
+        }});
+      }} else {{
+        const stats = health.stats || {{}};
+        renderMessages({{
+          sent: stats.sent || 0,
+          received: stats.received || 0,
+          broadcasts: stats.broadcasts || 0,
+          errors: stats.errors || 0,
+        }});
+      }}
     }}
 
     renderRaces(races ? (races.races || []) : []);
@@ -975,6 +985,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = json.dumps({"status": "ok", "type": "web-dashboard"}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/fleet-metrics":
+            # Fleet-wide aggregated metrics for the Messages panel
+            try:
+                from multifleet.fleet_metrics import FleetMetricsAggregator
+                agg = FleetMetricsAggregator(daemon_port=self.daemon_port)
+                result = agg.aggregate()
+                body = json.dumps(result).encode()
+            except Exception as e:
+                body = json.dumps({"error": str(e)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "max-age=5")
             self.end_headers()
             self.wfile.write(body)
         else:
