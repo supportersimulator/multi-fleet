@@ -307,17 +307,45 @@ def cmd_gains_gate(args):
 
 
 def cmd_dashboard(_args):
-    """Launch the text dashboard."""
-    data = _get("/dashboard")
-    _check_error(data)
-    # Dashboard returns plain text
-    if isinstance(data, dict) and "_error" in data:
-        _die(data["_error"])
-    # If we got JSON back, it's an error
-    if isinstance(data, dict):
-        _print_json(data)
-        return
-    print(data)
+    """Launch the text dashboard with theatrical rendering."""
+    if _theater:
+        try:
+            from multifleet.dashboard_data import FleetDashboardData
+            dash = FleetDashboardData()
+            snap = dash.snapshot()
+            _theater.fleet_banner()
+            # Node status cards
+            if snap.get("nodes"):
+                _theater.node_status_cards(snap["nodes"])
+            # Probe findings
+            if snap.get("probe_results"):
+                _theater.probe_findings(snap["probe_results"])
+            # Truth ladder
+            if snap.get("truth_ladder"):
+                _theater.truth_ladder_display(snap["truth_ladder"])
+            # Supervisor progress
+            sup = snap.get("supervisor", {})
+            if sup.get("tasks"):
+                for task in sup["tasks"]:
+                    _theater.supervisor_progress(task)
+            # Gains gate
+            if snap.get("gains_gate") and "error" not in snap["gains_gate"]:
+                _theater.gains_gate_display(snap["gains_gate"])
+            # Evidence chain
+            if snap.get("evidence"):
+                _theater.evidence_chain(snap["evidence"], verified=True)
+            return
+        except Exception:
+            pass  # fall through to plain dashboard
+
+    # Fallback: fetch plain text dashboard from daemon
+    url = f"{DAEMON}/dashboard"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(resp.read().decode())
+    except urllib.error.URLError as exc:
+        _die(f"Daemon unreachable: {exc.reason}")
 
 
 def _cmd_dashboard_fallback(_args):
@@ -418,6 +446,62 @@ def cmd_rebuttal(args):
         _die("multifleet.cross_rebuttal not available")
 
 
+def cmd_truth(args):
+    """Truth ladder operations."""
+    if args.action == "stats":
+        data = _get("/truth/stats")
+        _check_error(data)
+        if _theater:
+            _theater.truth_ladder_display(data)
+            return
+        _header("Truth Ladder Stats")
+        _print_json(data)
+    elif args.action == "list":
+        data = _get("/truth")
+        _check_error(data)
+        _header("Truth Ladder Entries")
+        _print_json(data)
+
+
+def cmd_supervisor(args):
+    """Supervisor task state."""
+    data = _get("/supervisor")
+    _check_error(data)
+    if args.action == "status" and _theater:
+        tasks = data.get("tasks", [])
+        if not tasks:
+            _ok("No active supervisor tasks")
+            return
+        for task in tasks:
+            _theater.supervisor_progress(task)
+        return
+    _header("Supervisor Tasks")
+    _print_json(data)
+
+
+def cmd_overlay(args):
+    """Node overlay state."""
+    if args.node:
+        data = _get(f"/overlay/{args.node}")
+    else:
+        data = _get("/overlays")
+    _check_error(data)
+    _header("Node Overlays")
+    _print_json(data)
+
+
+def cmd_probe(_args):
+    """Run probe scan and display findings."""
+    data = _get("/scan/results", timeout=15)
+    _check_error(data)
+    results = data.get("results", [])
+    if _theater:
+        _theater.probe_findings(results)
+        return
+    _header(f"Probe Findings ({len(results)} results)")
+    _print_json(data)
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -479,6 +563,23 @@ def main():
     reb_p.add_argument("--id", help="Proposal ID")
     reb_p.add_argument("--text", help="Proposal or rebuttal text")
 
+    # truth
+    truth_p = sub.add_parser("truth", help="Truth ladder operations")
+    truth_p.add_argument("action", choices=["stats", "list"], nargs="?", default="stats",
+                         help="stats=ladder summary, list=all entries")
+
+    # supervisor
+    sup_p = sub.add_parser("supervisor", help="Supervisor task state")
+    sup_p.add_argument("action", choices=["status", "list"], nargs="?", default="status",
+                       help="status=phase progress, list=all tasks")
+
+    # overlay
+    ov_p = sub.add_parser("overlay", help="Node overlay state")
+    ov_p.add_argument("node", nargs="?", help="Specific node ID (omit for all)")
+
+    # probe / scan
+    sub.add_parser("probe", help="Run probe scan and show findings")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -494,10 +595,14 @@ def main():
         "race": cmd_race,
         "doctor": cmd_doctor,
         "gains-gate": cmd_gains_gate,
-        "dashboard": _cmd_dashboard_fallback,
+        "dashboard": cmd_dashboard,
         "evidence": cmd_evidence,
         "lease": cmd_lease,
         "rebuttal": cmd_rebuttal,
+        "truth": cmd_truth,
+        "supervisor": cmd_supervisor,
+        "overlay": cmd_overlay,
+        "probe": cmd_probe,
     }
 
     handler = handlers.get(args.command)

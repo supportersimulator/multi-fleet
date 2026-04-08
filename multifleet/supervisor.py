@@ -157,6 +157,9 @@ class Supervisor:
         state.phase = next_phase
         self._record_transition(state, old_phase, next_phase, evidence)
 
+        # Phase-entry hooks for cross-module wiring
+        self._on_enter_phase(state, next_phase, evidence)
+
         logger.info(
             "supervisor advance task=%s %s->%s iter=%d",
             task_id, old_phase.value, next_phase.value, state.iteration_count,
@@ -224,6 +227,67 @@ class Supervisor:
             return phase
         return PHASE_ORDER[idx + 1]
 
+    def _on_enter_phase(self, state: SupervisorState, phase: SupervisorPhase,
+                        evidence: dict):
+        """Cross-module hooks triggered on phase entry."""
+        # SNAPSHOT_RECORD → auto-create truth ladder snapshot entry
+        if phase == SupervisorPhase.SNAPSHOT_RECORD:
+            try:
+                from multifleet.truth_ladder import TruthLadder
+                ladder = TruthLadder()
+                # Add as inbox first (truth ladder requires inbox → vision → snapshot path)
+                contract = state.vision_contract
+                title = contract.description if contract else state.task_id
+                entry = ladder.add_inbox(
+                    title=f"[supervisor] {title}",
+                    content=f"Task {state.task_id} reached SNAPSHOT_RECORD. "
+                            f"Criteria met: {state.criteria_met}",
+                    metadata={"task_id": state.task_id, "source": "supervisor"},
+                )
+                logger.info("supervisor→truth_ladder: inbox entry %s for task %s",
+                            entry.id[:8], state.task_id)
+            except Exception as e:
+                logger.warning("supervisor→truth_ladder snapshot failed: %s", e)
+
+        # DAO_CANDIDATE → attempt promotion to DAO (requires existing snapshot)
+        elif phase == SupervisorPhase.DAO_CANDIDATE:
+            try:
+                from multifleet.truth_ladder import TruthLadder
+                ladder = TruthLadder()
+                # Find snapshot entries for this task
+                snapshots = ladder.query(layer="snapshot", limit=10)
+                for s in snapshots:
+                    if s.metadata.get("task_id") == state.task_id:
+                        ladder.promote_to_dao(
+                            s.id, evidence_refs=[state.task_id],
+                            promoted_by=self._node_id,
+                        )
+                        logger.info("supervisor→truth_ladder: promoted %s to DAO", s.id[:8])
+                        break
+            except Exception as e:
+                logger.warning("supervisor→truth_ladder dao promotion failed: %s", e)
+
+        # CHIEF_ACCEPTANCE → run acceptance gate
+        elif phase == SupervisorPhase.CHIEF_ACCEPTANCE:
+            try:
+                from multifleet.acceptance_gate import AcceptanceGate
+                gate = AcceptanceGate()
+                decision = gate.evaluate(
+                    evidence_count=len(state.criteria_met),
+                    surgeon_resolved=True,
+                    surgeon_intensity="standard",
+                )
+                if not decision.accepted:
+                    logger.warning(
+                        "supervisor acceptance gate BLOCKED task=%s: %s",
+                        state.task_id, decision.blocking_issues,
+                    )
+                    # Record but don't auto-block — let caller decide
+                else:
+                    logger.info("supervisor acceptance gate PASSED task=%s", state.task_id)
+            except Exception as e:
+                logger.warning("supervisor→acceptance_gate failed: %s", e)
+
     def _record_transition(self, state: SupervisorState, from_phase: Optional[SupervisorPhase],
                            to_phase: SupervisorPhase, evidence: dict):
         state.history.append({
@@ -233,3 +297,34 @@ class Supervisor:
             "iteration": state.iteration_count,
             "evidence": evidence,
         })
+
+        # Emit to EventBus (best-effort)
+        try:
+            from multifleet.eventbus import FleetEventBus
+            import os
+            bus = FleetEventBus(node_id=os.environ.get("MULTIFLEET_NODE_ID", self._node_id))
+            bus.emit("supervisor.phase_transition", {
+                "task_id": state.task_id,
+                "from": from_phase.value if from_phase else None,
+                "to": to_phase.value,
+                "iteration": state.iteration_count,
+            })
+        except Exception:
+            pass
+
+        # Record to evidence ledger (best-effort)
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            EvidenceLedger().record(
+                event_type="supervisor_transition",
+                node_id=self._node_id,
+                subject=f"supervisor:{state.task_id}:{to_phase.value}",
+                payload={
+                    "task_id": state.task_id,
+                    "from": from_phase.value if from_phase else None,
+                    "to": to_phase.value,
+                    "iteration": state.iteration_count,
+                },
+            )
+        except Exception:
+            pass

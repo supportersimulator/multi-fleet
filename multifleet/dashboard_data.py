@@ -47,6 +47,10 @@ class FleetDashboardData:
             "gains_gate": self._get_gains_gate(),
             "eventbus": self._get_eventbus_stats(),
             "messages": self._get_message_stats(),
+            "probe_results": self._get_probe_results(),
+            "truth_ladder": self._get_truth_ladder(),
+            "supervisor": self._get_supervisor(),
+            "overlays": self._get_overlays(),
         }
 
     def race_live_view(self, race_id: str) -> dict:
@@ -188,6 +192,34 @@ class FleetDashboardData:
             "broadcasts": stats.get("broadcasts", 0),
             "errors": stats.get("errors", 0),
         }
+
+    def _get_probe_results(self) -> list:
+        """Get latest probe scan results from /scan/results."""
+        data = self._fetch("/scan/results")
+        if not data:
+            return []
+        return data.get("results", [])
+
+    def _get_truth_ladder(self) -> dict:
+        """Get truth ladder statistics from /truth/stats."""
+        data = self._fetch("/truth/stats")
+        if not data:
+            return {}
+        return data
+
+    def _get_supervisor(self) -> dict:
+        """Get supervisor task state from /supervisor."""
+        data = self._fetch("/supervisor")
+        if not data:
+            return {"tasks": [], "count": 0}
+        return data
+
+    def _get_overlays(self) -> list:
+        """Get node overlay state from /overlays."""
+        data = self._fetch("/overlays")
+        if not data:
+            return []
+        return data.get("overlays", [])
 
     # ── HTTP fetch with caching ──
 

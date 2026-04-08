@@ -153,7 +153,7 @@ class ProbeRegistry:
         logger.debug("probe_registered id=%s category=%s", probe_id, category.value)
 
     def _emit_probe_finding(self, result: ProbeResult) -> None:
-        """Emit a fleet.probe.finding event to the EventBus (best-effort)."""
+        """Emit a fleet.probe.finding event to the EventBus and record to evidence ledger (best-effort)."""
         try:
             from multifleet.eventbus import FleetEventBus
             import os
@@ -162,6 +162,20 @@ class ProbeRegistry:
             bus.emit("probe.finding", result.to_dict())
         except Exception:
             pass  # Best-effort — never fail probe execution for event emission
+
+        # P1-1: Record to evidence ledger
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            import os
+            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+            EvidenceLedger().record(
+                event_type="probe_finding",
+                node_id=node_id,
+                subject=result.probe_id,
+                payload=result.to_dict(),
+            )
+        except Exception:
+            pass  # Best-effort
 
     def _run_probe(self, probe_id: str, entry: dict, context: dict) -> ProbeResult:
         """Execute a single probe with timing and error handling."""
