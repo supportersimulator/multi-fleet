@@ -256,6 +256,25 @@ class TruthLadder:
             "truth_ladder promote %s->%s id=%s from=%s by=%s",
             expected_layer, target_layer, promoted.id, source_id, promoted_by,
         )
+
+        # P1-5: Record promotion to evidence ledger (best-effort)
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            EvidenceLedger().record(
+                event_type="truth_promotion",
+                node_id=promoted_by or "unknown",
+                subject=promoted.title,
+                payload={
+                    "entry_id": promoted.id,
+                    "from_layer": expected_layer,
+                    "to_layer": target_layer,
+                    "source_id": source_id,
+                    "evidence_refs": evidence_refs or [],
+                },
+            )
+        except Exception:
+            pass  # Best-effort
+
         return promoted
 
     def _find_promoted_from(self, source_id: str) -> Optional[TruthEntry]:
