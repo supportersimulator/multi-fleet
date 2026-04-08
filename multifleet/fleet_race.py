@@ -696,6 +696,33 @@ class FleetRace:
             "elapsed_s": round(time.time() - race["started_at"], 1),
         })
 
+        # Arbiter escalation: low confidence or unresolved dissent -> human review
+        synthesis = race.get("synthesis", {})
+        synthesis_confidence = synthesis.get("confidence", 1.0)
+        unresolved_dissent = synthesis.get("dissent_preserved", [])
+        if synthesis_confidence < 0.8 or unresolved_dissent:
+            try:
+                from multifleet.arbiter_view import create_pending_from_race
+                decision_id = create_pending_from_race(race)
+                if decision_id:
+                    race["status"] = "awaiting_arbiter"
+                    race["arbiter_decision_id"] = decision_id
+                    # Emit EventBus event for dashboard notification
+                    self._emit_event("fleet.arbiter.pending", {
+                        "decision_id": decision_id,
+                        "race_id": race["race_id"],
+                        "task": race["task"],
+                        "confidence": synthesis_confidence,
+                        "dissent_count": len(unresolved_dissent or []),
+                    })
+                    logger.info(
+                        "Race %s escalated to arbiter: confidence=%.2f dissent=%d decision=%s",
+                        race["race_id"], synthesis_confidence,
+                        len(unresolved_dissent or []), decision_id,
+                    )
+            except Exception as e:
+                logger.warning("Arbiter escalation failed: %s", e)
+
         # Ghost digest: auto-trigger after synthesis (3-surgeon recommendation)
         self._run_ghost_digest(race)
 
@@ -815,6 +842,15 @@ class FleetRace:
             })
         except Exception as e:
             logger.warning("Evidence recording failed: %s", e)
+
+    def _emit_event(self, event_type: str, payload: dict):
+        """Emit an event to the EventBus (best-effort, never blocks race logic)."""
+        try:
+            from multifleet.eventbus import FleetEventBus
+            bus = FleetEventBus(node_id=self._node_id, daemon_port=self._port)
+            bus.emit(event_type, payload)
+        except Exception as e:
+            logger.debug("EventBus emit failed (non-critical): %s", e)
 
     # ── HTTP Helpers ────────────────────────────────────────────────
 

@@ -516,6 +516,52 @@ def cmd_theater(args):
         _die(f"Theater dashboard error: {exc}")
 
 
+def cmd_arbiter(args):
+    """Human Arbiter — view pending decisions or open web interface."""
+    if args.web:
+        # Open arbiter web UI in browser
+        port = args.port
+        import webbrowser
+        import threading
+
+        def _open_browser():
+            time.sleep(0.5)
+            webbrowser.open(f"http://127.0.0.1:{port}")
+
+        try:
+            from multifleet.arbiter_view import serve
+            if not args.no_browser:
+                threading.Thread(target=_open_browser, daemon=True).start()
+            _header(f"Arbiter View: http://127.0.0.1:{port}")
+            serve(port=port)
+        except KeyboardInterrupt:
+            pass
+        except ImportError:
+            _fail("arbiter_view module not available")
+        return
+
+    # CLI mode: show pending decisions
+    data = _get("/arbiter/pending")
+    _check_error(data)
+    decisions = data.get("decisions", [])
+    _header(f"Pending Arbiter Decisions ({len(decisions)})")
+    if not decisions:
+        _ok("No decisions awaiting human input. Fleet is in consensus.")
+        return
+    for d in decisions:
+        conf = d.get("recommendation", {}).get("confidence", 0)
+        conf_pct = f"{conf * 100:.0f}%"
+        dissent_n = len(d.get("dissent", []))
+        print(f"  [{d.get('decision_id', '?')}] {d.get('task', '?')}")
+        print(f"    Type: {d.get('type', '?')}  Confidence: {conf_pct}  Dissent: {dissent_n}")
+        if args.verbose:
+            rec = d.get("recommendation", {})
+            print(f"    Winner: {rec.get('node', '?')} ({rec.get('branch', '?')})")
+            print(f"    Reasoning: {rec.get('reasoning', '?')[:120]}")
+            for alt in d.get("alternatives", []):
+                print(f"    Alt: {alt.get('node', '?')} — {alt.get('summary', '?')[:80]}")
+
+
 def cmd_probe(_args):
     """Run probe scan and display findings."""
     data = _get("/scan/results", timeout=15)
@@ -682,6 +728,13 @@ def main():
     orch_p.add_argument("--nodes", help="Comma-separated node IDs for parallel")
     orch_p.add_argument("--task-id", help="Task ID for status action")
 
+    # arbiter — human decision interface
+    arb_p = sub.add_parser("arbiter", help="Human Arbiter — view/resolve fleet disagreements")
+    arb_p.add_argument("--web", action="store_true", help="Launch web arbiter in browser")
+    arb_p.add_argument("--port", type=int, default=8857, help="Web arbiter port (default 8857)")
+    arb_p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
+    arb_p.add_argument("--verbose", "-v", action="store_true", help="Show detailed decision info")
+
     # probe / scan
     sub.add_parser("probe", help="Run probe scan and show findings")
 
@@ -712,6 +765,7 @@ def main():
         "truth": cmd_truth,
         "supervisor": cmd_supervisor,
         "overlay": cmd_overlay,
+        "arbiter": cmd_arbiter,
         "probe": cmd_probe,
         "orchestrate": cmd_orchestrate,
         "theater": cmd_theater,

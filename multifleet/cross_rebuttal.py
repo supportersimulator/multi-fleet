@@ -175,12 +175,43 @@ class RebuttalManager:
         return session.advance(allowed[0])
 
     def cleanup_expired(self) -> int:
-        """Remove expired sessions. Returns count removed."""
+        """Remove expired sessions. Escalates unresolved ones to arbiter.
+
+        Returns count removed.
+        """
         expired = [
             tid for tid, s in self._sessions.items()
             if s.is_expired() and s.phase != RebuttalPhase.RESOLVED
         ]
         for tid in expired:
+            session = self._sessions[tid]
+            # Escalate to arbiter if session had verdicts but never resolved
+            if session.verdicts:
+                try:
+                    from multifleet.arbiter import HumanArbiter
+                    arbiter = HumanArbiter()
+                    arbiter.queue_decision(
+                        decision_type="rebuttal",
+                        task=f"Expired rebuttal session {tid[:8]}",
+                        recommendation={
+                            "approach": "timeout — no consensus reached",
+                            "confidence": 0.0,
+                            "reasoning": f"Session expired in phase {session.phase.value}",
+                        },
+                        alternatives=[
+                            {"node": mid, "summary": v.get("summary", "")}
+                            for mid, v in session.verdicts.items()
+                        ],
+                        dissent=[
+                            {"surgeon": mid, "concern": c.get("concern", ""), "severity": "medium"}
+                            for mid, c in session.critiques.items()
+                        ],
+                        evidence=[{"type": "rebuttal_timeout", "verdicts": session.verdicts}],
+                        source_id=tid,
+                    )
+                    logger.info("Expired session %s escalated to arbiter", tid[:8])
+                except Exception as e:
+                    logger.debug("Arbiter escalation for expired session failed: %s", e)
             logger.info("Cleaning expired session %s", tid[:8])
             del self._sessions[tid]
         return len(expired)
