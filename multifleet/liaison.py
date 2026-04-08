@@ -156,7 +156,7 @@ class FleetLiaison:
             from multifleet.probes import create_engine
             engine = create_engine()
             result = engine.scan_one("injection_prioritizer")
-            if result and result.findings:
+            if result and result.findings and result.status not in ("error", "skipped"):
                 lines = ["[PROBE] Recommended context:"]
                 for f in result.findings[:3]:  # Top 3 only
                     lines.append(f"  - {f.title}")
