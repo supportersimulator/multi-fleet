@@ -121,6 +121,23 @@ def _default_nats_url():
     return "nats://localhost:4222"
 
 NATS_URL = os.environ.get("NATS_URL") or _default_nats_url()
+
+def _cluster_server_urls() -> list[str]:
+    """Get all NATS server URLs for clustered failover.
+
+    When NATS clustering is configured, clients connect to ALL servers.
+    If any server goes down, the client automatically fails over.
+    Falls back to single-server NATS_URL if clustering unavailable.
+    """
+    try:
+        from .nats_cluster import client_urls
+        urls = client_urls()
+        if len(urls) > 1:
+            logger.info("NATS cluster mode: %d servers (%s)", len(urls), ", ".join(urls))
+            return urls
+    except Exception:
+        pass
+    return [NATS_URL]
 SEED_DIR = "/tmp"
 STREAM_NAME = "FLEET"
 # ── Channel constants and classes (extracted to channels.py) ──
@@ -232,14 +249,21 @@ class FleetNerveNATS:
         self._sessions = SessionManager(self)
 
     async def connect(self):
-        """Connect to NATS server with auto-reconnect.
+        """Connect to NATS server(s) with auto-reconnect and cluster failover.
 
         CV-001: Supports token auth via NATS_TOKEN env var or config.
         If set, all connections are authenticated. If not, connects without
         auth (backward-compatible for LAN-only fleets).
+
+        Cluster mode: connects to all fleet NATS servers. If any server
+        goes down, the client automatically fails over to another.
         """
+        # Multi-seed: connect to all cluster servers for failover
+        servers = _cluster_server_urls()
+        if len(servers) == 1 and servers[0] != self.nats_url:
+            servers = [self.nats_url]
         connect_kwargs = dict(
-            servers=[self.nats_url],
+            servers=servers,
             name=self.node_id,
             reconnected_cb=self._on_reconnect,
             disconnected_cb=self._on_disconnect,
@@ -264,7 +288,8 @@ class FleetNerveNATS:
             logger.warning("NATS auth: no token configured (NATS_TOKEN env or config.protocol.natsToken) -- LAN-only mode")
 
         self.nc = await nats.connect(**connect_kwargs)
-        logger.info(f"Connected to NATS at {self.nats_url} as {self.node_id}")
+        connected_url = getattr(self.nc, 'connected_url', self.nats_url) or self.nats_url
+        logger.info(f"Connected to NATS at {connected_url} as {self.node_id} ({len(servers)} server(s) configured)")
 
         # Set up JetStream for persistent messaging
         self.js = self.nc.jetstream()

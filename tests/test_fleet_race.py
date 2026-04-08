@@ -216,7 +216,7 @@ class TestSubmitResult:
         race.submit_result(rid, "mac2", {"summary": "Approach B"})
 
         status = race.status(rid)
-        assert status["status"] in ("done", "blocked")  # AcceptanceGate may block
+        assert status["status"] in ("done", "blocked", "awaiting_arbiter")  # AcceptanceGate may block, arbiter may escalate
         assert status["winner"] is not None
         assert status["synthesis"] is not None
 
