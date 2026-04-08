@@ -8,6 +8,9 @@ from multifleet.probe_engine import ProbeCategory, ProbeEngine, ProbeRegistry
 from multifleet.probes.mirror_drift import probe_mirror_drift
 from multifleet.probes.stale_context import probe_stale_context
 from multifleet.probes.fleet_health import probe_fleet_health
+from multifleet.probes.repeated_failure import probe_repeated_failure
+from multifleet.probes.hidden_dependency import probe_hidden_dependency
+from multifleet.probes.task_diff_mismatch import probe_task_diff_mismatch
 
 
 def register_all(registry: ProbeRegistry) -> None:
@@ -32,6 +35,27 @@ def register_all(registry: ProbeRegistry) -> None:
         category=ProbeCategory.RELIABILITY,
         description="Wraps FleetDoctor results as a probe — daemon, NATS, peers, keychain.",
         triggers=["manual", "session_start"],
+    )
+    registry.register(
+        probe_id="repeated_failure",
+        fn=probe_repeated_failure,
+        category=ProbeCategory.RELIABILITY,
+        description="Detects files with 3+ failures in 24h — the 'stop circling' probe.",
+        triggers=["manual", "session_start", "session_end"],
+    )
+    registry.register(
+        probe_id="hidden_dependency",
+        fn=probe_hidden_dependency,
+        category=ProbeCategory.STRUCTURE,
+        description="Scans Python imports for undeclared dependencies not in requirements/pyproject.",
+        triggers=["manual", "commit"],
+    )
+    registry.register(
+        probe_id="task_diff_mismatch",
+        fn=probe_task_diff_mismatch,
+        category=ProbeCategory.CHANGE,
+        description="Flags when git diff touches areas unrelated to the task intent.",
+        triggers=["manual", "diff_ready"],
     )
 
 
