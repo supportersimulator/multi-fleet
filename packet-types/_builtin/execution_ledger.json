@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "execution_ledger",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Tracks execution progress against a VisionContract",
+  "payload_schema": {
+    "type": "object",
+    "required": ["id", "task_id", "vision_contract_id", "node_id", "steps"],
+    "properties": {
+      "id": {"type": "string"},
+      "task_id": {"type": "string"},
+      "vision_contract_id": {"type": "string"},
+      "node_id": {"type": "string"},
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["step_id", "description"],
+          "properties": {
+            "step_id": {"type": "string"},
+            "description": {"type": "string"},
+            "status": {
+              "type": "string",
+              "enum": ["pending", "in_progress", "done", "blocked", "skipped"]
+            },
+            "started_at": {"type": "number"},
+            "completed_at": {"type": "number"},
+            "evidence_refs": {"type": "array", "items": {"type": "string"}},
+            "probe_results": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      },
+      "iteration": {"type": "integer", "minimum": 1},
+      "progress": {"type": "number", "minimum": 0, "maximum": 1},
+      "is_blocked": {"type": "boolean"},
+      "created_at": {"type": "number"}
+    }
+  },
+  "ttl_s": 7200,
+  "priority": "normal"
+}

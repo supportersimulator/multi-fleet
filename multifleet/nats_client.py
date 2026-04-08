@@ -1810,6 +1810,29 @@ class FleetNerveNATS:
                         })
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/overlays":
+                    try:
+                        from .node_overlay import NodeOverlayManager
+                        mgr = self._get_overlay_manager()
+                        overlays = mgr.all_overlays()
+                        self._json_response(200, {
+                            "overlays": [o.to_dict() for o in overlays],
+                            "count": len(overlays),
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path.startswith("/overlay/"):
+                    try:
+                        from .node_overlay import NodeOverlayManager
+                        node_id = self.path[9:]  # strip "/overlay/"
+                        mgr = self._get_overlay_manager()
+                        overlay = mgr.get(node_id)
+                        if overlay:
+                            self._json_response(200, overlay.to_dict())
+                        else:
+                            self._json_response(404, {"error": f"no overlay for node '{node_id}'"})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -1840,6 +1863,20 @@ class FleetNerveNATS:
                 self.wfile.write(data)
 
             _race_manager = None
+            _overlay_manager = None
+
+            def _get_overlay_manager(self):
+                """Lazy-init NodeOverlayManager instance."""
+                if Handler._overlay_manager is not None:
+                    return Handler._overlay_manager
+                try:
+                    from .node_overlay import NodeOverlayManager
+                    Handler._overlay_manager = NodeOverlayManager()
+                    return Handler._overlay_manager
+                except Exception as e:
+                    logger.warning("NodeOverlayManager init failed: %s", e)
+                    from .node_overlay import NodeOverlayManager
+                    return NodeOverlayManager()
 
             def _get_race_manager(self):
                 """Lazy-init FleetRace instance."""
@@ -2074,6 +2111,44 @@ class FleetNerveNATS:
                             self._json_response(400, {"error": f"Unknown action: {action}. Use: start, advance, block"})
                     except ValueError as e:
                         self._json_response(400, {"error": str(e)})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/accept":
+                    try:
+                        from .acceptance_gate import AcceptanceGate
+                        task_id = body.get("task_id", "")
+                        branch = body.get("branch", "")
+                        if not task_id:
+                            self._json_response(400, {"error": "missing 'task_id'"})
+                            return
+                        # Build gate with available subsystems
+                        kwargs = {}
+                        try:
+                            from .evidence_ledger import EvidenceLedger
+                            kwargs["evidence_ledger"] = EvidenceLedger()
+                        except Exception:
+                            pass
+                        try:
+                            from .gains_gate import FleetGainsGate
+                            kwargs["gains_gate"] = FleetGainsGate(daemon_port=8855)
+                        except Exception:
+                            pass
+                        mgr = self._get_overlay_manager()
+                        kwargs["overlay_manager"] = mgr
+                        gate = AcceptanceGate(**kwargs)
+                        ctx = body.get("context", {})
+                        result = gate.evaluate(task_id, branch, context=ctx)
+                        self._json_response(200, result.to_dict())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/overlay":
+                    try:
+                        from .node_overlay import NodeOverlayManager
+                        mgr = self._get_overlay_manager()
+                        node_id = body.get("node_id", daemon.node_id)
+                        updates = {k: v for k, v in body.items() if k != "node_id"}
+                        overlay = mgr.update(node_id, **updates)
+                        self._json_response(200, overlay.to_dict())
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
                 else:
