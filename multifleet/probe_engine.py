@@ -303,6 +303,10 @@ class ProbeEngine:
             "by_severity": by_severity,
             "by_category": by_category,
             "by_status": by_status,
+            "surgeon_intensity": self.determine_surgeon_intensity(),
+            "has_blocking": any(
+                f.blast_radius == "high" for r in self._results_cache for f in r.findings
+            ),
             "last_trigger": self._last_scan_trigger,
             "last_scan_at": (
                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._last_scan_at))
@@ -310,3 +314,34 @@ class ProbeEngine:
                 else None
             ),
         }
+
+    def determine_surgeon_intensity(self) -> str:
+        """Map probe results to 3-Surgeons intensity level.
+
+        Returns:
+            "full" — blocking findings or critical status
+            "standard" — high severity non-blocking findings
+            "light" — all clear or low/medium only
+        """
+        has_critical = any(r.status == "critical" for r in self._results_cache)
+        has_high_blast = any(
+            f.blast_radius == "high"
+            for r in self._results_cache
+            for f in r.findings
+        )
+        has_high_severity = any(r.severity in ("high", "critical") for r in self._results_cache)
+
+        if has_critical or has_high_blast:
+            return "full"
+        if has_high_severity:
+            return "standard"
+        return "light"
+
+    def blocking_findings(self) -> list[ProbeFinding]:
+        """Return all findings with high blast radius (blocking)."""
+        return [
+            f
+            for r in self._results_cache
+            for f in r.findings
+            if f.blast_radius == "high"
+        ]
