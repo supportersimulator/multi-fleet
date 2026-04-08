@@ -607,7 +607,9 @@ class FleetRace:
                 "branch": sole["branch"],
                 "summary": sole["result"].get("summary", ""),
             }
-            race["status"] = "done"
+            self._run_acceptance_gate(race)
+            if race["status"] != "blocked":
+                race["status"] = "done"
             self._record_evidence("race_completed", {
                 "race_id": race["race_id"],
                 "winner": race["winner"],
@@ -679,7 +681,10 @@ class FleetRace:
                 "dissent": list(race["rebuttals"]),
             }
 
-        race["status"] = "done"
+        # Run acceptance gate before marking done
+        self._run_acceptance_gate(race)
+        if race["status"] != "blocked":
+            race["status"] = "done"
 
         self._record_evidence("race_completed", {
             "race_id": race["race_id"],
@@ -687,6 +692,7 @@ class FleetRace:
             "completions": len(completed),
             "engine": race["synthesis"].get("engine", "unknown"),
             "confidence": race["synthesis"].get("confidence", 0.0),
+            "accepted": race.get("acceptance", {}).get("accepted", True),
             "elapsed_s": round(time.time() - race["started_at"], 1),
         })
 
@@ -723,6 +729,53 @@ class FleetRace:
                             race["race_id"], result.get("action", "?"))
         except (ImportError, Exception) as e:
             logger.debug("Rebuttal finalization skipped: %s", e)
+
+    def _run_acceptance_gate(self, race: dict) -> dict:
+        """Run acceptance gate on race results — the corrigibility check.
+
+        Returns AcceptanceDecision dict. If gate fails, race status
+        stays at 'blocked' instead of 'done'.
+        """
+        try:
+            from multifleet.acceptance_gate import AcceptanceGate
+
+            synthesis = race.get("synthesis", {})
+            packet = race.get("epistemic_packet", {})
+            policy = (packet or {}).get("acceptance_policy", "standard")
+
+            gate = AcceptanceGate(strict=(policy == "strict"))
+            decision = gate.evaluate(
+                probe_results=(packet or {}).get("probe_results", []),
+                surgeon_resolved=synthesis.get("engine") == "chief_synthesis",
+                surgeon_intensity=(packet or {}).get("required_surgeon_intensity", "light"),
+                surgeon_dissent_count=len(synthesis.get("dissent_preserved", [])),
+                invariants_satisfied=True,  # TODO: wire real invariant checks
+                evidence_count=1 if synthesis.get("reasoning") else 0,
+                epistemic_packet=packet,
+            )
+
+            race["acceptance"] = decision.to_dict()
+            if not decision.accepted:
+                race["status"] = "blocked"
+                logger.warning(
+                    "Race %s BLOCKED by acceptance gate: %s",
+                    race["race_id"], decision.reason,
+                )
+            else:
+                logger.info("Race %s ACCEPTED: %s", race["race_id"], decision.reason)
+
+            self._record_evidence("acceptance_decision", {
+                "race_id": race["race_id"],
+                "accepted": decision.accepted,
+                "reason": decision.reason,
+                "blocking_issues": decision.blocking_issues,
+            })
+
+            return decision.to_dict()
+        except (ImportError, Exception) as e:
+            logger.warning("Acceptance gate unavailable: %s", e)
+            race["acceptance"] = {"accepted": True, "reason": "gate unavailable (degraded)"}
+            return race["acceptance"]
 
     # ── Evidence Recording ──────────────────────────────────────────
 
