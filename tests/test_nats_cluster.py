@@ -26,11 +26,11 @@ def fleet_config(tmp_path):
     """Create a temporary fleet config."""
     config = {
         "fleetId": "test-fleet",
-        "chief": {"nodeId": "mac1", "host": "10.0.0.1"},
+        "chief": {"nodeId": "mac1", "host": "198.51.100.1"},
         "nodes": {
-            "mac1": {"host": "10.0.0.1", "role": "chief", "user": "test"},
-            "mac2": {"host": "10.0.0.2", "role": "worker", "user": "test"},
-            "mac3": {"host": "10.0.0.3", "role": "worker", "user": "test"},
+            "mac1": {"host": "198.51.100.1", "role": "chief", "user": "test"},
+            "mac2": {"host": "198.51.100.2", "role": "worker", "user": "test"},
+            "mac3": {"host": "198.51.100.3", "role": "worker", "user": "test"},
         },
         "protocol": {"version": "multifleet-v2"},
     }
@@ -58,12 +58,12 @@ class TestGenerateConfig:
             content = generate_config("mac1")
 
         # mac1's config should route to mac2 and mac3, NOT to itself
-        assert "10.0.0.2" in content
-        assert "10.0.0.3" in content
+        assert "198.51.100.2" in content
+        assert "198.51.100.3" in content
         # Should not have self-route
         lines = [l.strip() for l in content.split("\n") if "nats-route://" in l]
         for line in lines:
-            assert "10.0.0.1" not in line
+            assert "198.51.100.1" not in line
 
     def test_worker_routes_to_all_peers(self, fleet_config):
         config, conf_path = fleet_config
@@ -71,12 +71,12 @@ class TestGenerateConfig:
             content = generate_config("mac2")
 
         assert "server_name: mac2" in content
-        assert "10.0.0.1" in content  # routes to chief
-        assert "10.0.0.3" in content  # routes to mac3
+        assert "198.51.100.1" in content  # routes to chief
+        assert "198.51.100.3" in content  # routes to mac3
         # No self-route
         lines = [l.strip() for l in content.split("\n") if "nats-route://" in l]
         for line in lines:
-            assert "10.0.0.2" not in line
+            assert "198.51.100.2" not in line
 
     def test_jetstream_enabled(self, fleet_config):
         config, conf_path = fleet_config
@@ -127,8 +127,8 @@ class TestClientUrls:
         # Should have 3 URLs (self via loopback + 2 peers)
         assert len(urls) == 3
         assert f"nats://127.0.0.1:{CLIENT_PORT}" in urls[0]  # self is first
-        assert any("10.0.0.2" in u for u in urls)
-        assert any("10.0.0.3" in u for u in urls)
+        assert any("198.51.100.2" in u for u in urls)
+        assert any("198.51.100.3" in u for u in urls)
 
     def test_self_first_for_latency(self, fleet_config):
         config, conf_path = fleet_config
@@ -155,7 +155,7 @@ class TestDetectNodeId:
 
     def test_ip_match(self, fleet_config):
         config, _ = fleet_config
-        with patch("multifleet.nats_cluster._get_local_ip", return_value="10.0.0.2"), \
+        with patch("multifleet.nats_cluster._get_local_ip", return_value="198.51.100.2"), \
              patch.dict(os.environ, {}, clear=True):
             # Remove MULTIFLEET_NODE_ID if set
             env = dict(os.environ)
@@ -183,8 +183,8 @@ class TestServerStatus:
         routez = json.dumps({
             "num_routes": 2,
             "routes": [
-                {"remote_id": "abc12345", "ip": "10.0.0.2", "port": 6222},
-                {"remote_id": "def67890", "ip": "10.0.0.3", "port": 6222},
+                {"remote_id": "abc12345", "ip": "198.51.100.2", "port": 6222},
+                {"remote_id": "def67890", "ip": "198.51.100.3", "port": 6222},
             ],
         }).encode()
 
