@@ -1895,6 +1895,87 @@ def fleet_race_status(race_id: str = "", action: str = "status") -> dict:
         return {"error": f"unknown action: {action}, expected: status|list|submit"}
 
 
+# ── Task Orchestrator ──
+
+_task_orchestrator = None
+
+def _get_task_orchestrator():
+    """Get or create a TaskOrchestrator instance (lazy init)."""
+    global _task_orchestrator
+    if _task_orchestrator is not None:
+        return _task_orchestrator
+    try:
+        from multifleet.task_orchestrator import TaskOrchestrator
+        _task_orchestrator = TaskOrchestrator(daemon_port=FLEET_NERVE_PORT, node_id=NODE_ID)
+        return _task_orchestrator
+    except Exception as e:
+        logger.warning(f"TaskOrchestrator init failed: {e}")
+        return None
+
+
+def fleet_orchestrate(action: str = "run", task: str = "", criteria: str = "",
+                      parallel: str = "false", nodes: str = "",
+                      task_id: str = "") -> dict:
+    """Run the full task lifecycle — idea to wisdom in one command.
+
+    Actions:
+      run    — execute full lifecycle (inbox -> probes -> execute -> review -> promote -> record)
+      status — check task progress by task_id
+      list   — list all orchestrated tasks
+
+    Args:
+        action: run, status, or list
+        task: Task description (required for run)
+        criteria: Comma-separated done criteria (required for run)
+        parallel: "true" to use fleet_race across nodes (default: "false")
+        nodes: Comma-separated node IDs for parallel execution
+        task_id: Task ID for status action
+    """
+    orch = _get_task_orchestrator()
+    if orch is None:
+        return {"error": "TaskOrchestrator not available"}
+
+    if action == "run":
+        if not task:
+            return {"error": "task description required for run action"}
+        if not criteria:
+            return {"error": "criteria required (comma-separated done conditions)"}
+        criteria_list = [c.strip() for c in criteria.split(",") if c.strip()]
+        is_parallel = parallel.lower() in ("true", "1", "yes")
+        node_list = [n.strip() for n in nodes.split(",") if n.strip()] if nodes else None
+
+        audit = _get_audit()
+        if audit:
+            audit.record("orchestrate_start", "fleet_orchestrate", "", "starting", 0,
+                          metadata={"task": task[:100], "parallel": is_parallel})
+
+        result = orch.run_task(task, done_criteria=criteria_list,
+                               parallel=is_parallel, nodes=node_list)
+
+        eventbus = _get_eventbus()
+        if eventbus:
+            eventbus.emit("orchestrator.complete", {
+                "task_id": result.get("id"),
+                "status": result.get("status"),
+                "parallel": is_parallel,
+                "elapsed_s": result.get("elapsed_s", 0),
+            }, broadcast=True)
+
+        return result
+
+    elif action == "status":
+        if not task_id:
+            return {"error": "task_id required for status action"}
+        return orch.status(task_id)
+
+    elif action == "list":
+        tasks = orch.list_tasks()
+        return {"tasks": tasks, "count": len(tasks)}
+
+    else:
+        return {"error": f"unknown action: {action}, expected: run|status|list"}
+
+
 # ── Liaison ──
 
 _liaison_instance = None
@@ -2014,69 +2095,60 @@ def fleet_hierarchy(action: str, node_id: str = "", role: str = "",
     return {"error": f"Unknown action: {action}. Use: status, register, promote, elect, route, nats"}
 
 
-def fleet_metrics(format: str = "prometheus") -> dict:
-    """Export fleet metrics in Prometheus text exposition format.
+def fleet_metrics(format: str = "prometheus", action: str = "collect") -> dict:
+    """Export fleet metrics — per-node or fleet-wide aggregated.
 
-    Collects counters/gauges/histograms from FleetMetrics singleton,
-    daemon health, doctor checks, probe findings, lease stats, and
-    rebuttal sessions. Returns Prometheus-compatible scrape output.
+    Actions:
+        collect: Collect metrics from all reachable nodes (default)
+        aggregate: Fleet-wide totals across all nodes
+        trends: Message rates, error rates over time window
+        productivity: Fleet productivity score (0-100)
+        prometheus: Prometheus text exposition (per-node, legacy compat)
 
     Args:
         format: Output format — 'prometheus' (text exposition) or 'json' (raw snapshot)
+        action: What to compute — collect, aggregate, trends, productivity, prometheus
     """
     try:
-        from multifleet.metrics import fleet_metrics as fm_singleton
-        snapshot = fm_singleton.snapshot()
-    except Exception:
-        snapshot = {}
-
-    # Doctor report (optional, best-effort)
-    doctor_report = None
-    try:
-        from multifleet.doctor import FleetDoctor
-        doc = FleetDoctor()
-        report = doc.run()
-        doctor_report = report.to_dict()
+        from multifleet.fleet_metrics import FleetMetricsAggregator
+        fleet_agg = FleetMetricsAggregator(daemon_port=FLEET_NERVE_PORT)
     except Exception as e:
-        logger.debug("Doctor unavailable for metrics: %s", e)
+        return {"error": f"FleetMetricsAggregator unavailable: {e}"}
 
-    # Probe results (optional)
-    probe_results = None
+    if action == "aggregate":
+        try:
+            return fleet_agg.aggregate()
+        except Exception as e:
+            return {"error": str(e), "traceback": traceback.format_exc()}
 
-    # Lease stats (optional)
-    lease_stats = None
+    if action == "trends":
+        try:
+            # Need at least one collect first
+            fleet_agg.collect()
+            return fleet_agg.trends()
+        except Exception as e:
+            return {"error": str(e), "traceback": traceback.format_exc()}
 
-    # Rebuttal count (optional)
-    rebuttal_active = 0
+    if action == "productivity":
+        try:
+            return fleet_agg.productivity_score()
+        except Exception as e:
+            return {"error": str(e), "traceback": traceback.format_exc()}
+
+    if action == "prometheus" or format == "prometheus":
+        try:
+            text = fleet_agg.to_prometheus()
+            return {"format": "prometheus", "content_type": "text/plain; version=0.0.4", "body": text}
+        except Exception as e:
+            return {"error": str(e), "traceback": traceback.format_exc()}
+
+    # Default: collect (json)
     try:
-        from multifleet.cross_rebuttal import RebuttalManager
-        rm = RebuttalManager()
-        rebuttal_active = len(rm.active_sessions())
-    except Exception:
-        pass
-
-    if format == "json":
+        nodes = fleet_agg.collect()
         return {
             "node_id": NODE_ID,
-            "metrics": snapshot,
-            "doctor": doctor_report,
-            "rebuttal_active": rebuttal_active,
+            "nodes": {nid: nm.to_dict() for nid, nm in nodes.items()},
         }
-
-    # Prometheus text format
-    try:
-        from multifleet.prometheus_export import generate_prometheus_text
-        text = generate_prometheus_text(
-            node_id=NODE_ID,
-            daemon_url=f"http://127.0.0.1:{FLEET_NERVE_PORT}",
-            metrics_snapshot=snapshot,
-            doctor_report=doctor_report,
-            probe_results=probe_results,
-            lease_stats=lease_stats,
-            rebuttal_active=rebuttal_active,
-            include_health=True,
-        )
-        return {"format": "prometheus", "content_type": "text/plain; version=0.0.4", "body": text}
     except Exception as e:
         return {"error": str(e), "traceback": traceback.format_exc()}
 
@@ -2844,11 +2916,12 @@ TOOLS = [
     },
     {
         "name": "fleet_metrics",
-        "description": "Export fleet metrics in Prometheus text exposition format — counters, gauges, histograms, doctor checks, probe findings, leases, rebuttals. Scrape-ready for Prometheus/Grafana.",
+        "description": "Fleet-wide metrics aggregation — collect from all nodes, aggregate totals, compute trends (msg/min, errors/min), productivity score (0-100), or export Prometheus text. Actions: collect, aggregate, trends, productivity, prometheus.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "format": {"type": "string", "description": "Output format: 'prometheus' (text exposition, default) or 'json' (raw snapshot)", "default": "prometheus"},
+                "action": {"type": "string", "description": "What to compute: collect (per-node), aggregate (fleet totals), trends (rates over time), productivity (score 0-100), prometheus (text exposition)", "default": "collect", "enum": ["collect", "aggregate", "trends", "productivity", "prometheus"]},
+                "format": {"type": "string", "description": "Output format: 'prometheus' or 'json' (only used with collect action)", "default": "json"},
             },
             "required": [],
         },
@@ -2941,6 +3014,23 @@ TOOLS = [
             "required": [],
         },
         "fn": fleet_invariance,
+    },
+    {
+        "name": "fleet_orchestrate",
+        "description": "Run the full task lifecycle — idea to wisdom in one command. Ties together: truth ladder (inbox), probes (baseline), fleet race or supervisor (execute), acceptance gate (review), truth promotion (wisdom), and evidence ledger (audit). Actions: run (full lifecycle), status (check task), list (all tasks).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["run", "status", "list"], "description": "Action: run (full lifecycle), status (check task), list (all tasks)", "default": "run"},
+                "task": {"type": "string", "description": "Task description (required for run)"},
+                "criteria": {"type": "string", "description": "Comma-separated done criteria (required for run)"},
+                "parallel": {"type": "string", "description": "true to use fleet_race across nodes (default: false)", "default": "false"},
+                "nodes": {"type": "string", "description": "Comma-separated node IDs for parallel execution"},
+                "task_id": {"type": "string", "description": "Task ID for status action"},
+            },
+            "required": [],
+        },
+        "fn": fleet_orchestrate,
     },
 ]
 

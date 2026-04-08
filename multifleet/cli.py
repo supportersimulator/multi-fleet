@@ -528,6 +528,72 @@ def cmd_probe(_args):
     _print_json(data)
 
 
+def cmd_orchestrate(args):
+    """Run the full task lifecycle — idea to wisdom."""
+    if args.action == "run":
+        if not args.task:
+            _die("--task required for run action")
+        criteria = [c.strip() for c in args.criteria.split(",") if c.strip()] if args.criteria else ["Complete"]
+        body = {
+            "action": "run",
+            "task": args.task,
+            "criteria": ",".join(criteria),
+            "parallel": "true" if args.parallel else "false",
+        }
+        if args.nodes:
+            body["nodes"] = args.nodes
+
+        if _theater:
+            _theater.fleet_banner()
+            if _HAS_RICH:
+                _console.print(f"[bold cyan]ORCHESTRATING[/] {args.task}")
+                if args.parallel:
+                    _console.print(f"[dim]Mode: parallel race | Nodes: {args.nodes or 'all'}[/]")
+                _console.print(f"[dim]Criteria: {', '.join(criteria)}[/]")
+            else:
+                print(f"ORCHESTRATING: {args.task}")
+
+        result = _post("/orchestrate", body, timeout=30)
+        _check_error(result)
+
+        if "error" in result:
+            _fail(result["error"])
+        elif _HAS_RICH:
+            status = result.get("status", "?")
+            color = "green" if status == "complete" else "yellow"
+            _console.print(f"\n[bold {color}]{status.upper()}[/] in {result.get('elapsed_s', '?')}s")
+            phases = result.get("phases", {})
+            for name, phase in phases.items():
+                ps = phase.get("status", "?")
+                sym = "[green]+[/]" if ps in ("ok", "accepted") else "[yellow]~[/]" if ps == "skipped" else "[red]-[/]"
+                _console.print(f"  {sym} {name}: {ps} ({phase.get('elapsed_ms', '?')}ms)")
+            errors = result.get("errors", [])
+            if errors:
+                _console.print(f"\n[bold yellow]Errors ({len(errors)}):[/]")
+                for e in errors:
+                    _console.print(f"  [yellow]- {e}[/]")
+        else:
+            _ok(f"Task {result.get('id', '?')}: {result.get('status', '?')}")
+            _print_json(result)
+
+    elif args.action == "status":
+        if not args.task_id:
+            _die("--task-id required for status action")
+        result = _post("/orchestrate", {"action": "status", "task_id": args.task_id})
+        _check_error(result)
+        _print_json(result)
+
+    elif args.action == "list":
+        result = _post("/orchestrate", {"action": "list"})
+        _check_error(result)
+        tasks = result.get("tasks", [])
+        _header(f"Orchestrated Tasks ({len(tasks)})")
+        for t in tasks:
+            status_sym = "+" if t.get("status") == "complete" else "~"
+            mode = "parallel" if t.get("parallel") else "local"
+            print(f"  [{status_sym}] {t['id']}  {t['description']}  ({mode}, {t.get('elapsed_s', '?')}s)")
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -606,6 +672,16 @@ def main():
     ov_p = sub.add_parser("overlay", help="Node overlay state")
     ov_p.add_argument("node", nargs="?", help="Specific node ID (omit for all)")
 
+    # orchestrate
+    orch_p = sub.add_parser("orchestrate", help="Run full task lifecycle — idea to wisdom")
+    orch_p.add_argument("action", choices=["run", "status", "list"], nargs="?", default="run",
+                        help="run=full lifecycle, status=check task, list=all tasks")
+    orch_p.add_argument("--task", help="Task description (required for run)")
+    orch_p.add_argument("--criteria", help="Comma-separated done criteria")
+    orch_p.add_argument("--parallel", action="store_true", help="Use fleet_race for parallel execution")
+    orch_p.add_argument("--nodes", help="Comma-separated node IDs for parallel")
+    orch_p.add_argument("--task-id", help="Task ID for status action")
+
     # probe / scan
     sub.add_parser("probe", help="Run probe scan and show findings")
 
@@ -637,6 +713,7 @@ def main():
         "supervisor": cmd_supervisor,
         "overlay": cmd_overlay,
         "probe": cmd_probe,
+        "orchestrate": cmd_orchestrate,
         "theater": cmd_theater,
     }
 
