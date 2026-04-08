@@ -268,6 +268,34 @@ def _render_surgeon_status(snapshot: dict) -> str:
 </section>"""
 
 
+def _render_arbiter_pending(snapshot: dict) -> str:
+    """Render pending arbiter decisions badge (Zone 3 — Chief Synthesis)."""
+    arbiter = snapshot.get("arbiter_pending", [])
+    if not arbiter:
+        return ""
+
+    count = len(arbiter)
+    items = ""
+    for d in arbiter[:5]:
+        task_id = _esc(d.get("task_id", "?"))
+        confidence = d.get("confidence", 0.0)
+        dissent_count = len(d.get("dissent", []))
+        conf_color = "#22c55e" if confidence >= 0.7 else "#eab308" if confidence >= 0.4 else "#ef4444"
+        items += f"""<tr>
+        <td><a href="/arbiter/{task_id}" style="color:#60a5fa;">{task_id[:12]}</a></td>
+        <td><span style="color:{conf_color};font-weight:600;">{confidence:.0%}</span></td>
+        <td>{dissent_count}</td>
+    </tr>"""
+
+    return f"""<section>
+    <h2 style="color:#f59e0b;">DECISIONS AWAITING REVIEW ({count})</h2>
+    <table>
+        <thead><tr><th>Task</th><th>Confidence</th><th>Dissent</th></tr></thead>
+        <tbody>{items}</tbody>
+    </table>
+</section>"""
+
+
 def _render_static_dashboard(snapshot: dict) -> str:
     """Original static dashboard renderer (fallback)."""
     ts = _format_ts(snapshot.get("timestamp", time.time()))
@@ -280,6 +308,7 @@ def _render_static_dashboard(snapshot: dict) -> str:
     events = _render_events(snapshot)
     probe_review = _render_probe_review(snapshot)
     surgeon_status = _render_surgeon_status(snapshot)
+    arbiter_pending = _render_arbiter_pending(snapshot)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -313,6 +342,7 @@ def _render_static_dashboard(snapshot: dict) -> str:
 {probe_review}
 {rebuttals}
 {surgeon_status}
+{arbiter_pending}
 {events}
 </body>
 </html>"""

@@ -28,6 +28,7 @@ _EVENT_MAP = {
     "fleet.lease.acquired": "statusBar",
     "fleet.lease.released": "statusBar",
     "fleet.message.delivered": "notification",
+    "fleet.arbiter.pending": "badge",
 }
 
 # Severity mapping for notifications
@@ -36,6 +37,7 @@ _SEVERITY_MAP = {
     "fleet.probe.finding": "info",
     "fleet.rebuttal.proposed": "info",
     "fleet.message.delivered": "info",
+    "fleet.arbiter.pending": "info",
 }
 
 
@@ -89,6 +91,14 @@ class IDEBridge:
                 severity="info",
                 message=f"Rebuttal proposed: {data.get('subject', data.get('title', '?'))}",
                 source="rebuttal",
+            )
+
+        if event_type == "fleet.arbiter.pending":
+            count = data.get("count", 1)
+            self._push_notification(
+                severity="info",
+                message=f"{count} decision(s) awaiting human review",
+                source="arbiter",
             )
 
         return result
@@ -213,11 +223,45 @@ class IDEBridge:
                 "count": unread,
             })
 
+        # Add pending arbiter decisions if any
+        pending_decisions = self.get_pending_decisions()
+        if pending_decisions:
+            decision_count = len(pending_decisions)
+            decision_items = []
+            for d in pending_decisions[:5]:
+                tid = d.get("task_id", "?")
+                conf = d.get("confidence", 0.0)
+                decision_items.append({
+                    "id": f"arbiter-{tid}",
+                    "label": f"{tid[:12]} ({conf:.0%})",
+                    "icon": "law",
+                    "badge": len(d.get("dissent", [])),
+                    "url": f"/arbiter/{tid}",
+                })
+            sections.append({
+                "id": "arbiter",
+                "label": "Decisions Awaiting Review",
+                "items": decision_items,
+                "count": decision_count,
+            })
+
         return {
             "sections": sections,
             "connected": daemon.get("status") != "unreachable",
             "node_id": snap.get("node_id", ""),
         }
+
+    def get_pending_decisions(self) -> list[dict]:
+        """Get pending arbiter decisions for activity bar badge."""
+        try:
+            from multifleet.arbiter_view import ArbiterView
+            # Check if there's a web-server-level arbiter instance
+            from multifleet.web_server import _arbiter_view
+            if _arbiter_view is not None:
+                return _arbiter_view.list_pending()
+        except (ImportError, Exception):
+            pass
+        return []
 
     def get_pending_notifications(self) -> list[dict]:
         """Return and clear pending notifications."""

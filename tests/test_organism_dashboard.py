@@ -201,8 +201,10 @@ class TestProductBridgeSurgeonAdapter:
             "review_type": "cardio_review",
         }
 
-        with patch("multifleet.product_bridge.SurgeonAdapter", return_value=mock_adapter):
-            # Patch the import inside fleet_to_surgeons
+        mock_module = MagicMock()
+        mock_module.SurgeonAdapter.return_value = mock_adapter
+
+        with patch.dict("sys.modules", {"multifleet.surgeon_adapter": mock_module}):
             result = bridge.fleet_to_surgeons({
                 "task_id": "test-1",
                 "claim": "Test claim",
@@ -233,16 +235,15 @@ class TestProductBridgeSurgeonAdapter:
 
 class TestWebServerEndpoints:
     def test_probe_review_endpoint(self):
-        """GET /api/probe-review returns JSON."""
+        """GET /api/probe-review returns JSON with probes data."""
         from multifleet.web_server import FleetWebHandler
 
-        handler = FleetWebHandler
-        # Test the data fetcher directly
         mock_handler = MagicMock(spec=FleetWebHandler)
-        mock_handler._get_probe_review = FleetWebHandler._get_probe_review
 
-        with patch("multifleet.web_server.run_probe_review", return_value=SAMPLE_PROBE_REVIEW):
-            # Direct method test
+        mock_module = MagicMock()
+        mock_module.run_probe_review.return_value = SAMPLE_PROBE_REVIEW
+
+        with patch.dict("sys.modules", {"multifleet.probe_review": mock_module}):
             result = FleetWebHandler._get_probe_review(mock_handler)
             assert "probes" in result or "error" in result
 

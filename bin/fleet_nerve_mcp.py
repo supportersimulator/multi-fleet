@@ -2581,6 +2581,77 @@ def fleet_wisdom(action: str = "stats", hours: str = "24",
     return {"error": f"Unknown action: {action}. Use: stats, promote, files"}
 
 
+def fleet_arbiter(action: str, task_id: str = "", feedback: str = "",
+                  chosen_branch: str = "") -> dict:
+    """Human arbiter interface for synthesis decisions.
+
+    Actions: present, approve, override, request_changes, defer, list_pending
+    """
+    try:
+        from multifleet.arbiter_view import ArbiterView
+        from multifleet.synthesis import ChiefSynthesis
+        from multifleet.evidence_ledger import EvidenceLedger
+    except ImportError as e:
+        return {"error": f"arbiter modules not available: {e}"}
+
+    try:
+        from multifleet.cross_rebuttal import RebuttalManager
+        rebuttal_mgr = RebuttalManager()
+    except ImportError:
+        rebuttal_mgr = None
+
+    # Use module-level singleton to preserve state across calls
+    global _arbiter_instance
+    if "_arbiter_instance" not in globals() or _arbiter_instance is None:
+        synthesis = ChiefSynthesis()
+        evidence = EvidenceLedger()
+        _arbiter_instance = ArbiterView(
+            synthesis=synthesis,
+            evidence_ledger=evidence,
+            rebuttal_mgr=rebuttal_mgr,
+        )
+
+    arbiter = _arbiter_instance
+
+    if action == "present":
+        if not task_id:
+            return {"error": "task_id required for present action"}
+        return arbiter.present_decision(task_id)
+
+    if action == "approve":
+        if not task_id:
+            return {"error": "task_id required for approve action"}
+        return arbiter.approve(task_id)
+
+    if action == "override":
+        if not task_id:
+            return {"error": "task_id required for override action"}
+        if not chosen_branch:
+            return {"error": "chosen_branch required for override action"}
+        return arbiter.override(task_id, chosen_branch, feedback or "No reason given")
+
+    if action == "request_changes":
+        if not task_id:
+            return {"error": "task_id required for request_changes action"}
+        if not feedback:
+            return {"error": "feedback required for request_changes action"}
+        return arbiter.request_changes(task_id, feedback)
+
+    if action == "defer":
+        if not task_id:
+            return {"error": "task_id required for defer action"}
+        return arbiter.defer(task_id)
+
+    if action == "list_pending":
+        pending = arbiter.list_pending()
+        return {"pending": pending, "count": len(pending)}
+
+    return {"error": f"Unknown action: {action}. Use: present, approve, override, request_changes, defer, list_pending"}
+
+
+_arbiter_instance = None
+
+
 def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
     """Start/stop/status the fleet web server."""
     try:
@@ -3100,6 +3171,21 @@ TOOLS = [
             "required": [],
         },
         "fn": fleet_orchestrate,
+    },
+    {
+        "name": "fleet_arbiter",
+        "description": "Human arbiter interface for synthesis decisions. When machines disagree, presents recommendations, alternatives, evidence, dissent, and one-click actions (approve/override/request_changes/defer). Actions: present (show decision), approve, override, request_changes, defer, list_pending.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["present", "approve", "override", "request_changes", "defer", "list_pending"], "description": "Arbiter action"},
+                "task_id": {"type": "string", "description": "Task ID (required for present/approve/override/request_changes/defer)"},
+                "feedback": {"type": "string", "description": "Feedback text (for request_changes) or override reason (for override)"},
+                "chosen_branch": {"type": "string", "description": "Branch to use (for override)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_arbiter,
     },
 ]
 

@@ -43,6 +43,7 @@ _sse_lock = threading.Lock()
 # ── Singleton references (set via start_fleet_server) ──
 _aggregator = None
 _ide_bridge = None
+_arbiter_view = None
 _server_instance: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
 
@@ -70,6 +71,25 @@ def _get_ide_bridge():
         except Exception as e:
             logger.warning("Could not init IDE bridge: %s", e)
     return _ide_bridge
+
+
+def _get_arbiter_view():
+    """Lazy-init arbiter view."""
+    global _arbiter_view
+    if _arbiter_view is None:
+        try:
+            from multifleet.arbiter_view import ArbiterView
+            from multifleet.synthesis import ChiefSynthesis
+            from multifleet.evidence_ledger import EvidenceLedger
+            from multifleet.cross_rebuttal import RebuttalManager
+            _arbiter_view = ArbiterView(
+                synthesis=ChiefSynthesis(),
+                evidence_ledger=EvidenceLedger(),
+                rebuttal_mgr=RebuttalManager(),
+            )
+        except Exception as e:
+            logger.warning("Could not init arbiter view: %s", e)
+    return _arbiter_view
 
 
 def _fetch_daemon(path: str, timeout: float = 1.5) -> Optional[dict]:
@@ -127,6 +147,10 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_prometheus()
         elif path == "/events":
             self._serve_sse()
+        elif path == "/arbiter/pending":
+            self._serve_arbiter_pending()
+        elif path.startswith("/arbiter/"):
+            self._serve_arbiter_view(path)
         elif path.startswith("/extension/"):
             self._serve_extension(path)
         elif path == "/health":
@@ -139,6 +163,87 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             })
         else:
             self.send_error(404, f"Not found: {path}")
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+
+        if path.startswith("/arbiter/") and path.count("/") >= 3:
+            self._handle_arbiter_action(path)
+        else:
+            self.send_error(404, f"Not found: {path}")
+
+    def _handle_arbiter_action(self, path: str):
+        """Handle POST /arbiter/<task_id>/<action>."""
+        parts = path.strip("/").split("/")
+        if len(parts) < 3:
+            self.send_error(400, "Invalid arbiter path")
+            return
+        task_id = parts[1]
+        action = parts[2]
+
+        # Read POST body
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = {}
+        if content_length > 0:
+            raw = self.rfile.read(content_length)
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                body = {}
+
+        arbiter = _get_arbiter_view()
+        if arbiter is None:
+            self._serve_json({"error": "Arbiter view not available"})
+            return
+
+        if action == "approve":
+            result = arbiter.approve(task_id)
+        elif action == "override":
+            chosen = body.get("chosen_branch", "")
+            reason = body.get("reason", body.get("feedback", ""))
+            if not chosen:
+                self._serve_json({"error": "chosen_branch required"})
+                return
+            result = arbiter.override(task_id, chosen, reason)
+        elif action == "request_changes":
+            feedback = body.get("feedback", "")
+            if not feedback:
+                self._serve_json({"error": "feedback required"})
+                return
+            result = arbiter.request_changes(task_id, feedback)
+        elif action == "defer":
+            result = arbiter.defer(task_id)
+        else:
+            self.send_error(400, f"Unknown arbiter action: {action}")
+            return
+
+        self._serve_json(result)
+
+    def _serve_arbiter_view(self, path: str):
+        """Serve HTML arbiter view for a specific task."""
+        parts = path.strip("/").split("/")
+        if len(parts) < 2:
+            self.send_error(400, "Missing task_id")
+            return
+        task_id = parts[1]
+
+        arbiter = _get_arbiter_view()
+        if arbiter is None:
+            self._send(503, b"Arbiter view not available", "text/plain")
+            return
+
+        decision = arbiter.present_decision(task_id)
+        html_content = arbiter.render_html(decision)
+        self._send(200, html_content.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _serve_arbiter_pending(self):
+        """Serve list of pending arbiter decisions as JSON."""
+        arbiter = _get_arbiter_view()
+        if arbiter is None:
+            self._serve_json({"pending": [], "count": 0, "error": "arbiter not available"})
+            return
+        pending = arbiter.list_pending()
+        self._serve_json({"pending": pending, "count": len(pending)})
 
     # ── Route handlers ──
 
