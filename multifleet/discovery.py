@@ -59,6 +59,15 @@ class FleetDiscoveryManager:
                     peer_ip = data.get("ip", "")
                     peer_port = data.get("port", 8855)
                     nerve._discovery.add_nats_peer(node, ip=peer_ip, port=peer_port)
+                # Wire 5: Update node overlay from heartbeat health data
+                try:
+                    from multifleet.node_overlay import NodeOverlayManager
+                    if hasattr(nerve, '_http_handler_cls') and hasattr(nerve._http_handler_cls, '_overlay_manager'):
+                        mgr = nerve._http_handler_cls._overlay_manager
+                        if mgr is not None:
+                            mgr.update_from_health(node, data)
+                except Exception:
+                    pass  # overlay update is best-effort
         except Exception:
             pass
 

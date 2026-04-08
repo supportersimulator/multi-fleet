@@ -1801,12 +1801,16 @@ class FleetNerveNATS:
                         self._json_response(500, {"error": str(e)})
                 elif self.path == "/supervisor" or self.path.startswith("/supervisor?"):
                     try:
-                        from .supervisor import Supervisor
-                        sup = Supervisor(node_id=daemon.node_id)
+                        sup = self._get_supervisor()
+                        if not sup:
+                            self._json_response(500, {"error": "Supervisor init failed"})
+                            return
                         active = sup.list_active()
+                        all_tasks = sup.list_all()
                         self._json_response(200, {
                             "tasks": [s.to_dict() for s in active],
                             "count": len(active),
+                            "total": len(all_tasks),
                         })
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
@@ -1831,6 +1835,19 @@ class FleetNerveNATS:
                             self._json_response(200, overlay.to_dict())
                         else:
                             self._json_response(404, {"error": f"no overlay for node '{node_id}'"})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/scan/results":
+                    # Wire 6: Return latest probe results and update overlay
+                    try:
+                        from .probe_engine import ProbeRegistry
+                        registry = ProbeRegistry()
+                        results = registry.run_all()
+                        result_dicts = [r.to_dict() if hasattr(r, 'to_dict') else r for r in results]
+                        # Update overlay with probe results
+                        mgr = self._get_overlay_manager()
+                        mgr.update_from_probe(daemon.node_id, result_dicts)
+                        self._json_response(200, {"results": result_dicts, "count": len(result_dicts)})
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
                 else:
@@ -1864,6 +1881,10 @@ class FleetNerveNATS:
 
             _race_manager = None
             _overlay_manager = None
+            _supervisor = None
+            _evidence_ledger = None
+            _truth_ladder = None
+            _probe_engine = None
 
             def _get_overlay_manager(self):
                 """Lazy-init NodeOverlayManager instance."""
@@ -1890,6 +1911,54 @@ class FleetNerveNATS:
                     return Handler._race_manager
                 except Exception as e:
                     logger.warning("FleetRace init failed: %s", e)
+                    return None
+
+            def _get_supervisor(self):
+                """Lazy-init Supervisor singleton (preserves task state across requests)."""
+                if Handler._supervisor is not None:
+                    return Handler._supervisor
+                try:
+                    from .supervisor import Supervisor
+                    Handler._supervisor = Supervisor(node_id=daemon.node_id)
+                    return Handler._supervisor
+                except Exception as e:
+                    logger.warning("Supervisor init failed: %s", e)
+                    return None
+
+            def _get_evidence_ledger(self):
+                """Lazy-init EvidenceLedger singleton."""
+                if Handler._evidence_ledger is not None:
+                    return Handler._evidence_ledger
+                try:
+                    from .evidence_ledger import EvidenceLedger
+                    Handler._evidence_ledger = EvidenceLedger()
+                    return Handler._evidence_ledger
+                except Exception as e:
+                    logger.warning("EvidenceLedger init failed: %s", e)
+                    return None
+
+            def _get_truth_ladder(self):
+                """Lazy-init TruthLadder singleton."""
+                if Handler._truth_ladder is not None:
+                    return Handler._truth_ladder
+                try:
+                    from .truth_ladder import TruthLadder
+                    Handler._truth_ladder = TruthLadder()
+                    return Handler._truth_ladder
+                except Exception as e:
+                    logger.warning("TruthLadder init failed: %s", e)
+                    return None
+
+            def _get_probe_engine(self):
+                """Lazy-init ProbeEngine singleton."""
+                if Handler._probe_engine is not None:
+                    return Handler._probe_engine
+                try:
+                    from .probe_engine import ProbeEngine
+                    Handler._probe_engine = ProbeEngine()
+                    return Handler._probe_engine
+                except Exception as e:
+                    logger.warning("ProbeEngine init failed: %s", e)
                     return None
 
             def do_POST(self):
@@ -2091,8 +2160,10 @@ class FleetNerveNATS:
                         self._json_response(500, {"error": str(e)})
                 elif self.path == "/supervisor":
                     try:
-                        from .supervisor import Supervisor
-                        sup = Supervisor(node_id=daemon.node_id)
+                        sup = self._get_supervisor()
+                        if not sup:
+                            self._json_response(500, {"error": "Supervisor init failed"})
+                            return
                         action = body.get("action", "")
                         if action == "start":
                             state = sup.start_task(
@@ -2117,27 +2188,29 @@ class FleetNerveNATS:
                     try:
                         from .acceptance_gate import AcceptanceGate
                         task_id = body.get("task_id", "")
-                        branch = body.get("branch", "")
                         if not task_id:
                             self._json_response(400, {"error": "missing 'task_id'"})
                             return
-                        # Build gate with available subsystems
-                        kwargs = {}
+                        # Gather subsystem data for evaluate() kwargs
+                        eval_kwargs = {}
+                        # Evidence count
                         try:
                             from .evidence_ledger import EvidenceLedger
-                            kwargs["evidence_ledger"] = EvidenceLedger()
+                            ledger = EvidenceLedger()
+                            entries = ledger.query(limit=100)
+                            eval_kwargs["evidence_count"] = len(entries)
                         except Exception:
-                            pass
-                        try:
-                            from .gains_gate import FleetGainsGate
-                            kwargs["gains_gate"] = FleetGainsGate(daemon_port=8855)
-                        except Exception:
-                            pass
-                        mgr = self._get_overlay_manager()
-                        kwargs["overlay_manager"] = mgr
-                        gate = AcceptanceGate(**kwargs)
-                        ctx = body.get("context", {})
-                        result = gate.evaluate(task_id, branch, context=ctx)
+                            eval_kwargs["evidence_count"] = 0
+                        # Probe results from body context
+                        eval_kwargs["probe_results"] = body.get("probe_results", [])
+                        eval_kwargs["surgeon_resolved"] = body.get("surgeon_resolved", False)
+                        eval_kwargs["surgeon_intensity"] = body.get("surgeon_intensity", "light")
+                        eval_kwargs["surgeon_dissent_count"] = body.get("surgeon_dissent_count", 0)
+                        eval_kwargs["invariants_satisfied"] = body.get("invariants_satisfied", True)
+                        eval_kwargs["epistemic_packet"] = body.get("epistemic_packet")
+                        strict = body.get("strict", False)
+                        gate = AcceptanceGate(strict=strict)
+                        result = gate.evaluate(**eval_kwargs)
                         self._json_response(200, result.to_dict())
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
@@ -2154,6 +2227,9 @@ class FleetNerveNATS:
                 else:
                     self.send_response(404)
                     self.end_headers()
+
+        # Expose Handler class on daemon so discovery.py can access overlay_manager
+        daemon._http_handler_cls = Handler
 
         ThreadingHTTPServer.allow_reuse_address = True
         for attempt in range(5):
