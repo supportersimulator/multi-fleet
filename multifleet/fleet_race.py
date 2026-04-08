@@ -696,6 +696,9 @@ class FleetRace:
             "elapsed_s": round(time.time() - race["started_at"], 1),
         })
 
+        # Ghost digest: auto-trigger after synthesis (3-surgeon recommendation)
+        self._run_ghost_digest(race)
+
         # Theatrical: announce winner
         if _theater and race.get("winner"):
             try:
@@ -776,6 +779,27 @@ class FleetRace:
             logger.warning("Acceptance gate unavailable: %s", e)
             race["acceptance"] = {"accepted": True, "reason": "gate unavailable (degraded)"}
             return race["acceptance"]
+
+    def _run_ghost_digest(self, race: dict):
+        """Auto-trigger ghost digest after synthesis (3-surgeon recommendation).
+
+        Converts race results into evidence candidates for the ContextDNA
+        promotion pipeline. This is where "work happened" becomes "the system learned."
+        """
+        try:
+            from multifleet.ghost_digest import GhostDigest
+            digest = GhostDigest(node_id=self._node_id)
+            result = digest.digest(
+                task_id=race["race_id"],
+                task_intent=race.get("task", ""),
+                synthesis_result=race.get("synthesis"),
+                probe_results=(race.get("epistemic_packet") or {}).get("probe_results", []),
+                acceptance_decision=race.get("acceptance"),
+            )
+            race["digest"] = result.to_dict()
+            logger.info("Ghost digest for race %s: %s", race["race_id"], result.summary())
+        except (ImportError, Exception) as e:
+            logger.debug("Ghost digest skipped: %s", e)
 
     # ── Evidence Recording ──────────────────────────────────────────
 
