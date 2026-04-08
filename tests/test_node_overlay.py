@@ -19,7 +19,7 @@ from multifleet.node_overlay import (
     ProbeStrip,
     SurgeonStrip,
 )
-from multifleet.acceptance_gate import AcceptanceGate, AcceptanceResult
+from multifleet.acceptance_gate import AcceptanceGate, AcceptanceDecision as AcceptanceResult
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -169,7 +169,7 @@ class TestAcceptanceGateAllPass:
         gate = AcceptanceGate()
         result = gate.evaluate("task-001", "feature/x")
         assert result.accepted is True
-        assert len(result.blocking_reasons) == 0
+        assert len(result.blocking_issues) == 0
         assert len(result.checks) == 6
 
 
@@ -184,7 +184,7 @@ class TestAcceptanceGateBlockingProbe:
         gate = AcceptanceGate(probe_engine=mock_engine)
         result = gate.evaluate("task-002", "feature/y", context={"probe_context": {}})
         assert result.accepted is False
-        assert any("critical probe" in r.lower() for r in result.blocking_reasons)
+        assert any("critical probe" in r.lower() for r in result.blocking_issues)
 
 
 class TestAcceptanceGateNoEvidence:
@@ -195,7 +195,7 @@ class TestAcceptanceGateNoEvidence:
         gate = AcceptanceGate(evidence_ledger=mock_ledger)
         result = gate.evaluate("task-003", "feature/z")
         assert result.accepted is False
-        assert any("evidence" in r.lower() for r in result.blocking_reasons)
+        assert any("evidence" in r.lower() for r in result.blocking_issues)
 
     def test_evidence_present_passes(self):
         """Evidence entries present allows gate to pass."""
@@ -213,7 +213,7 @@ class TestAcceptanceGateSurgeonResolution:
         ctx = {"surgeon_state": {"phase": "operate", "disagreement_score": 0.5}}
         result = gate.evaluate("task-005", "feature/v", context=ctx)
         assert result.accepted is False
-        assert any("surgeon" in r.lower() for r in result.blocking_reasons)
+        assert any("surgeon" in r.lower() for r in result.blocking_issues)
 
     def test_high_disagreement_blocks(self):
         """High surgeon disagreement blocks even if phase is closed."""

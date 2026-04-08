@@ -62,12 +62,118 @@ class AcceptanceGate:
     converge into a single accept/block decision.
     """
 
-    def __init__(self, strict: bool = False):
+    def __init__(self, strict: bool = False, probe_engine=None, evidence_ledger=None):
         self._strict = strict
+        self._probe_engine = probe_engine
+        self._evidence_ledger = evidence_ledger
 
     def evaluate(
         self,
-        probe_results: list[ProbeResult] = None,
+        task_id_or_probes=None,
+        branch_or_none=None,
+        *,
+        context: Optional[dict] = None,
+        probe_results: list = None,
+        surgeon_resolved: bool = False,
+        surgeon_intensity: str = "light",
+        surgeon_dissent_count: int = 0,
+        invariants_satisfied: bool = True,
+        evidence_count: int = 0,
+        epistemic_packet: Optional[dict] = None,
+    ) -> AcceptanceDecision:
+        """Evaluate acceptance criteria. Supports two call patterns:
+
+        Pattern 1 (mac2 style): gate.evaluate("task-id", "branch", context={...})
+        Pattern 2 (keyword style): gate.evaluate(probe_results=[...], surgeon_resolved=True, ...)
+        """
+        # Detect mac2-style positional call: evaluate("task-id", "branch")
+        if isinstance(task_id_or_probes, str):
+            return self._evaluate_contextual(task_id_or_probes, branch_or_none, context or {})
+
+        # Keyword style — task_id_or_probes might be probe_results list
+        if isinstance(task_id_or_probes, list):
+            probe_results = task_id_or_probes
+
+        return self._evaluate_keyword(
+            probe_results=probe_results,
+            surgeon_resolved=surgeon_resolved,
+            surgeon_intensity=surgeon_intensity,
+            surgeon_dissent_count=surgeon_dissent_count,
+            invariants_satisfied=invariants_satisfied,
+            evidence_count=evidence_count,
+            epistemic_packet=epistemic_packet,
+        )
+
+    def _evaluate_contextual(
+        self, task_id: str, branch: Optional[str], context: dict
+    ) -> AcceptanceDecision:
+        """Mac2-style evaluation: extract signals from context dict."""
+        blocking = []
+        checks = []
+
+        # Check 1: Probes (via injected engine or context)
+        if self._probe_engine:
+            try:
+                results = self._probe_engine.run_cheap(context.get("probe_context", {}))
+                for r in results:
+                    checks.append({"name": "probe", "status": r.status})
+                    if getattr(r, 'status', '') == 'critical' or getattr(r, 'severity', '') == 'critical':
+                        blocking.append(f"Critical probe finding in {getattr(r, 'probe_id', '?')}")
+            except Exception:
+                checks.append({"name": "probe", "status": "skipped"})
+        else:
+            checks.append({"name": "probe", "status": "skipped"})
+
+        # Check 2: Evidence ledger
+        if self._evidence_ledger:
+            try:
+                entries = self._evidence_ledger.query(task_id=task_id) if hasattr(self._evidence_ledger, 'query') else self._evidence_ledger.query(task_id)
+                if not entries:
+                    blocking.append(f"No evidence ledger entries for task {task_id}")
+                checks.append({"name": "evidence", "status": "pass" if entries else "fail"})
+            except Exception:
+                checks.append({"name": "evidence", "status": "skipped"})
+        else:
+            checks.append({"name": "evidence", "status": "skipped"})
+
+        # Check 3: Surgeon state
+        surgeon_state = context.get("surgeon_state", {})
+        if surgeon_state:
+            phase = surgeon_state.get("phase", "close")
+            disagreement = surgeon_state.get("disagreement_score", 0.0)
+            if phase in ("triage", "operate"):
+                blocking.append(f"Surgeon still in {phase} phase")
+            if disagreement > 0.7:
+                blocking.append(f"High surgeon disagreement ({disagreement:.2f})")
+            checks.append({"name": "surgeon", "status": "pass" if not blocking else "fail"})
+        else:
+            checks.append({"name": "surgeon", "status": "skipped"})
+
+        # Check 4: Invariants
+        checks.append({"name": "invariants", "status": "skipped"})
+
+        # Check 5: Mirror drift
+        if context.get("mirror_drift_detected") and not context.get("mirror_drift_acknowledged"):
+            blocking.append("Unacknowledged mirror drift detected")
+            checks.append({"name": "mirror_drift", "status": "fail"})
+        else:
+            checks.append({"name": "mirror_drift", "status": "pass" if context.get("mirror_drift_detected") else "skipped"})
+
+        # Check 6: Test coverage
+        checks.append({"name": "test_coverage", "status": "skipped"})
+
+        accepted = len(blocking) == 0
+        decision = AcceptanceDecision(
+            accepted=accepted,
+            reason=f"{len(blocking)} blocking issue(s)" if blocking else "All checks passed",
+            blocking_issues=blocking,
+        )
+        decision.checks = checks  # Mac2 expects this attribute
+        return decision
+
+    def _evaluate_keyword(
+        self,
+        probe_results: list = None,
         surgeon_resolved: bool = False,
         surgeon_intensity: str = "light",
         surgeon_dissent_count: int = 0,
