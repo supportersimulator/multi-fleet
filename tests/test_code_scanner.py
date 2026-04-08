@@ -179,11 +179,14 @@ class TestProbeEngine:
     def test_discover_probes(self):
         engine = ProbeEngine()
         count = engine.discover_probes()
-        assert count >= 3  # mirror_drift, hidden_dependency, blast_radius
+        assert count >= 6  # mirror_drift, hidden_dependency, blast_radius, stale_context, security_surface, injection_prioritizer
         ids = {p["probe_id"] for p in engine.list_probes()}
         assert "mirror_drift" in ids
         assert "hidden_dependency" in ids
         assert "blast_radius" in ids
+        assert "stale_context" in ids
+        assert "security_surface" in ids
+        assert "injection_prioritizer" in ids
 
     def test_create_engine_factory(self):
         engine = create_engine()
