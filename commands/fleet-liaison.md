@@ -1,11 +1,4 @@
 ---
-<<<<<<< Updated upstream
-description: "Start, stop, or check the fleet liaison background agent"
-disable-model-invocation: true
----
-
-Invoke the multi-fleet:fleet-liaison skill and follow it exactly as presented to you.
-=======
 description: "Interact with the fleet liaison agent — check status, read messages, escalate"
 disable-model-invocation: true
 ---
@@ -17,4 +10,3 @@ Invoke the multi-fleet:fleet-liaison skill and follow it exactly as presented to
 - `escalate <message>` — send a message through the liaison to fleet peers
 - `pause` — temporarily pause fleet monitoring
 - `resume` — resume fleet monitoring
->>>>>>> Stashed changes
