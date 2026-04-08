@@ -142,6 +142,8 @@ class ChiefSynthesis:
                 best = max(results, key=lambda r: r.confidence)
                 if probe_summary:
                     best.metadata["probe_summary"] = probe_summary
+                # Resolve memory influence (the "holy shit" moment)
+                best = self._apply_memory_influence(best, task_id, verdicts)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
                 self._record_evidence(best)
                 return best
@@ -150,6 +152,8 @@ class ChiefSynthesis:
         result = self._default_analyzer(task_id, verdicts)
         if probe_summary:
             result.metadata["probe_summary"] = probe_summary
+        # Resolve memory influence (the "holy shit" moment)
+        result = self._apply_memory_influence(result, task_id, verdicts)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
         # Track outcome for learning (high-value, zero-caller module)
@@ -269,6 +273,49 @@ class ChiefSynthesis:
                 f.write(json.dumps(entry) + "\n")
         except Exception as e:
             logger.error("Failed to log decision: %s", e)
+
+    def _apply_memory_influence(
+        self, result: SynthesisResult, task_id: str, verdicts: dict
+    ) -> SynthesisResult:
+        """Query past decisions and attach memory influence to result.
+
+        When confidence is low, evidence becomes the PRIMARY decision driver.
+        This is the "holy shit" demo moment — showing which past memories
+        influenced the current verdict.
+        """
+        try:
+            from multifleet.memory_influence import MemoryInfluenceResolver
+            resolver = MemoryInfluenceResolver(
+                evidence_ledger=self._evidence_ledger,
+            )
+            influence = resolver.resolve(task_id, verdicts, result.confidence)
+
+            # Attach to metadata
+            result.metadata["memory_influence"] = influence.to_dict()
+
+            # Apply confidence adjustment
+            if influence.confidence_adjustment != 0:
+                old_conf = result.confidence
+                result.confidence = max(0.0, min(1.0,
+                    result.confidence + influence.confidence_adjustment
+                ))
+                logger.info(
+                    "Memory influence adjusted confidence: %.3f → %.3f (%s)",
+                    old_conf, result.confidence, influence.summary_line(),
+                )
+
+            # When low confidence + evidence suggests different outcome:
+            # evidence becomes PRIMARY decision driver
+            if result.confidence < 0.7 and influence.evidence_refs:
+                result.reasoning = (
+                    f"**Evidence-backed decision**: {influence.summary_line()} "
+                    f"Original reasoning: {result.reasoning}"
+                )
+
+        except (ImportError, Exception) as e:
+            logger.debug("Memory influence unavailable: %s", e)
+
+        return result
 
     def _record_evidence(self, result: SynthesisResult):
         """Record synthesis decision to the evidence ledger (hash-chain)."""
