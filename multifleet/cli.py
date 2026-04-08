@@ -306,8 +306,19 @@ def cmd_gains_gate(args):
         _fail("Gains gate FAILED")
 
 
-def cmd_dashboard(_args):
-    """Launch the text dashboard with theatrical rendering."""
+def cmd_dashboard(args):
+    """Launch the fleet dashboard (terminal or web)."""
+    # Web dashboard mode
+    if getattr(args, "web", False):
+        try:
+            from multifleet.web_dashboard import serve
+            port = getattr(args, "port", 8080) or 8080
+            serve(port=port, open_browser=not getattr(args, "no_browser", False))
+        except ImportError as exc:
+            _die(f"Web dashboard unavailable: {exc}")
+        return
+
+    # Terminal dashboard with theatrical rendering
     if _theater:
         try:
             from multifleet.dashboard_data import FleetDashboardData
@@ -490,6 +501,21 @@ def cmd_overlay(args):
     _print_json(data)
 
 
+def cmd_theater(args):
+    """Launch the 5-zone surgical theater dashboard."""
+    try:
+        from multifleet.theater_dashboard import TheaterDashboard
+        dashboard = TheaterDashboard(
+            daemon_port=args.port,
+            refresh_rate=args.refresh,
+        )
+        dashboard.run()
+    except ImportError as exc:
+        _die(f"Theater dashboard unavailable: {exc}")
+    except Exception as exc:
+        _die(f"Theater dashboard error: {exc}")
+
+
 def cmd_probe(_args):
     """Run probe scan and display findings."""
     data = _get("/scan/results", timeout=15)
@@ -545,7 +571,10 @@ def main():
     gate_p.add_argument("--quick", action="store_true", help="Quick mode (fewer checks)")
 
     # dashboard
-    sub.add_parser("dashboard", help="Show fleet dashboard")
+    dash_p = sub.add_parser("dashboard", help="Show fleet dashboard")
+    dash_p.add_argument("--web", action="store_true", help="Launch web dashboard in browser")
+    dash_p.add_argument("--port", type=int, default=8080, help="Web dashboard port (default 8080)")
+    dash_p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
 
     # evidence
     ev_p = sub.add_parser("evidence", help="Evidence ledger operations")
@@ -580,6 +609,11 @@ def main():
     # probe / scan
     sub.add_parser("probe", help="Run probe scan and show findings")
 
+    # theater — 5-zone surgical theater dashboard
+    theater_p = sub.add_parser("theater", help="Launch 5-zone surgical theater dashboard")
+    theater_p.add_argument("--port", type=int, default=8855, help="Daemon port")
+    theater_p.add_argument("--refresh", type=float, default=2.0, help="Refresh rate (seconds)")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -603,6 +637,7 @@ def main():
         "supervisor": cmd_supervisor,
         "overlay": cmd_overlay,
         "probe": cmd_probe,
+        "theater": cmd_theater,
     }
 
     handler = handlers.get(args.command)

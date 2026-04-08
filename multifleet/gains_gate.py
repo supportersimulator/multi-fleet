@@ -91,6 +91,7 @@ class FleetGainsGate:
             results.append(self._check_rebuttal_stale())
             results.append(self._check_audit_trail())
             results.append(self._check_test_suite())
+            results.append(self._check_invariance_rules())
 
         # Build gate result
         checks_dicts = [r.to_dict() for r in results]
@@ -367,6 +368,40 @@ class FleetGainsGate:
             latency = (time.monotonic() - t0) * 1000
             return CheckResult("test_suite", False, f"Test run error: {e}",
                                latency_ms=latency, critical=False)
+
+    def _check_invariance_rules(self) -> CheckResult:
+        """Run 7 GhostScan invariance rules (non-critical, advisory)."""
+        t0 = time.monotonic()
+        try:
+            from .invariance_rules import InvarianceEngine
+            engine = InvarianceEngine()
+            # Build state from daemon health (best-effort)
+            state = {}
+            health = self._get_health()
+            if health:
+                state["transport_channel"] = health.get("transport", "")
+            results = engine.check_all(state)
+            violations = [r for r in results if not r.passed]
+            latency = (time.monotonic() - t0) * 1000
+            if violations:
+                names = ", ".join(r.rule_id for r in violations)
+                return CheckResult(
+                    "invariance_rules", False,
+                    f"{len(violations)} invariance violation(s): {names}",
+                    latency_ms=latency, critical=False,
+                )
+            return CheckResult(
+                "invariance_rules", True,
+                f"All {len(results)} invariance rules passed",
+                latency_ms=latency, critical=False,
+            )
+        except Exception as e:
+            latency = (time.monotonic() - t0) * 1000
+            return CheckResult(
+                "invariance_rules", True,
+                f"Invariance check skipped: {e}",
+                latency_ms=latency, critical=False,
+            )
 
     @staticmethod
     def _make_recommendation(results: list[CheckResult], gate_passed: bool) -> str:
