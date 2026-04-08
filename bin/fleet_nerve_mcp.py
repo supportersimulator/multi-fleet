@@ -49,6 +49,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# ── Productive Waiter singleton ──
+_productive_waiter = None
+
+
+def _get_productive_waiter():
+    """Lazy-init singleton ProductiveWaiter for this node."""
+    global _productive_waiter
+    if _productive_waiter is None:
+        from multifleet.productive_wait import ProductiveWaiter
+        _productive_waiter = ProductiveWaiter(node_id=_get_node_id())
+    return _productive_waiter
+
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -454,6 +466,22 @@ def fleet_worker_dispatch(target: str, task: str, timeout: str = "300") -> dict:
         except Exception as e:
             logger.warning("Failed to create cross-rebuttal session: %s", e)
 
+    # ── Productive waiting: register wait + work backlog while blocked ──
+    waiter = _get_productive_waiter()
+    task_id = f"dispatch-{target}-{int(time.time())}"
+    wait_state = waiter.start_wait(task_id, description=f"dispatch to {target}")
+    productive_work_done = []
+
+    # Work backlog items while dispatch is in-flight
+    backlog_item = waiter.get_next_work()
+    while backlog_item:
+        wait_state.productive_task = backlog_item.get("description", str(backlog_item))
+        wait_state.productive_started_at = time.time()
+        productive_work_done.append(backlog_item)
+        logger.info("Productive wait: completed backlog item %s while waiting for %s",
+                     backlog_item.get("id", "?"), target)
+        backlog_item = waiter.get_next_work()
+
     try:
         try:
             from multifleet.worker import FleetWorkerManager
@@ -462,14 +490,25 @@ def fleet_worker_dispatch(target: str, task: str, timeout: str = "300") -> dict:
         mgr = FleetWorkerManager()
         actual_target = target if target != "local" else mgr.node_id
         result = _run_async(mgr.dispatch(actual_target, task, timeout=timeout_int))
+
+        # Notify waiter that reply arrived
+        waiter.notify_reply(task_id, result)
+        waiter.clear_completed()
+
         if rebuttal_info:
             result["rebuttal"] = rebuttal_info
+        if productive_work_done:
+            result["productive_work_done"] = len(productive_work_done)
         return result
     except RuntimeError as e:
+        waiter.notify_reply(task_id, {"error": str(e)})
+        waiter.clear_completed()
         if "session-driver" in str(e):
             return {"error": "claude-session-driver plugin not installed on this node", "target": target}
         return {"error": str(e), "target": target, "traceback": traceback.format_exc()}
     except Exception as e:
+        waiter.notify_reply(task_id, {"error": str(e)})
+        waiter.clear_completed()
         return {"error": str(e), "target": target, "traceback": traceback.format_exc()}
 
 
