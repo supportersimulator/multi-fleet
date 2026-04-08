@@ -2363,6 +2363,67 @@ def fleet_accept(task_id: str, branch: str = "", context: str = "") -> dict:
     return _daemon_post("/accept", body)
 
 
+# ── Invariance Rules ──
+
+def fleet_invariance(action: str = "check_all", rule_id: str = "",
+                     state_json: str = "") -> dict:
+    """Run GhostScan invariance rules — 7 machine-checkable protocol enforcement checks.
+
+    Actions:
+      check_all  — run all 7 invariance rules against state (default)
+      check_one  — run a specific rule by ID (requires rule_id)
+      list       — list all rule IDs and names
+
+    Args:
+        action: check_all, check_one, or list
+        rule_id: specific rule ID for check_one (e.g. INV-001)
+        state_json: JSON string of protocol state to check against
+    """
+    try:
+        from multifleet.invariance_rules import InvarianceEngine
+    except ImportError as e:
+        return {"error": f"invariance_rules module not available: {e}"}
+
+    engine = InvarianceEngine()
+
+    if action == "list":
+        return {
+            "rules": [
+                {"rule_id": rid, "name": name}
+                for rid, name, _ in engine._rules
+            ],
+            "count": len(engine._rules),
+        }
+
+    # Parse state
+    state: dict = {}
+    if state_json:
+        try:
+            state = json.loads(state_json)
+        except (json.JSONDecodeError, TypeError):
+            return {"error": f"Invalid state_json: could not parse as JSON"}
+
+    if action == "check_one":
+        if not rule_id:
+            return {"error": "rule_id required for check_one"}
+        result = engine.check_one(rule_id, state)
+        return result.to_dict()
+
+    # Default: check_all
+    results = engine.check_all(state)
+    passed = sum(1 for r in results if r.passed)
+    failed = len(results) - passed
+    violations = [r.to_dict() for r in results if not r.passed]
+    return {
+        "total": len(results),
+        "passed": passed,
+        "failed": failed,
+        "all_passed": failed == 0,
+        "results": [r.to_dict() for r in results],
+        "violations": violations,
+    }
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
