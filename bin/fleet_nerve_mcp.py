@@ -1959,6 +1959,214 @@ def fleet_hierarchy(action: str, node_id: str = "", role: str = "",
     return {"error": f"Unknown action: {action}. Use: status, register, promote, elect, route, nats"}
 
 
+# ── Truth Ladder Tool ──
+
+_truth_ladder_instance = None
+
+def _get_truth_ladder():
+    global _truth_ladder_instance
+    if _truth_ladder_instance is None:
+        try:
+            from multifleet.truth_ladder import TruthLadder
+            _truth_ladder_instance = TruthLadder()
+        except Exception as e:
+            logger.error("Failed to init TruthLadder: %s", e)
+            return None
+    return _truth_ladder_instance
+
+
+def fleet_truth(action: str, title: str = "", content: str = "",
+                entry_id: str = "", layer: str = "", evidence_refs: str = "",
+                limit: str = "50") -> dict:
+    """Truth ladder operations — add ideas, promote through layers, query entries.
+
+    Actions:
+      add_inbox  — add a raw idea (requires title, content)
+      promote    — promote an entry (requires entry_id, layer = target layer)
+      query      — list entries (optional layer filter, limit)
+      get        — get a single entry (requires entry_id)
+      chain      — trace promotion history (requires entry_id)
+      stats      — count per layer
+    """
+    ladder = _get_truth_ladder()
+    if ladder is None:
+        return {"error": "Truth ladder not available"}
+
+    refs = [r.strip() for r in evidence_refs.split(",") if r.strip()] if evidence_refs else []
+
+    if action == "add_inbox":
+        if not title:
+            return {"error": "add_inbox requires title"}
+        entry = ladder.add_inbox(title, content or "")
+        return {"ok": True, "entry": entry.to_dict()}
+
+    if action == "promote":
+        if not entry_id or not layer:
+            return {"error": "promote requires entry_id and layer (vision/snapshot/dao)"}
+        try:
+            if layer == "vision":
+                entry = ladder.promote_to_vision(entry_id, refs, promoted_by=NODE_ID)
+            elif layer == "snapshot":
+                entry = ladder.promote_to_snapshot(entry_id, refs, promoted_by=NODE_ID)
+            elif layer == "dao":
+                entry = ladder.promote_to_dao(entry_id, refs, promoted_by=NODE_ID)
+            else:
+                return {"error": f"Invalid target layer: {layer}. Use: vision, snapshot, dao"}
+            return {"ok": True, "entry": entry.to_dict()}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if action == "query":
+        entries = ladder.query(layer=layer or None, limit=int(limit))
+        return {"entries": [e.to_dict() for e in entries], "count": len(entries)}
+
+    if action == "get":
+        if not entry_id:
+            return {"error": "get requires entry_id"}
+        entry = ladder.get(entry_id)
+        if not entry:
+            return {"error": f"Entry not found: {entry_id}"}
+        return {"entry": entry.to_dict()}
+
+    if action == "chain":
+        if not entry_id:
+            return {"error": "chain requires entry_id"}
+        chain = ladder.get_promotion_chain(entry_id)
+        return {"chain": [e.to_dict() for e in chain], "length": len(chain)}
+
+    if action == "stats":
+        return ladder.stats
+
+    return {"error": f"Unknown action: {action}. Use: add_inbox, promote, query, get, chain, stats"}
+
+
+# ── Supervisor Tool ──
+
+_supervisor_instance = None
+
+def _get_supervisor():
+    global _supervisor_instance
+    if _supervisor_instance is None:
+        try:
+            from multifleet.supervisor import Supervisor
+            _supervisor_instance = Supervisor(node_id=NODE_ID)
+        except Exception as e:
+            logger.error("Failed to init Supervisor: %s", e)
+            return None
+    return _supervisor_instance
+
+
+def fleet_supervisor(action: str, task_id: str = "", description: str = "",
+                     done_criteria: str = "", evidence: str = "",
+                     reason: str = "") -> dict:
+    """Supervisor loop — Dev Squad execution continuity.
+
+    Actions:
+      start    — start supervising a task (requires task_id, description, done_criteria as comma-separated)
+      advance  — advance to next phase (requires task_id; optional evidence as JSON)
+      block    — mark task blocked (requires task_id, reason)
+      status   — get task state (requires task_id)
+      list     — list all active tasks
+    """
+    sup = _get_supervisor()
+    if sup is None:
+        return {"error": "Supervisor not available"}
+
+    if action == "start":
+        if not task_id or not description or not done_criteria:
+            return {"error": "start requires task_id, description, done_criteria"}
+        criteria = [c.strip() for c in done_criteria.split(",") if c.strip()]
+        try:
+            state = sup.start_task(task_id, description, criteria)
+            return {"ok": True, "state": state.to_dict()}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if action == "advance":
+        if not task_id:
+            return {"error": "advance requires task_id"}
+        ev = {}
+        if evidence:
+            try:
+                ev = json.loads(evidence)
+            except json.JSONDecodeError:
+                return {"error": "evidence must be valid JSON"}
+        try:
+            state = sup.advance(task_id, ev)
+            return {"ok": True, "state": state.to_dict()}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if action == "block":
+        if not task_id or not reason:
+            return {"error": "block requires task_id and reason"}
+        try:
+            state = sup.block(task_id, reason)
+            return {"ok": True, "state": state.to_dict()}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if action == "status":
+        if not task_id:
+            return {"error": "status requires task_id"}
+        try:
+            state = sup.get_state(task_id)
+            return {"state": state.to_dict(), "is_done": sup.is_done(task_id)}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    if action == "list":
+        active = sup.list_active()
+        return {"tasks": [s.to_dict() for s in active], "count": len(active)}
+
+    return {"error": f"Unknown action: {action}. Use: start, advance, block, status, list"}
+
+
+# ── Code Scanner (GhostScan) ──
+
+def fleet_scan(cost_limit: str = "medium", changed_files: str = "",
+               task_description: str = "", probe_id: str = "") -> dict:
+    """Run code scanner probes and return findings."""
+    try:
+        from multifleet.code_scanner import create_engine
+        from multifleet.code_scanner.probe_contract import ProbeContext
+    except ImportError as e:
+        return {"error": f"code_scanner not available: {e}"}
+
+    engine = create_engine()
+    node_id = os.environ.get("MULTIFLEET_NODE_ID", socket.gethostname())
+    ctx = ProbeContext(
+        repo_path=str(REPO_ROOT.parent),  # superrepo root
+        changed_files=[f.strip() for f in changed_files.split(",") if f.strip()] if changed_files else [],
+        task_description=task_description,
+        node_id=node_id,
+    )
+
+    if probe_id:
+        result = engine.run_one(probe_id, ctx)
+        return {
+            "probe_id": probe_id,
+            "result": result.to_dict(),
+            "stats": engine.stats,
+        }
+
+    if cost_limit == "cheap":
+        results = engine.run_cheap(ctx)
+    elif cost_limit == "medium":
+        results = engine.run_medium(ctx)
+    else:
+        results = engine.run_all(ctx, cost_limit=cost_limit)
+
+    return {
+        "node": node_id,
+        "cost_limit": cost_limit,
+        "probes_run": len(results),
+        "total_findings": sum(len(r.findings) for r in results),
+        "results": [r.to_dict() for r in results],
+        "stats": engine.stats,
+    }
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -2325,6 +2533,56 @@ TOOLS = [
             "required": ["action"],
         },
         "fn": fleet_hierarchy,
+    },
+    {
+        "name": "fleet_truth",
+        "description": "Truth ladder — promote ideas through Inbox → Vision → Snapshot → DAO layers. Actions: add_inbox, promote, query, get, chain, stats.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add_inbox", "promote", "query", "get", "chain", "stats"], "description": "Truth ladder action"},
+                "title": {"type": "string", "description": "Entry title (for add_inbox)"},
+                "content": {"type": "string", "description": "Entry content (for add_inbox)"},
+                "entry_id": {"type": "string", "description": "Entry ID (for promote, get, chain)"},
+                "layer": {"type": "string", "enum": ["inbox", "vision", "snapshot", "dao"], "description": "Target layer (for promote) or filter (for query)"},
+                "evidence_refs": {"type": "string", "description": "Comma-separated evidence references (for promote)"},
+                "limit": {"type": "string", "description": "Max results for query (default 50)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_truth,
+    },
+    {
+        "name": "fleet_supervisor",
+        "description": "Supervisor loop — Dev Squad execution continuity. Drives tasks through phases until vision contract satisfied. Actions: start, advance, block, status, list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "advance", "block", "status", "list"], "description": "Supervisor action"},
+                "task_id": {"type": "string", "description": "Task ID"},
+                "description": {"type": "string", "description": "Task description (for start)"},
+                "done_criteria": {"type": "string", "description": "Comma-separated done criteria (for start)"},
+                "evidence": {"type": "string", "description": "JSON evidence for phase advancement (for advance)"},
+                "reason": {"type": "string", "description": "Block reason (for block)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_supervisor,
+    },
+    {
+        "name": "fleet_scan",
+        "description": "Run GhostScan code scanner probes — detects mirror drift (stale docs vs code), hidden dependencies, blast radius of changes. Returns structured findings with severity, confidence, and suggested actions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cost_limit": {"type": "string", "enum": ["cheap", "medium", "expensive"], "description": "Cost tier limit (cheap=fast path checks, medium=AST analysis, expensive=full scan)", "default": "medium"},
+                "changed_files": {"type": "string", "description": "Comma-separated list of changed file paths (for blast_radius and param_drift probes)"},
+                "task_description": {"type": "string", "description": "Current task context (helps probes focus)"},
+                "probe_id": {"type": "string", "description": "Run a single probe by ID (mirror_drift, hidden_dependency, blast_radius)"},
+            },
+            "required": [],
+        },
+        "fn": fleet_scan,
     },
 ]
 

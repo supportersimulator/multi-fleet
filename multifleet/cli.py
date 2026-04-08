@@ -77,6 +77,12 @@ try:
 except ImportError:
     _HAS_RICH = False
 
+try:
+    from multifleet.theatrical import FleetTheater
+    _theater = FleetTheater()
+except ImportError:
+    _theater = None
+
 
 def _print_json(data: dict):
     """Pretty-print JSON data."""
@@ -120,10 +126,37 @@ def _header(msg: str):
 
 def cmd_status(_args):
     """Fleet health overview."""
-    _header("Fleet Status")
     data = _get("/health")
     _check_error(data)
 
+    # Try theatrical display first
+    if _theater:
+        node = data.get("nodeId", "?")
+        peers = data.get("peers", {})
+        nats_ok = data.get("nats_connected", False) or data.get("transport") == "nats"
+        nodes_info = [{
+            "name": node,
+            "status": "ok" if data.get("status") == "ok" else "degraded",
+            "nats": nats_ok,
+            "peers": len(peers),
+            "uptime_s": data.get("uptime_s", 0),
+            "sessions": data.get("activeSessions", 0),
+        }]
+        for pid, info in peers.items():
+            nodes_info.append({
+                "name": pid,
+                "status": "ok" if info.get("lastSeen", 9999) < 60 else "degraded",
+                "nats": True,
+                "peers": len(peers),
+                "uptime_s": "-",
+                "sessions": info.get("sessions", 0),
+            })
+        _theater.fleet_banner()
+        _theater.node_status_cards(nodes_info)
+        return
+
+    # Fallback to plain output
+    _header("Fleet Status")
     node = data.get("nodeId", "?")
     uptime = data.get("uptime_s", 0)
     peers = data.get("peers", {})
@@ -194,14 +227,22 @@ def cmd_broadcast(args):
 
 def cmd_race(args):
     """Start a competitive branch race."""
-    _header("Starting Race")
+    nodes = [n.strip() for n in args.nodes.split(",")] if args.nodes else None
     body = {"task": args.task, "timeout_s": args.timeout}
-    if args.nodes:
-        body["nodes"] = [n.strip() for n in args.nodes.split(",")]
+    if nodes:
+        body["nodes"] = nodes
+
+    # Theatrical race banner before dispatch
+    if _theater:
+        display_nodes = nodes or ["mac1", "mac2", "mac3"]
+        _theater.race_banner(args.task, display_nodes)
+
     result = _post("/race", body)
     _check_error(result)
     if "error" in result:
         _fail(result["error"])
+    elif _theater:
+        _theater.race_scoreboard(result)
     else:
         _ok(f"Race started: {result.get('race_id', '?')}")
         _print_json(result)
@@ -209,11 +250,17 @@ def cmd_race(args):
 
 def cmd_doctor(_args):
     """Run fleet diagnostics (local, no daemon required)."""
-    _header("Fleet Doctor")
     try:
         from multifleet.doctor import FleetDoctor
         doctor = FleetDoctor()
         report = doctor.run()
+
+        if _theater:
+            checks_dicts = [c.to_dict() for c in report.checks]
+            _theater.doctor_display(checks_dicts, report.summary())
+            return
+
+        _header("Fleet Doctor")
         for check in report.checks:
             sym = {"pass": "+", "warn": "~", "fail": "!", "skip": "-"}.get(check.status, "?")
             line = f"  [{sym}] {check.code} {check.name}: {check.message}"
@@ -233,10 +280,15 @@ def cmd_doctor(_args):
 
 def cmd_gains_gate(args):
     """Run the fleet gains gate."""
-    _header("Gains Gate")
     qs = "?quick=1" if args.quick else ""
     data = _get(f"/gains-gate{qs}", timeout=30)
     _check_error(data)
+
+    if _theater:
+        _theater.gains_gate_display(data)
+        return
+
+    _header("Gains Gate")
     passed = data.get("passed", False)
     checks = data.get("checks", [])
     for c in checks:
@@ -283,21 +335,29 @@ def cmd_evidence(args):
     """Evidence ledger operations."""
     action = args.action
     if action == "verify":
-        _header("Evidence Chain Verification")
         data = _get("/evidence/verify")
+        _check_error(data)
+        if _theater:
+            entries = data.get("entries", data.get("chain", []))
+            verified = data.get("verified", data.get("valid", False))
+            _theater.evidence_chain(entries, verified)
+            return
+        _header("Evidence Chain Verification")
     elif action == "latest":
         _header("Latest Evidence Entries")
         data = _get("/evidence/latest")
+        _check_error(data)
     elif action == "stats":
         _header("Evidence Stats")
         data = _get("/evidence/stats")
+        _check_error(data)
     elif action == "query":
         _header("Evidence Query")
         data = _get("/evidence")
+        _check_error(data)
     else:
         _die(f"Unknown evidence action: {action}")
         return
-    _check_error(data)
     _print_json(data)
 
 

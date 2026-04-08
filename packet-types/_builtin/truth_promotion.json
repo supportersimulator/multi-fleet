@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "truth_promotion",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Truth ladder promotion event — notifies fleet when an entry advances layers",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "entry_id": {"type": "string", "description": "ID of the promoted entry"},
+      "from_layer": {"type": "string", "enum": ["inbox", "vision", "snapshot"]},
+      "to_layer": {"type": "string", "enum": ["vision", "snapshot", "dao"]},
+      "title": {"type": "string", "description": "Entry title"},
+      "evidence_refs": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "References backing the promotion"
+      },
+      "promoted_by": {"type": "string", "description": "Node ID that promoted"}
+    },
+    "required": ["entry_id", "from_layer", "to_layer", "title"]
+  },
+  "ttl_s": 300,
+  "priority": "normal"
+}

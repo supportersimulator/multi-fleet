@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "supervisor_phase",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Supervisor phase transition — notifies fleet of task state changes",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "task_id": {"type": "string", "description": "Supervised task ID"},
+      "from_phase": {"type": "string", "description": "Previous phase (null for initial)"},
+      "to_phase": {
+        "type": "string",
+        "enum": [
+          "inbox_capture", "brainstorming", "surgeon_adjudication",
+          "chief_escalation", "vision_lock", "execution", "review",
+          "fix_loop", "snapshot_record", "dao_candidate",
+          "chief_acceptance", "complete", "blocked"
+        ]
+      },
+      "iteration": {"type": "integer", "minimum": 0},
+      "blocked_reason": {"type": "string", "description": "Reason if transitioning to blocked"},
+      "criteria_met": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Done criteria satisfied so far"
+      }
+    },
+    "required": ["task_id", "to_phase"]
+  },
+  "ttl_s": 300,
+  "priority": "normal"
+}

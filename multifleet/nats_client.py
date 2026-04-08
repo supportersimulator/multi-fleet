@@ -1773,6 +1773,43 @@ class FleetNerveNATS:
                         result = racer.status(race_id)
                         code = 404 if "error" in result else 200
                         self._json_response(code, result)
+                elif self.path == "/truth" or self.path.startswith("/truth?"):
+                    try:
+                        from .truth_ladder import TruthLadder
+                        ladder = TruthLadder()
+                        params = {}
+                        if "?" in self.path:
+                            from urllib.parse import parse_qs, urlparse
+                            qs = parse_qs(urlparse(self.path).query)
+                            if "layer" in qs:
+                                params["layer"] = qs["layer"][0]
+                            if "limit" in qs:
+                                params["limit"] = int(qs["limit"][0])
+                        entries = ladder.query(**params)
+                        self._json_response(200, {
+                            "entries": [e.to_dict() for e in entries],
+                            "count": len(entries),
+                            "stats": ladder.stats,
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/truth/stats":
+                    try:
+                        from .truth_ladder import TruthLadder
+                        self._json_response(200, TruthLadder().stats)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/supervisor" or self.path.startswith("/supervisor?"):
+                    try:
+                        from .supervisor import Supervisor
+                        sup = Supervisor(node_id=daemon.node_id)
+                        active = sup.list_active()
+                        self._json_response(200, {
+                            "tasks": [s.to_dict() for s in active],
+                            "count": len(active),
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -1982,6 +2019,63 @@ class FleetNerveNATS:
                     result = racer.submit_result(race_id, node, result_data)
                     code = 404 if "error" in result else 200
                     self._json_response(code, result)
+                elif self.path == "/truth":
+                    try:
+                        from .truth_ladder import TruthLadder
+                        ladder = TruthLadder()
+                        action = body.get("action", "")
+                        if action == "add_inbox":
+                            entry = ladder.add_inbox(
+                                body.get("title", ""),
+                                body.get("content", ""),
+                                metadata=body.get("metadata"),
+                            )
+                            self._json_response(200, {"ok": True, "entry": entry.to_dict()})
+                        elif action == "promote":
+                            entry_id = body.get("entry_id", "")
+                            target_layer = body.get("layer", "")
+                            refs = body.get("evidence_refs", [])
+                            promoted_by = body.get("promoted_by", daemon.node_id)
+                            if target_layer == "vision":
+                                entry = ladder.promote_to_vision(entry_id, refs, promoted_by)
+                            elif target_layer == "snapshot":
+                                entry = ladder.promote_to_snapshot(entry_id, refs, promoted_by)
+                            elif target_layer == "dao":
+                                entry = ladder.promote_to_dao(entry_id, refs, promoted_by)
+                            else:
+                                self._json_response(400, {"error": f"Invalid target layer: {target_layer}"})
+                                return
+                            self._json_response(200, {"ok": True, "entry": entry.to_dict()})
+                        else:
+                            self._json_response(400, {"error": f"Unknown action: {action}. Use: add_inbox, promote"})
+                    except ValueError as e:
+                        self._json_response(400, {"error": str(e)})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/supervisor":
+                    try:
+                        from .supervisor import Supervisor
+                        sup = Supervisor(node_id=daemon.node_id)
+                        action = body.get("action", "")
+                        if action == "start":
+                            state = sup.start_task(
+                                body.get("task_id", ""),
+                                body.get("description", ""),
+                                body.get("done_criteria", []),
+                            )
+                            self._json_response(200, {"ok": True, "state": state.to_dict()})
+                        elif action == "advance":
+                            state = sup.advance(body.get("task_id", ""), body.get("evidence"))
+                            self._json_response(200, {"ok": True, "state": state.to_dict()})
+                        elif action == "block":
+                            state = sup.block(body.get("task_id", ""), body.get("reason", ""))
+                            self._json_response(200, {"ok": True, "state": state.to_dict()})
+                        else:
+                            self._json_response(400, {"error": f"Unknown action: {action}. Use: start, advance, block"})
+                    except ValueError as e:
+                        self._json_response(400, {"error": str(e)})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
