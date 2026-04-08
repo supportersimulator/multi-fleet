@@ -195,7 +195,7 @@ class FleetBenchmark:
             trail.record("benchmark", "bench_tool", "target", "ok", 1.23)
 
         result = _run_bench("audit_write", _run, iterations)
-        trail.shutdown()
+        trail.close()
         return result
 
     def render_report(self) -> str:
