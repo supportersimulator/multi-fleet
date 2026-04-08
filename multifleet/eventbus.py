@@ -35,6 +35,7 @@ _BROADCAST_EVENT_TYPES = frozenset({
     "peer.online", "peer.offline",
     "lease.acquired", "lease.released",
     "health.degraded",
+    "channel.broken", "channel.healing", "channel.restored",
 })
 
 
@@ -293,6 +294,22 @@ class FleetEventBus:
     def health_degraded(self, peer_id: str, score: str, broken: list):
         """Emit fleet.health.degraded event (broadcast to fleet)."""
         self.emit("health.degraded", {"peer_id": peer_id, "score": score, "broken": broken}, broadcast=True)
+
+    def channel_broken(self, peer_id: str, score: str, broken: list, severity: str = "high"):
+        """Emit fleet.channel.broken event (broadcast to fleet)."""
+        self.emit("channel.broken", {
+            "peer_id": peer_id, "score": score, "broken": broken, "severity": severity,
+        }, broadcast=True)
+
+    def channel_healing(self, peer_id: str, score: str, escalation_level: int = 1):
+        """Emit fleet.channel.healing event (broadcast to fleet)."""
+        self.emit("channel.healing", {
+            "peer_id": peer_id, "score": score, "escalation_level": escalation_level,
+        }, broadcast=True)
+
+    def channel_restored(self, peer_id: str, score: str):
+        """Emit fleet.channel.restored event (broadcast to fleet)."""
+        self.emit("channel.restored", {"peer_id": peer_id, "score": score}, broadcast=True)
 
     # ── Stats ──
 

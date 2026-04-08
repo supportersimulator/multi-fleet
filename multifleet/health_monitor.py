@@ -28,6 +28,9 @@ class FleetHealthMonitor:
     Polls the local daemon /health endpoint, tracks per-node health history,
     detects score drops / error spikes / peer disappearances, triggers
     self-heal repairs, and records everything in the evidence ledger.
+
+    Integrates ChannelHealthInvariant for continuous channel health enforcement:
+    broken channels auto-trigger repair with L1-L4 escalation.
     """
 
     def __init__(self, daemon_port: int = 8855, check_interval: int = 30,
@@ -43,6 +46,12 @@ class FleetHealthMonitor:
         self._checks_run = 0
         self._eventbus = None      # set via wire_eventbus()
         self._ledger = None        # set via wire_ledger()
+
+        # Channel health invariance — auto-repair broken channels
+        from multifleet.invariance_rules import ChannelHealthInvariant
+        self._channel_invariant = ChannelHealthInvariant()
+        # Track previous channel state per peer for transition detection
+        self._prev_channel_state: dict[str, str] = {}  # peer -> "healthy"|"broken"
 
     # -- Wiring --
 
@@ -128,6 +137,62 @@ class FleetHealthMonitor:
                 new_alerts.append(alert)
                 self._alerts.append(alert)
                 self._emit_event("health.transition", alert)
+
+        # Channel health invariance check — auto-repair broken channels
+        if channel_health:
+            violations = self._channel_invariant.check(channel_health)
+            for v in violations:
+                peer_id = v["peer"]
+                # Emit fleet.channel.broken event
+                self._emit_event("channel.broken", {
+                    "peer": peer_id,
+                    "score": v["score"],
+                    "broken": v.get("broken", []),
+                    "severity": v["severity"],
+                    "escalation_level": v.get("escalation_level", 1),
+                })
+                # Track state transition
+                prev = self._prev_channel_state.get(peer_id, "healthy")
+                if prev != "broken":
+                    self._prev_channel_state[peer_id] = "broken"
+
+                # Emit fleet.channel.healing and trigger repair
+                self._emit_event("channel.healing", {
+                    "peer": peer_id,
+                    "score": v["score"],
+                    "action": "repair",
+                    "escalation_level": v.get("escalation_level", 1),
+                })
+                repair_result = self._channel_invariant.auto_repair(v, health_monitor=self)
+                new_alerts.append({
+                    "type": "channel_invariance",
+                    "peer": peer_id,
+                    "score": v["score"],
+                    "severity": v["severity"],
+                    "repair_status": repair_result.get("status", "unknown"),
+                    "timestamp": ts,
+                })
+
+            # Check for restored channels (was broken, now healthy)
+            for peer_id in list(self._prev_channel_state.keys()):
+                if self._prev_channel_state[peer_id] == "broken":
+                    peer_ch = channel_health.get(peer_id, {})
+                    if isinstance(peer_ch, dict):
+                        score_str = peer_ch.get("score", "0/7")
+                    else:
+                        score_str = str(peer_ch)
+                    try:
+                        parts = score_str.split("/")
+                        up, total = int(parts[0]), int(parts[1])
+                    except (ValueError, IndexError):
+                        continue
+                    if total > 0 and up >= total // 2:
+                        self._prev_channel_state[peer_id] = "healthy"
+                        self._channel_invariant.clear_escalation(peer_id)
+                        self._emit_event("channel.restored", {
+                            "peer": peer_id,
+                            "score": score_str,
+                        })
 
         # Anomaly detection on collected data
         anomalies = self.detect_anomalies(nodes)

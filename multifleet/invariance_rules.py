@@ -1,6 +1,6 @@
 """Invariance Rules Engine — machine-checkable protocol enforcement.
 
-7 rules from the GhostScan vision that prevent protocol violations.
+8 rules from the GhostScan vision that prevent protocol violations.
 Each rule is a pure function: (state) -> InvarianceResult.
 
 Rules:
@@ -11,6 +11,7 @@ Rules:
   INV-005  DAO promotion cannot occur directly from Vision; must flow through Snapshot
   INV-006  Transport fallback to P3+ triggers auto-repair request
   INV-007  Overlay state must always reflect last known surgeon phase, execution phase, chief sync age
+  INV-008  Channel health: broken channels auto-trigger repair
 """
 
 import logging
@@ -312,3 +313,131 @@ class InvarianceEngine:
             violation=f"Overlay state mismatch: {'; '.join(mismatches)}",
             severity="warning",
         )
+
+
+class ChannelHealthInvariant:
+    """INV-008: If any peer's channels drop below threshold, trigger repair.
+
+    Checks channel health from daemon /health endpoint data.
+    If channel score drops below half → violation with auto-repair action.
+    Supports escalation levels L1 (notify) → L2 (guide) → L3 (assist) → L4 (remote fix).
+    """
+
+    # Track escalation level per peer: peer_id -> current level (1-4)
+    _escalation_levels: dict[str, int] = {}
+    # Track last repair attempt per peer: peer_id -> timestamp
+    _last_repair_attempt: dict[str, float] = {}
+    # Cooldown between escalation bumps
+    ESCALATION_COOLDOWN_S = 300  # 5 min
+
+    def __init__(self):
+        self._escalation_levels = {}
+        self._last_repair_attempt = {}
+
+    def check(self, channel_health: dict) -> list[dict]:
+        """Check all peer channel health. Returns list of violations.
+
+        Args:
+            channel_health: {peer_id: {"score": "5/7", "broken": [...]}} or
+                            {peer_id: "5/7"} (string shorthand).
+        """
+        violations = []
+        for peer, health in channel_health.items():
+            if isinstance(health, dict):
+                score_str = health.get("score", "0/7")
+                broken = health.get("broken", [])
+            else:
+                score_str = str(health)
+                broken = []
+
+            try:
+                parts = score_str.split("/")
+                up = int(parts[0])
+                total = int(parts[1])
+            except (ValueError, IndexError):
+                logger.debug("Could not parse score '%s' for peer %s", score_str, peer)
+                continue
+
+            if total == 0:
+                continue
+
+            threshold = total // 2
+            if up < threshold:
+                level = self._escalation_levels.get(peer, 1)
+                severity = "critical" if up == 0 else "high"
+                violations.append({
+                    "peer": peer,
+                    "score": score_str,
+                    "up": up,
+                    "total": total,
+                    "broken": broken,
+                    "severity": severity,
+                    "action": "repair",
+                    "escalation_level": level,
+                })
+
+        return violations
+
+    def auto_repair(self, violation: dict, health_monitor=None) -> dict:
+        """Trigger repair for a channel violation.
+
+        Uses health_monitor.auto_repair() if available, otherwise returns
+        the repair intent for the caller to execute.
+
+        Escalation: L1 notify → L2 guide → L3 assist → L4 remote fix.
+        Each level tried after ESCALATION_COOLDOWN_S if previous level failed.
+        """
+        peer = violation["peer"]
+        score = violation["score"]
+        level = violation.get("escalation_level", 1)
+        broken = violation.get("broken", [])
+        now = time.time()
+
+        # Check if we should escalate
+        last_attempt = self._last_repair_attempt.get(peer, 0)
+        if last_attempt > 0 and (now - last_attempt) > self.ESCALATION_COOLDOWN_S:
+            # Previous attempt didn't resolve — escalate
+            level = min(level + 1, 4)
+            self._escalation_levels[peer] = level
+
+        self._last_repair_attempt[peer] = now
+
+        level_names = {1: "notify", 2: "guide", 3: "assist", 4: "remote_fix"}
+        issue = (
+            f"Channel degraded: {score} (L{level} {level_names.get(level, 'unknown')}), "
+            f"broken: {broken}"
+        )
+
+        result = {
+            "peer": peer,
+            "issue": issue,
+            "level": level,
+            "level_name": level_names.get(level, "unknown"),
+            "score": score,
+            "broken": broken,
+            "timestamp": now,
+            "status": "pending",
+        }
+
+        if health_monitor is not None:
+            try:
+                repair_result = health_monitor.auto_repair(peer, issue)
+                result["status"] = repair_result.get("status", "unknown")
+                result["repair_detail"] = repair_result
+            except Exception as e:
+                result["status"] = "error"
+                result["error"] = str(e)
+                logger.warning("ChannelHealthInvariant repair failed for %s: %s", peer, e)
+        else:
+            result["status"] = "no_monitor"
+
+        return result
+
+    def clear_escalation(self, peer: str):
+        """Reset escalation level for a peer (channel restored)."""
+        self._escalation_levels.pop(peer, None)
+        self._last_repair_attempt.pop(peer, None)
+
+    def get_escalation_level(self, peer: str) -> int:
+        """Get current escalation level for a peer (1-4, default 1)."""
+        return self._escalation_levels.get(peer, 1)
