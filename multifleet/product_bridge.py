@@ -191,7 +191,27 @@ class ProductBridge:
             if target and not target.available:
                 raise ProductUnavailable(f"{to_product} not available")
 
-        return handler(message)
+        result = handler(message)
+
+        # Emit event for observability (EventEnvelope standard)
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            emit_typed(
+                EventType.FLEET_TASK_DISPATCHED,
+                EventSource.MULTI_FLEET,
+                payload={
+                    "route": route_key,
+                    "from": from_product,
+                    "to": to_product,
+                    "message_type": message.get("type", "unknown"),
+                    "success": "error" not in result,
+                },
+            )
+        except (ImportError, Exception):
+            pass  # Event emission is best-effort
+
+        return result
 
     def list_routes(self) -> List[str]:
         """Return all registered route keys."""
