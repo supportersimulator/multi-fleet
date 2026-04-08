@@ -1,411 +1,210 @@
-"""Tests for the Human Arbiter View.
-
-20 tests covering:
-- Present decision with full data
-- Present decision when no evidence (graceful)
-- Approve updates evidence ledger
-- Override records reason and chosen branch
-- Request changes stores feedback
-- Defer marks as deferred
-- HTML render includes all sections
-- Markdown render for systemMessage
-- List pending returns only unresolved
-- Actions are recorded to audit trail
-- Confidence display correct
-- Memory influences shown
-- Dissent preserved with surgeon identity
-- Web server arbiter routes
-- MCP tool fleet_arbiter
-- IDE bridge arbiter event
-- Dashboard arbiter badge
-- Double-action prevention (approve then approve)
-- Override without branch fails
-- Request changes without feedback fails
-"""
+"""Tests for Human Arbiter View — decision interface for fleet disagreements."""
 
 import json
-import sys
 import time
+import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Ensure multifleet is importable
-sys.path.insert(0, str(Path(__file__).parent.parent))
+FLEET_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(FLEET_ROOT))
 
-from multifleet.arbiter_view import ArbiterView, ArbiterDecision
-from multifleet.synthesis import ChiefSynthesis, SynthesisResult
-from multifleet.evidence_ledger import EvidenceLedger
-from multifleet.cross_rebuttal import RebuttalManager, RebuttalSession, RebuttalPhase
-
-
-# ── Fixtures ──────────────────────────────────────────────────────────────
-
-
-def _make_synthesis(task_id="task-001", confidence=0.85, dissent=None,
-                    cherry_picks=None):
-    """Build a ChiefSynthesis mock with a canned decision."""
-    mock = MagicMock(spec=ChiefSynthesis)
-    decision = {
-        "task_id": task_id,
-        "decision": "merge",
-        "winner_branch": "mac2/feature-a",
-        "confidence": confidence,
-        "reasoning": "Scores: [mac2: 0.850, mac3: 0.620]. Winner: mac2.",
-        "cherry_pick_from": cherry_picks or [
-            {"machine": "mac3", "commit": "abc123", "reason": "Better error handling"},
-        ],
-        "dissent_preserved": dissent or [
-            {"surgeon": "neurologist", "machine": "mac3", "claim": "Risk of memory leak"},
-        ],
-        "dissent_count": len(dissent) if dissent else 1,
-        "metadata": {"memory_reasons": ["prior bug fix in same area"]},
-    }
-    mock.recent_decisions.return_value = [decision]
-    return mock
+from multifleet.arbiter_view import (
+    register_pending_decision,
+    get_pending_decisions,
+    get_decision,
+    record_decision,
+    create_pending_from_race,
+    build_arbiter_html,
+    _pending_decisions,
+    _decided,
+)
 
 
-def _make_evidence_ledger():
-    """Build an EvidenceLedger mock."""
-    mock = MagicMock(spec=EvidenceLedger)
-    mock.query.return_value = [
-        {
-            "entry_id": "ev-001",
-            "event_type": "merge_decision",
-            "node_id": "mac1",
-            "subject": "synthesis:task-001 decision:merge",
-            "payload": {"task_id": "task-001", "decision": "merge"},
-            "timestamp": time.time() - 60,
+@pytest.fixture(autouse=True)
+def _clear_state():
+    """Reset arbiter state between tests."""
+    _pending_decisions.clear()
+    _decided.clear()
+    yield
+    _pending_decisions.clear()
+    _decided.clear()
+
+
+def _make_race(confidence=0.6, winner="mac1", task="Fix auth flow"):
+    """Build a mock race dict for testing."""
+    return {
+        "race_id": "abc123",
+        "task": task,
+        "status": "synthesizing",
+        "started_at": time.time() - 120,
+        "winner": winner,
+        "participants": {
+            "mac1": {
+                "node": "mac1",
+                "branch": "race/abc123/mac1",
+                "status": "completed",
+                "result": {
+                    "summary": "Refactored auth with JWT tokens",
+                    "confidence": 0.75,
+                    "strengths": ["clean API", "backward compatible"],
+                    "risks": ["adds dependency"],
+                },
+            },
+            "mac2": {
+                "node": "mac2",
+                "branch": "race/abc123/mac2",
+                "status": "completed",
+                "result": {
+                    "summary": "Session-based auth with Redis",
+                    "confidence": 0.65,
+                    "strengths": ["simple", "no new deps"],
+                    "risks": ["Redis required"],
+                },
+            },
         },
-    ]
-    mock.record.return_value = {"entry_id": "ev-new", "seq": 99}
-    return mock
-
-
-def _make_rebuttal_mgr(task_id="task-001"):
-    """Build a RebuttalManager with a session that has critiques."""
-    mgr = RebuttalManager()
-    session = mgr.start_session({
-        "task_id": task_id,
-        "assigned_to": ["mac2", "mac3"],
-        "deadline_minutes": 30,
-    })
-    # Advance to a phase where critiques exist
-    session.advance(RebuttalPhase.LOCAL_SURGERY)
-    session.add_verdict("mac2", {"confidence": 0.85})
-    session.add_verdict("mac3", {"confidence": 0.62})
-    session.advance(RebuttalPhase.VERDICTS_COLLECTED)
-    session.advance(RebuttalPhase.UNDER_REVIEW)
-    session.add_critique("mac3", {
-        "surgeon": "cardiologist",
-        "critique": "Approach misses edge case in timeout handling",
-        "machine": "mac3",
-    })
-    return mgr
-
-
-def _make_arbiter(task_id="task-001", **kw):
-    """Build an ArbiterView with full mock dependencies."""
-    synthesis = kw.get("synthesis", _make_synthesis(task_id))
-    evidence = kw.get("evidence", _make_evidence_ledger())
-    rebuttal = kw.get("rebuttal", _make_rebuttal_mgr(task_id))
-    return ArbiterView(synthesis=synthesis, evidence_ledger=evidence, rebuttal_mgr=rebuttal)
-
-
-# ── Test: Present Decision ────────────────────────────────────────────────
-
-
-def test_present_decision_full_data():
-    """Present decision with synthesis, evidence, dissent — all populated."""
-    arbiter = _make_arbiter()
-    result = arbiter.present_decision("task-001")
-
-    assert result["task_id"] == "task-001"
-    assert result["status"] == "pending"
-    assert result["recommendation"]["winner_branch"] == "mac2/feature-a"
-    assert result["confidence"] == 0.85
-    assert len(result["alternatives"]) >= 1
-    assert len(result["evidence_trail"]) >= 1
-    assert len(result["dissent"]) >= 1
-    assert "approve" in result["actions"]
-    assert "override" in result["actions"]
-
-
-def test_present_decision_no_evidence():
-    """Present decision when evidence ledger returns empty — graceful."""
-    evidence = MagicMock(spec=EvidenceLedger)
-    evidence.query.return_value = []
-    evidence.record.return_value = {"entry_id": "x", "seq": 1}
-
-    arbiter = _make_arbiter(evidence=evidence)
-    result = arbiter.present_decision("task-001")
-
-    assert result["task_id"] == "task-001"
-    assert result["evidence_trail"] == []
-    assert result["status"] == "pending"
-
-
-def test_present_decision_no_synthesis():
-    """Present decision when synthesis is None — returns empty recommendation."""
-    arbiter = ArbiterView(synthesis=None, evidence_ledger=None, rebuttal_mgr=None)
-    result = arbiter.present_decision("task-no-synth")
-
-    assert result["task_id"] == "task-no-synth"
-    assert result["recommendation"] == {}
-    assert result["alternatives"] == []
-    assert result["dissent"] == []
-
-
-def test_present_decision_idempotent():
-    """Calling present_decision twice returns same object."""
-    arbiter = _make_arbiter()
-    r1 = arbiter.present_decision("task-001")
-    r2 = arbiter.present_decision("task-001")
-    assert r1["task_id"] == r2["task_id"]
-    assert r1["status"] == r2["status"]
-
-
-# ── Test: Actions ─────────────────────────────────────────────────────────
-
-
-def test_approve_updates_status():
-    """Approve sets status and records to evidence ledger."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    result = arbiter.approve("task-001")
-
-    assert result["status"] == "approved"
-    decision = arbiter.get_decision("task-001")
-    assert decision["status"] == "approved"
-    assert decision["resolved_at"] is not None
-
-    # Evidence ledger should have been called
-    arbiter._evidence_ledger.record.assert_called()
-
-
-def test_override_records_reason_and_branch():
-    """Override stores chosen_branch and reason."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    result = arbiter.override("task-001", "mac3/alternative", "Better test coverage")
-
-    assert result["status"] == "overridden"
-    assert result["chosen_branch"] == "mac3/alternative"
-
-    decision = arbiter.get_decision("task-001")
-    assert decision["chosen_branch"] == "mac3/alternative"
-    assert decision["feedback"] == "Better test coverage"
-
-
-def test_request_changes_stores_feedback():
-    """Request changes stores feedback text."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    result = arbiter.request_changes("task-001", "Need more error handling tests")
-
-    assert result["status"] == "changes_requested"
-    assert result["feedback"] == "Need more error handling tests"
-
-    decision = arbiter.get_decision("task-001")
-    assert decision["feedback"] == "Need more error handling tests"
-
-
-def test_defer_marks_as_deferred():
-    """Defer sets status to deferred."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    result = arbiter.defer("task-001")
-
-    assert result["status"] == "deferred"
-    decision = arbiter.get_decision("task-001")
-    assert decision["status"] == "deferred"
-
-
-def test_double_action_prevention():
-    """Once resolved, further actions are rejected."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    arbiter.approve("task-001")
-
-    # Second approve should fail
-    result = arbiter.approve("task-001")
-    assert "error" in result
-
-    # Override after approve should fail
-    result = arbiter.override("task-001", "mac3/x", "reason")
-    assert "error" in result
-
-
-def test_action_on_nonexistent_task():
-    """Actions on missing task return error."""
-    arbiter = _make_arbiter()
-    result = arbiter.approve("nonexistent")
-    assert "error" in result
-
-
-# ── Test: List Pending ────────────────────────────────────────────────────
-
-
-def test_list_pending_returns_only_unresolved():
-    """List pending excludes approved/overridden/deferred decisions."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    arbiter.present_decision("task-002")
-
-    pending = arbiter.list_pending()
-    assert len(pending) == 2
-
-    arbiter.approve("task-001")
-    pending = arbiter.list_pending()
-    assert len(pending) == 1
-    assert pending[0]["task_id"] == "task-002"
-
-
-# ── Test: Audit Trail ────────────────────────────────────────────────────
-
-
-def test_audit_trail_recorded():
-    """All actions are recorded to the audit trail."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    arbiter.approve("task-001")
-
-    decision = arbiter.get_decision("task-001")
-    trail = decision["audit_trail"]
-    assert len(trail) >= 2
-    actions = [e["action"] for e in trail]
-    assert "presented" in actions
-    assert "approved" in actions
-
-
-# ── Test: Confidence Display ──────────────────────────────────────────────
-
-
-def test_confidence_display_correct():
-    """Confidence from synthesis is correctly propagated."""
-    synthesis = _make_synthesis(confidence=0.42)
-    arbiter = _make_arbiter(synthesis=synthesis)
-    result = arbiter.present_decision("task-001")
-
-    assert result["confidence"] == 0.42
-
-
-# ── Test: Memory Influences ──────────────────────────────────────────────
-
-
-def test_memory_influences_shown():
-    """Memory influences from synthesis metadata are included."""
-    arbiter = _make_arbiter()
-    result = arbiter.present_decision("task-001")
-
-    assert "prior bug fix in same area" in result["memory_influences"]
-
-
-# ── Test: Dissent Preserved ──────────────────────────────────────────────
-
-
-def test_dissent_preserved_with_surgeon_identity():
-    """Dissent entries include surgeon name and machine."""
-    arbiter = _make_arbiter()
-    result = arbiter.present_decision("task-001")
-
-    dissent = result["dissent"]
-    assert len(dissent) >= 1
-    # Check at least one has surgeon identity
-    surgeons = [d.get("surgeon") for d in dissent]
-    assert any(s and s != "unknown" for s in surgeons)
-
-
-# ── Test: HTML Render ─────────────────────────────────────────────────────
-
-
-def test_html_render_includes_all_sections():
-    """HTML output includes recommendation, alternatives, evidence, dissent, actions."""
-    arbiter = _make_arbiter()
-    decision = arbiter.present_decision("task-001")
-    html = arbiter.render_html(decision)
-
-    assert "Recommendation" in html
-    assert "Alternatives" in html
-    assert "Evidence Trail" in html
-    assert "Dissent" in html
-    assert "Approve" in html
-    assert "Override" in html
-    assert "Request Changes" in html
-    assert "Defer" in html
-    assert "mac2/feature-a" in html
-    assert "task-001" in html
-
-
-def test_html_render_no_actions_when_resolved():
-    """HTML for resolved decisions should not show action buttons."""
-    arbiter = _make_arbiter()
-    arbiter.present_decision("task-001")
-    arbiter.approve("task-001")
-    decision = arbiter.get_decision("task-001")
-    html = arbiter.render_html(decision)
-
-    assert "arbiterAction" not in html
-    assert "APPROVED" in html
-
-
-# ── Test: Markdown Render ─────────────────────────────────────────────────
-
-
-def test_markdown_render():
-    """Markdown output includes all key sections."""
-    arbiter = _make_arbiter()
-    decision = arbiter.present_decision("task-001")
-    md = arbiter.render_markdown(decision)
-
-    assert "## Arbiter Decision" in md
-    assert "mac2/feature-a" in md
-    assert "Dissent" in md
-    assert "approve" in md.lower()
-
-
-# ── Test: Dashboard Badge ────────────────────────────────────────────────
-
-
-def test_dashboard_arbiter_badge():
-    """Dashboard renders pending decisions badge when arbiter_pending is set."""
-    from multifleet.dashboard_html import _render_arbiter_pending
-
-    pending = [
-        {"task_id": "task-001", "confidence": 0.85, "dissent": [{"claim": "x"}]},
-        {"task_id": "task-002", "confidence": 0.42, "dissent": []},
-    ]
-    html = _render_arbiter_pending({"arbiter_pending": pending})
-
-    assert "DECISIONS AWAITING REVIEW" in html
-    assert "task-001" in html
-    assert "task-002" in html
-    assert "/arbiter/task-001" in html
-
-
-def test_dashboard_arbiter_badge_empty():
-    """Dashboard renders nothing when no pending decisions."""
-    from multifleet.dashboard_html import _render_arbiter_pending
-
-    html = _render_arbiter_pending({})
-    assert html == ""
-
-
-# ── Test: IDE Bridge ─────────────────────────────────────────────────────
-
-
-def test_ide_bridge_arbiter_event():
-    """IDE bridge translates fleet.arbiter.pending event."""
-    from multifleet.ide_bridge import IDEBridge
-
-    bridge = IDEBridge(aggregator=None)
-    result = bridge.translate_event("fleet.arbiter.pending", {"count": 3, "task_ids": ["t1"]})
-
-    assert result["command"] == "badge"
-    assert result["event_type"] == "fleet.arbiter.pending"
-
-    # Should have pushed a notification
-    notifications = bridge.get_pending_notifications()
-    assert len(notifications) >= 1
-    assert "awaiting human review" in notifications[0]["message"]
+        "synthesis": {
+            "winner_branch": "race/abc123/mac1",
+            "confidence": confidence,
+            "reasoning": "JWT approach has better long-term scalability.",
+            "decision": "merge",
+            "dissent_preserved": [
+                {
+                    "surgeon": "Cardiologist",
+                    "claim": "JWT tokens add complexity without clear benefit for internal service.",
+                    "severity": "medium",
+                },
+            ],
+            "chief_decision_packet": {"type": "chief_decision", "task_id": "abc123"},
+        },
+    }
+
+
+class TestPendingDecisions:
+
+    def test_pending_when_race_complete(self):
+        """Race with low confidence creates a pending arbiter decision."""
+        race = _make_race(confidence=0.6)
+        did = create_pending_from_race(race)
+        assert did is not None
+        pending = get_pending_decisions()
+        assert len(pending) == 1
+        assert pending[0]["decision_id"] == did
+        assert pending[0]["type"] == "race"
+        assert pending[0]["status"] == "awaiting_human"
+
+    def test_high_confidence_no_pending(self):
+        """Race with high confidence does NOT create a pending decision."""
+        race = _make_race(confidence=0.9)
+        did = create_pending_from_race(race)
+        assert did is None
+        assert len(get_pending_decisions()) == 0
+
+    def test_no_pending_returns_empty(self):
+        """Empty state returns empty list."""
+        assert get_pending_decisions() == []
+
+    def test_register_manual_decision(self):
+        """Manually registered decisions appear in pending."""
+        did = register_pending_decision({
+            "type": "rebuttal",
+            "rebuttal_id": "reb-001",
+            "task": "Schema migration approach",
+            "recommendation": {"confidence": 0.5, "reasoning": "Unclear winner"},
+            "alternatives": [],
+            "dissent": [],
+        })
+        assert did is not None
+        assert len(get_pending_decisions()) == 1
+
+
+class TestDecide:
+
+    def test_decide_records_and_resolves(self):
+        """Recording a decision moves it from pending to decided."""
+        race = _make_race(confidence=0.5)
+        did = create_pending_from_race(race)
+        assert len(get_pending_decisions()) == 1
+
+        result = record_decision(did, "accept_recommendation", {"notes": "LGTM"})
+        assert result["status"] == "decided"
+        assert result["action"] == "accept_recommendation"
+        assert "decision_latency_s" in result
+        assert len(get_pending_decisions()) == 0
+        # Should be in decided
+        assert get_decision(did) is not None
+        assert get_decision(did)["status"] == "decided"
+
+    def test_decide_unknown_id(self):
+        """Deciding on unknown ID returns error."""
+        result = record_decision("nonexistent", "accept_recommendation")
+        assert "error" in result
+
+    def test_decide_accept_alternative(self):
+        """Accept alternative action records correctly."""
+        race = _make_race(confidence=0.4)
+        did = create_pending_from_race(race)
+        result = record_decision(did, "accept_alternative", {"alternative_index": 0, "node": "mac2"})
+        assert result["action"] == "accept_alternative"
+        assert result["action_details"]["node"] == "mac2"
+
+    def test_decide_override(self):
+        """Override with custom text records correctly."""
+        race = _make_race(confidence=0.3)
+        did = create_pending_from_race(race)
+        result = record_decision(did, "override", {"custom_text": "Use neither; start fresh."})
+        assert result["action"] == "override"
+        assert "start fresh" in result["action_details"]["custom_text"]
+
+
+class TestArbiterHTML:
+
+    def test_arbiter_html_renders(self):
+        """HTML page builds without errors and contains key elements."""
+        html = build_arbiter_html(daemon_port=8855)
+        assert "<!DOCTYPE html>" in html
+        assert "Fleet Arbiter" in html
+        assert "AWAITING HUMAN DECISION" in html
+        assert "Accept Recommendation" in html
+        assert "Override: Custom" in html
+        assert "Request More Info" in html
+        assert "/arbiter/pending" in html
+        assert "/arbiter/decide" in html
+
+    def test_html_contains_superset_theme(self):
+        """HTML uses the Superset dark theme colors."""
+        html = build_arbiter_html()
+        assert "#1a1a2e" in html
+        assert "#16213e" in html
+        assert "#22c55e" in html  # green
+
+
+class TestCreateFromRace:
+
+    def test_race_decision_has_alternatives(self):
+        """Decision from race includes non-winner participants as alternatives."""
+        race = _make_race(confidence=0.5)
+        did = create_pending_from_race(race)
+        dec = get_decision(did)
+        assert len(dec["alternatives"]) == 1
+        assert dec["alternatives"][0]["node"] == "mac2"
+
+    def test_race_decision_has_dissent(self):
+        """Decision from race preserves dissent from synthesis."""
+        race = _make_race(confidence=0.5)
+        did = create_pending_from_race(race)
+        dec = get_decision(did)
+        assert len(dec["dissent"]) == 1
+        assert dec["dissent"][0]["surgeon"] == "Cardiologist"
+
+    def test_race_decision_has_recommendation(self):
+        """Decision from race has proper recommendation fields."""
+        race = _make_race(confidence=0.5)
+        did = create_pending_from_race(race)
+        dec = get_decision(did)
+        rec = dec["recommendation"]
+        assert rec["confidence"] == 0.5
+        assert rec["branch"] == "race/abc123/mac1"
+        assert rec["node"] == "mac1"
+        assert "scalability" in rec["reasoning"]

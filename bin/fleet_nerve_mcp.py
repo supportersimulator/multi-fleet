@@ -2661,6 +2661,59 @@ def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
         return {"error": f"web_server module not available: {e}"}
 
 
+def fleet_arbiter(action: str = "pending", decision_id: str = "", details: str = "") -> dict:
+    """Human Arbiter — view and resolve pending fleet decisions.
+
+    When machines disagree (low confidence race, unresolved rebuttal),
+    decisions queue for human review. This tool lets you view and resolve them.
+
+    Args:
+        action: pending (list awaiting decisions), decide (record decision),
+                list (all decisions including resolved).
+        decision_id: Required for decide action.
+        details: JSON string with action details (for decide action).
+            For accept_recommendation: {}
+            For accept_alternative: {"alternative_index": 0, "node": "mac2"}
+            For override: {"custom_text": "Your decision here"}
+            For request_info: {"question": "What about X?"}
+    """
+    try:
+        from multifleet.arbiter_view import (
+            get_pending_decisions, record_decision, _pending_decisions, _decided,
+        )
+    except ImportError as e:
+        return {"error": f"arbiter_view module not available: {e}"}
+
+    if action == "pending":
+        pending = get_pending_decisions()
+        return {"decisions": pending, "count": len(pending)}
+
+    elif action == "decide":
+        if not decision_id:
+            return {"error": "decision_id required for decide action"}
+        try:
+            detail_dict = json.loads(details) if details else {}
+        except json.JSONDecodeError:
+            detail_dict = {"raw": details}
+        # Infer action from details
+        decide_action = detail_dict.pop("action", "accept_recommendation")
+        result = record_decision(decision_id, decide_action, detail_dict)
+        return result
+
+    elif action == "list":
+        pending = get_pending_decisions()
+        decided = list(_decided.values())
+        return {
+            "pending": pending,
+            "decided": decided[-20:],  # last 20
+            "total_pending": len(pending),
+            "total_decided": len(_decided),
+        }
+
+    else:
+        return {"error": f"unknown action: {action}. Use: pending, decide, list"}
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -3007,6 +3060,20 @@ TOOLS = [
             "required": [],
         },
         "fn": fleet_race_status,
+    },
+    {
+        "name": "fleet_arbiter",
+        "description": "Human Arbiter — view and resolve pending fleet decisions. When machines disagree (low confidence race, unresolved rebuttal), decisions queue for human review. Actions: pending (list), decide (resolve), list (all).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["pending", "decide", "list"], "description": "Action: pending (default), decide, list", "default": "pending"},
+                "decision_id": {"type": "string", "description": "Decision ID (required for decide)"},
+                "details": {"type": "string", "description": "JSON details for decide action"},
+            },
+            "required": [],
+        },
+        "fn": fleet_arbiter,
     },
     {
         "name": "fleet_liaison_status",

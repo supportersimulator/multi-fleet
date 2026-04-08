@@ -1955,6 +1955,25 @@ class FleetNerveNATS:
                         self._json_response(200, {"results": result_dicts, "count": len(result_dicts)})
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path in ("/arbiter", "/arbiter/"):
+                    try:
+                        from .arbiter_view import build_arbiter_html
+                        html = build_arbiter_html(daemon_port=daemon._http_port if hasattr(daemon, '_http_port') else 8855)
+                        data = html.encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/arbiter/pending":
+                    try:
+                        from .arbiter_view import get_pending_decisions
+                        pending = get_pending_decisions()
+                        self._json_response(200, {"decisions": pending, "count": len(pending)})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -2202,6 +2221,20 @@ class FleetNerveNATS:
                     except Exception as e:
                         daemon._dispatches[dispatch_id]["status"] = "send_failed"
                         self._json_response(500, {"dispatch_id": dispatch_id, "error": str(e)})
+                elif self.path == "/arbiter/decide":
+                    try:
+                        from .arbiter_view import record_decision
+                        decision_id = body.get("decision_id", "")
+                        action = body.get("action", "")
+                        details = body.get("details", {})
+                        if not decision_id or not action:
+                            self._json_response(400, {"error": "missing decision_id or action"})
+                            return
+                        result = record_decision(decision_id, action, details)
+                        code = 200 if "error" not in result else 404
+                        self._json_response(code, result)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/evidence":
                     try:
                         from .evidence_ledger import EvidenceLedger
