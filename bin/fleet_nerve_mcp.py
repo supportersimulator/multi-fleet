@@ -2122,6 +2122,51 @@ def fleet_supervisor(action: str, task_id: str = "", description: str = "",
     return {"error": f"Unknown action: {action}. Use: start, advance, block, status, list"}
 
 
+# ── Code Scanner (GhostScan) ──
+
+def fleet_scan(cost_limit: str = "medium", changed_files: str = "",
+               task_description: str = "", probe_id: str = "") -> dict:
+    """Run code scanner probes and return findings."""
+    try:
+        from multifleet.code_scanner import create_engine
+        from multifleet.code_scanner.probe_contract import ProbeContext
+    except ImportError as e:
+        return {"error": f"code_scanner not available: {e}"}
+
+    engine = create_engine()
+    node_id = os.environ.get("MULTIFLEET_NODE_ID", socket.gethostname())
+    ctx = ProbeContext(
+        repo_path=str(REPO_ROOT.parent),  # superrepo root
+        changed_files=[f.strip() for f in changed_files.split(",") if f.strip()] if changed_files else [],
+        task_description=task_description,
+        node_id=node_id,
+    )
+
+    if probe_id:
+        result = engine.run_one(probe_id, ctx)
+        return {
+            "probe_id": probe_id,
+            "result": result.to_dict(),
+            "stats": engine.stats,
+        }
+
+    if cost_limit == "cheap":
+        results = engine.run_cheap(ctx)
+    elif cost_limit == "medium":
+        results = engine.run_medium(ctx)
+    else:
+        results = engine.run_all(ctx, cost_limit=cost_limit)
+
+    return {
+        "node": node_id,
+        "cost_limit": cost_limit,
+        "probes_run": len(results),
+        "total_findings": sum(len(r.findings) for r in results),
+        "results": [r.to_dict() for r in results],
+        "stats": engine.stats,
+    }
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -2523,6 +2568,21 @@ TOOLS = [
             "required": ["action"],
         },
         "fn": fleet_supervisor,
+    },
+    {
+        "name": "fleet_scan",
+        "description": "Run GhostScan code scanner probes — detects mirror drift (stale docs vs code), hidden dependencies, blast radius of changes. Returns structured findings with severity, confidence, and suggested actions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cost_limit": {"type": "string", "enum": ["cheap", "medium", "expensive"], "description": "Cost tier limit (cheap=fast path checks, medium=AST analysis, expensive=full scan)", "default": "medium"},
+                "changed_files": {"type": "string", "description": "Comma-separated list of changed file paths (for blast_radius and param_drift probes)"},
+                "task_description": {"type": "string", "description": "Current task context (helps probes focus)"},
+                "probe_id": {"type": "string", "description": "Run a single probe by ID (mirror_drift, hidden_dependency, blast_radius)"},
+            },
+            "required": [],
+        },
+        "fn": fleet_scan,
     },
 ]
 
