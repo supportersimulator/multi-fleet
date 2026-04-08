@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from multifleet.probe_engine import ProbeResult, ProbeFinding
+from multifleet.surgeon_adapter import SurgeonAdapter
 
 logger = logging.getLogger("fleet-nerve.acceptance-gate")
 
@@ -62,10 +63,12 @@ class AcceptanceGate:
     converge into a single accept/block decision.
     """
 
-    def __init__(self, strict: bool = False, probe_engine=None, evidence_ledger=None):
+    def __init__(self, strict: bool = False, probe_engine=None, evidence_ledger=None,
+                 surgeon_adapter: SurgeonAdapter = None):
         self._strict = strict
         self._probe_engine = probe_engine
         self._evidence_ledger = evidence_ledger
+        self._surgeon: SurgeonAdapter = surgeon_adapter or SurgeonAdapter()
 
     def evaluate(
         self,
@@ -136,16 +139,21 @@ class AcceptanceGate:
         else:
             checks.append({"name": "evidence", "status": "skipped"})
 
-        # Check 3: Surgeon state
+        # Check 3: Surgeon state — query adapter for live state, fall back to context
         surgeon_state = context.get("surgeon_state", {})
+        if self._surgeon.is_available():
+            surgeon_state = self._surgeon.get_state()
+            logger.info("Surgeon state from adapter: %s", surgeon_state)
         if surgeon_state:
             phase = surgeon_state.get("phase", "close")
             disagreement = surgeon_state.get("disagreement_score", 0.0)
+            surgeon_blocking = []
             if phase in ("triage", "operate"):
-                blocking.append(f"Surgeon still in {phase} phase")
+                surgeon_blocking.append(f"Surgeon still in {phase} phase")
             if disagreement > 0.7:
-                blocking.append(f"High surgeon disagreement ({disagreement:.2f})")
-            checks.append({"name": "surgeon", "status": "pass" if not blocking else "fail"})
+                surgeon_blocking.append(f"High surgeon disagreement ({disagreement:.2f})")
+            blocking.extend(surgeon_blocking)
+            checks.append({"name": "surgeon", "status": "pass" if not surgeon_blocking else "fail"})
         else:
             checks.append({"name": "surgeon", "status": "skipped"})
 
@@ -209,9 +217,22 @@ class AcceptanceGate:
                         if f.blast_radius == "high":
                             blocking.append(f"Blocking probe: {f.title}")
 
-        # Check 2: Surgeon resolution
-        if surgeon_intensity in ("standard", "full") and not surgeon_resolved:
-            blocking.append(f"Surgeon review required ({surgeon_intensity}) but not resolved")
+        # Check 2: Surgeon resolution — verify via adapter, never trust caller alone
+        if surgeon_intensity in ("standard", "full"):
+            if self._surgeon.is_available():
+                claim = f"Task acceptance check (intensity={surgeon_intensity})"
+                consensus = self._surgeon.check_consensus(claim)
+                surgeon_resolved = consensus.get("resolved", False)
+                surgeon_dissent_count = len(consensus.get("dissent", []))
+                logger.info(
+                    "Surgeon adapter: resolved=%s confidence=%.2f dissents=%d source=%s",
+                    surgeon_resolved, consensus.get("confidence", 0.0),
+                    surgeon_dissent_count, consensus.get("source", "?"),
+                )
+            else:
+                logger.warning("Surgeon adapter unavailable — using caller-provided state")
+            if not surgeon_resolved:
+                blocking.append(f"Surgeon review required ({surgeon_intensity}) but not resolved")
 
         if surgeon_dissent_count > 0:
             objections.append(f"{surgeon_dissent_count} unresolved surgeon dissent(s)")

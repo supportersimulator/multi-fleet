@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -345,9 +346,15 @@ class FleetGainsGate:
             return CheckResult("test_suite", True, "No tests dir (skipped)",
                                latency_ms=(time.monotonic() - t0) * 1000, critical=False)
         try:
+            cmd = [sys.executable, "-m", "pytest", str(test_dir), "-q", "--tb=no", "-x"]
+            # Only add --timeout if pytest-timeout is available
+            try:
+                import pytest_timeout  # noqa: F401
+                cmd.append("--timeout=10")
+            except ImportError:
+                pass
             r = subprocess.run(
-                [sys.executable, "-m", "pytest", str(test_dir), "-q", "--tb=no", "-x",
-                 "--timeout=10"],
+                cmd,
                 capture_output=True, text=True, timeout=30,
                 cwd=str(Path(__file__).parent.parent),
             )

@@ -283,11 +283,23 @@ class NodeOverlayManager:
             "last_scan_ts": time.time(),
         })
 
-    def update_from_surgeon(self, node_id: str, surgeon_state: dict) -> NodeOverlay:
+    def update_from_surgeon(self, node_id: str, surgeon_state: dict = None,
+                            surgeon_adapter=None) -> NodeOverlay:
         """Update overlay from 3-surgeon state.
 
-        surgeon_state: dict with phase, disagreement_score, correction_loops, abstention.
+        If surgeon_adapter (SurgeonAdapter) is provided and available,
+        queries live state instead of trusting the provided dict.
+
+        Args:
+            node_id: Fleet node identifier.
+            surgeon_state: dict with phase, disagreement_score, correction_loops, abstention.
+            surgeon_adapter: Optional SurgeonAdapter for live state queries.
         """
+        if surgeon_adapter is not None and surgeon_adapter.is_available():
+            surgeon_state = surgeon_adapter.get_state()
+            logger.info("Surgeon overlay for %s from adapter: %s", node_id, surgeon_state)
+        elif surgeon_state is None:
+            surgeon_state = {}
         return self.update(node_id, surgeon={
             "phase": surgeon_state.get("phase", "idle"),
             "disagreement_score": surgeon_state.get("disagreement_score", 0.0),
