@@ -46,8 +46,10 @@ class PacketStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON packets(timestamp)")
 
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def ingest(self, packet: dict) -> int:
