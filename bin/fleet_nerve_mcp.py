@@ -2075,6 +2075,294 @@ def fleet_branches(format: str = "ascii") -> dict:
         }
 
 
+# ── Vision Packets — structured brainstorm/adjudication/escalation ──────
+
+_brainstorm_store: dict = {}  # in-memory: brainstorm_id -> BrainstormPacket
+_surgeon_decision_store: dict = {}  # decision_id -> SurgeonDecisionPacket
+_vision_contract_store: dict = {}  # contract_id -> VisionContract
+_execution_ledger_store: dict = {}  # ledger_id -> ExecutionLedger
+_escalation_store: dict = {}  # escalation_id -> ChiefEscalationPacket
+_chief_decision_v2_store: dict = {}  # decision_id -> ChiefDecisionPacket
+
+
+def _get_vision_packets():
+    """Lazy import vision_packets module."""
+    try:
+        from multifleet.vision_packets import (
+            BrainstormPacket, SurgeonDecisionPacket, VisionContract,
+            ExecutionLedger, ChiefEscalationPacket, ChiefDecisionPacket,
+        )
+        return {
+            "BrainstormPacket": BrainstormPacket,
+            "SurgeonDecisionPacket": SurgeonDecisionPacket,
+            "VisionContract": VisionContract,
+            "ExecutionLedger": ExecutionLedger,
+            "ChiefEscalationPacket": ChiefEscalationPacket,
+            "ChiefDecisionPacket": ChiefDecisionPacket,
+        }
+    except Exception as e:
+        logger.warning(f"vision_packets import failed: {e}")
+        return None
+
+
+def fleet_brainstorm(action: str, task_id: str = "", brainstorm_id: str = "",
+                     title: str = "", description: str = "", pros: str = "",
+                     cons: str = "", confidence: str = "", option_id: str = "",
+                     surgeon: str = "", vote: str = "", reasoning: str = "",
+                     objections: str = "", done_criteria: str = "",
+                     node_id: str = "", reason: str = "", urgency: str = "medium",
+                     decision: str = "", modifications: str = "",
+                     memory_refs: str = "", step_description: str = "",
+                     step_id: str = "", step_status: str = "",
+                     evidence: str = "", escalation_id: str = "") -> dict:
+    """Vision packet operations — structured brainstorm, adjudicate, lock, execute, escalate.
+
+    Actions:
+      create         — start a brainstorm for a task
+      add_option     — add an option to a brainstorm
+      adjudicate     — add a surgeon opinion; auto-checks consensus
+      lock_vision    — lock a VisionContract from a decided brainstorm
+      execute_init   — create an ExecutionLedger from a VisionContract
+      execute_step   — advance a step in an ExecutionLedger
+      escalate       — escalate to chief when consensus fails
+      chief_decide   — record chief's authoritative decision
+      status         — get current state of a brainstorm/task
+      list           — list all active brainstorms
+    """
+    vp = _get_vision_packets()
+    if vp is None:
+        return {"error": "vision_packets module not available"}
+
+    BrainstormPacket = vp["BrainstormPacket"]
+    SurgeonDecisionPacket = vp["SurgeonDecisionPacket"]
+    VisionContract = vp["VisionContract"]
+    ExecutionLedger = vp["ExecutionLedger"]
+    ChiefEscalationPacket = vp["ChiefEscalationPacket"]
+    ChiefDecisionPacket = vp["ChiefDecisionPacket"]
+
+    effective_node = node_id or NODE_ID
+
+    if action == "create":
+        if not task_id:
+            return {"error": "task_id required for create"}
+        bp = BrainstormPacket(task_id=task_id, node_id=effective_node)
+        _brainstorm_store[bp.id] = bp
+        return {"brainstorm_id": bp.id, "task_id": task_id, "status": "created"}
+
+    elif action == "add_option":
+        bp = _brainstorm_store.get(brainstorm_id)
+        if bp is None:
+            return {"error": f"brainstorm {brainstorm_id} not found"}
+        if not title or not description:
+            return {"error": "title and description required"}
+        kwargs = {}
+        if pros:
+            kwargs["pros"] = [p.strip() for p in pros.split(",")]
+        if cons:
+            kwargs["cons"] = [c.strip() for c in cons.split(",")]
+        if confidence:
+            kwargs["confidence"] = float(confidence)
+        opt = bp.add_option(title, description, **kwargs)
+        return {"option_id": opt.id, "brainstorm_id": brainstorm_id,
+                "total_options": len(bp.options)}
+
+    elif action == "adjudicate":
+        bp = _brainstorm_store.get(brainstorm_id)
+        if bp is None:
+            return {"error": f"brainstorm {brainstorm_id} not found"}
+        if not surgeon or not vote or not reasoning:
+            return {"error": "surgeon, vote, and reasoning required"}
+        # Get or create the SurgeonDecisionPacket for this brainstorm
+        sdp = None
+        for s in _surgeon_decision_store.values():
+            if s.brainstorm_id == brainstorm_id:
+                sdp = s
+                break
+        if sdp is None:
+            sdp = SurgeonDecisionPacket(brainstorm_id=brainstorm_id, task_id=bp.task_id)
+            _surgeon_decision_store[sdp.id] = sdp
+        obj_list = [o.strip() for o in objections.split(",")] if objections else []
+        conf = float(confidence) if confidence else 0.5
+        sdp.add_opinion(surgeon, vote, conf, reasoning, objections=obj_list)
+        consensus = sdp.check_consensus()
+        result = {
+            "decision_id": sdp.id, "brainstorm_id": brainstorm_id,
+            "opinions_count": len(sdp.opinions), "consensus": consensus,
+        }
+        if consensus:
+            result["selected_option"] = sdp.selected_option
+        else:
+            sdp.requires_chief = len(sdp.opinions) >= 3
+            result["requires_chief"] = sdp.requires_chief
+        return result
+
+    elif action == "lock_vision":
+        if not brainstorm_id:
+            return {"error": "brainstorm_id required"}
+        bp = _brainstorm_store.get(brainstorm_id)
+        if bp is None:
+            return {"error": f"brainstorm {brainstorm_id} not found"}
+        # Find the decision
+        sdp = None
+        for s in _surgeon_decision_store.values():
+            if s.brainstorm_id == brainstorm_id:
+                sdp = s
+                break
+        criteria = [c.strip() for c in done_criteria.split(",")] if done_criteria else []
+        if not criteria:
+            return {"error": "done_criteria required (comma-separated)"}
+        approach = ""
+        if sdp and sdp.selected_option:
+            opt = bp.get_option(sdp.selected_option)
+            approach = opt.title if opt else sdp.selected_option
+        vc = VisionContract(
+            task_id=bp.task_id,
+            description=description or f"Vision for task {bp.task_id}",
+            done_criteria=criteria,
+            selected_approach=approach,
+            surgeon_decision_id=sdp.id if sdp else "",
+        )
+        vc.lock(effective_node)
+        _vision_contract_store[vc.id] = vc
+        return {"contract_id": vc.id, "task_id": bp.task_id,
+                "locked_by": effective_node, "done_criteria": criteria,
+                "selected_approach": approach}
+
+    elif action == "execute_init":
+        contract_id = brainstorm_id  # reuse param for contract lookup
+        if not contract_id:
+            # Try finding by task_id
+            for vc in _vision_contract_store.values():
+                if vc.task_id == task_id:
+                    contract_id = vc.id
+                    break
+        vc = _vision_contract_store.get(contract_id)
+        if vc is None:
+            return {"error": f"vision contract not found (id={contract_id}, task={task_id})"}
+        el = ExecutionLedger(
+            task_id=vc.task_id,
+            vision_contract_id=vc.id,
+            node_id=effective_node,
+        )
+        # Auto-create steps from done_criteria
+        for criterion in vc.done_criteria:
+            el.add_step(criterion)
+        _execution_ledger_store[el.id] = el
+        return {"ledger_id": el.id, "task_id": vc.task_id,
+                "steps": len(el.steps), "progress": 0.0}
+
+    elif action == "execute_step":
+        ledger_id = brainstorm_id  # reuse param
+        el = _execution_ledger_store.get(ledger_id)
+        if el is None:
+            return {"error": f"execution ledger {ledger_id} not found"}
+        if not step_id or not step_status:
+            return {"error": "step_id and step_status required"}
+        found = el.advance_step(step_id, step_status, evidence=evidence)
+        if not found:
+            return {"error": f"step {step_id} not found in ledger {ledger_id}"}
+        return {"ledger_id": ledger_id, "step_id": step_id,
+                "status": step_status, "progress": el.progress,
+                "is_blocked": el.is_blocked}
+
+    elif action == "escalate":
+        if not task_id:
+            return {"error": "task_id required for escalate"}
+        esc_reason = reason or "no_consensus"
+        esc = ChiefEscalationPacket(
+            task_id=task_id,
+            from_node=effective_node,
+            reason=esc_reason,
+            urgency=urgency,
+            brainstorm_id=brainstorm_id,
+            evidence_refs=[e.strip() for e in evidence.split(",")] if evidence else [],
+        )
+        # Find surgeon decision if exists
+        for s in _surgeon_decision_store.values():
+            if s.brainstorm_id == brainstorm_id:
+                esc.surgeon_decision_id = s.id
+                break
+        _escalation_store[esc.id] = esc
+        return {"escalation_id": esc.id, "task_id": task_id,
+                "reason": esc_reason, "urgency": urgency}
+
+    elif action == "chief_decide":
+        if not escalation_id:
+            return {"error": "escalation_id required for chief_decide"}
+        esc = _escalation_store.get(escalation_id)
+        if esc is None:
+            return {"error": f"escalation {escalation_id} not found"}
+        if not decision:
+            return {"error": "decision required (approve|reject|modify|defer|split)"}
+        cd = ChiefDecisionPacket(
+            escalation_id=escalation_id,
+            task_id=esc.task_id,
+            decision=decision,
+            reasoning=reasoning or "",
+            memory_refs=[r.strip() for r in memory_refs.split(",")] if memory_refs else [],
+            modifications=[m.strip() for m in modifications.split(",")] if modifications else [],
+        )
+        _chief_decision_v2_store[cd.id] = cd
+        return {"chief_decision_id": cd.id, "escalation_id": escalation_id,
+                "task_id": esc.task_id, "decision": decision}
+
+    elif action == "status":
+        result = {"task_id": task_id, "brainstorms": [], "decisions": [],
+                  "contracts": [], "ledgers": [], "escalations": []}
+        for bp in _brainstorm_store.values():
+            if not task_id or bp.task_id == task_id:
+                result["brainstorms"].append(bp.to_dict())
+        for sdp in _surgeon_decision_store.values():
+            if not task_id or sdp.task_id == task_id:
+                result["decisions"].append(sdp.to_dict())
+        for vc in _vision_contract_store.values():
+            if not task_id or vc.task_id == task_id:
+                result["contracts"].append(vc.to_dict())
+        for el in _execution_ledger_store.values():
+            if not task_id or el.task_id == task_id:
+                result["ledgers"].append(el.to_dict())
+        for esc in _escalation_store.values():
+            if not task_id or esc.task_id == task_id:
+                result["escalations"].append(esc.to_dict())
+        return result
+
+    elif action == "list":
+        return {
+            "brainstorms": [{"id": bp.id, "task_id": bp.task_id, "options": len(bp.options)}
+                            for bp in _brainstorm_store.values()],
+            "count": len(_brainstorm_store),
+        }
+
+    else:
+        return {"error": f"unknown action: {action}, expected: create|add_option|adjudicate|lock_vision|execute_init|execute_step|escalate|chief_decide|status|list"}
+
+
+# ── Node Overlay + Acceptance Gate ──────────────────────────────
+
+
+def fleet_overlay(node_id: str = "", action: str = "get") -> dict:
+    """Query or update node overlay state."""
+    if action == "get" and node_id:
+        return _daemon_get(f"/overlay/{node_id}")
+    elif action == "list" or not node_id:
+        return _daemon_get("/overlays")
+    elif action == "update" and node_id:
+        return _daemon_post("/overlay", {"node_id": node_id})
+    else:
+        return {"error": f"Unknown action: {action}. Use: get, list, update"}
+
+
+def fleet_accept(task_id: str, branch: str = "", context: str = "") -> dict:
+    """Run acceptance gate for a task before merge."""
+    body: dict = {"task_id": task_id, "branch": branch}
+    if context:
+        try:
+            body["context"] = json.loads(context)
+        except (json.JSONDecodeError, TypeError):
+            body["context"] = {}
+    return _daemon_post("/accept", body)
+
+
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -2477,6 +2765,68 @@ TOOLS = [
             "required": [],
         },
         "fn": fleet_branches,
+    },
+    {
+        "name": "fleet_brainstorm",
+        "description": "Vision packets — structured brainstorm, 3-surgeon adjudication, vision contracts, execution tracking, and chief escalation. The fleet 'thinks together' through typed artifacts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "add_option", "adjudicate", "lock_vision", "execute_init", "execute_step", "escalate", "chief_decide", "status", "list"], "description": "Vision packet action"},
+                "task_id": {"type": "string", "description": "Task ID (for create, escalate, status)"},
+                "brainstorm_id": {"type": "string", "description": "Brainstorm ID (for add_option, adjudicate, lock_vision; also used as contract/ledger ID for execute_*)"},
+                "title": {"type": "string", "description": "Option title (for add_option)"},
+                "description": {"type": "string", "description": "Option or contract description"},
+                "pros": {"type": "string", "description": "Comma-separated pros (for add_option)"},
+                "cons": {"type": "string", "description": "Comma-separated cons (for add_option)"},
+                "confidence": {"type": "string", "description": "Confidence 0-1 (for add_option, adjudicate)"},
+                "option_id": {"type": "string", "description": "Option ID reference"},
+                "surgeon": {"type": "string", "enum": ["atlas", "cardiologist", "neurologist"], "description": "Surgeon role (for adjudicate)"},
+                "vote": {"type": "string", "description": "Option ID to vote for, or 'abstain' (for adjudicate)"},
+                "reasoning": {"type": "string", "description": "Surgeon reasoning or chief reasoning"},
+                "objections": {"type": "string", "description": "Comma-separated objections (for adjudicate)"},
+                "done_criteria": {"type": "string", "description": "Comma-separated done criteria (for lock_vision)"},
+                "node_id": {"type": "string", "description": "Override node ID (default: this node)"},
+                "reason": {"type": "string", "description": "Escalation reason (for escalate)"},
+                "urgency": {"type": "string", "enum": ["low", "medium", "high", "critical"], "description": "Escalation urgency"},
+                "decision": {"type": "string", "enum": ["approve", "reject", "modify", "defer", "split"], "description": "Chief decision (for chief_decide)"},
+                "modifications": {"type": "string", "description": "Comma-separated modifications (for chief_decide)"},
+                "memory_refs": {"type": "string", "description": "Comma-separated DAO/wisdom refs (for chief_decide)"},
+                "escalation_id": {"type": "string", "description": "Escalation ID (for chief_decide)"},
+                "step_id": {"type": "string", "description": "Step ID (for execute_step)"},
+                "step_status": {"type": "string", "enum": ["pending", "in_progress", "done", "blocked", "skipped"], "description": "Step status (for execute_step)"},
+                "evidence": {"type": "string", "description": "Evidence reference (for execute_step, escalate)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_brainstorm,
+    },
+    {
+        "name": "fleet_overlay",
+        "description": "Node overlay state — the 5-strip view of what each fleet node 'thinks' (epistemic, surgeon, invariant, evidence, probe). Actions: get (single node), list (all nodes), update.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string", "description": "Node ID to query (required for get/update)"},
+                "action": {"type": "string", "enum": ["get", "list", "update"], "description": "Overlay action (default: get)", "default": "get"},
+            },
+            "required": [],
+        },
+        "fn": fleet_overlay,
+    },
+    {
+        "name": "fleet_accept",
+        "description": "Acceptance gate — pre-merge verification that prevents shipping without evidence. Checks: probe findings, surgeon resolution, invariants, evidence exists, mirror drift, gains gate.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task ID to evaluate"},
+                "branch": {"type": "string", "description": "Branch being merged"},
+                "context": {"type": "string", "description": "JSON context: surgeon_state, invariant_state, mirror_drift_detected/acknowledged, probe_context"},
+            },
+            "required": ["task_id"],
+        },
+        "fn": fleet_accept,
     },
 ]
 

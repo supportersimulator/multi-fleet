@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "chief_decision_v2",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Chief's response to an escalation — authoritative decision on brainstorm/vision conflicts",
+  "payload_schema": {
+    "type": "object",
+    "required": ["id", "escalation_id", "task_id", "decision", "reasoning"],
+    "properties": {
+      "id": {"type": "string"},
+      "escalation_id": {"type": "string"},
+      "task_id": {"type": "string"},
+      "decision": {
+        "type": "string",
+        "enum": ["approve", "reject", "modify", "defer", "split"]
+      },
+      "reasoning": {"type": "string"},
+      "memory_refs": {"type": "array", "items": {"type": "string"}},
+      "modifications": {"type": "array", "items": {"type": "string"}},
+      "created_at": {"type": "number"}
+    }
+  },
+  "ttl_s": 7200,
+  "priority": "critical"
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "surgeon_decision",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "3-Surgeon adjudication result on brainstorm options",
+  "payload_schema": {
+    "type": "object",
+    "required": ["id", "brainstorm_id", "task_id", "opinions"],
+    "properties": {
+      "id": {"type": "string"},
+      "brainstorm_id": {"type": "string"},
+      "task_id": {"type": "string"},
+      "opinions": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["surgeon", "vote", "confidence", "reasoning"],
+          "properties": {
+            "surgeon": {"type": "string", "enum": ["atlas", "cardiologist", "neurologist"]},
+            "vote": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reasoning": {"type": "string"},
+            "objections": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      },
+      "consensus": {"type": "boolean"},
+      "selected_option": {"type": "string"},
+      "unresolved_objections": {"type": "array", "items": {"type": "string"}},
+      "requires_chief": {"type": "boolean"},
+      "created_at": {"type": "number"}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "high"
+}

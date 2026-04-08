@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "vision_contract",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "What must be true for a task to be done — locked after adjudication",
+  "payload_schema": {
+    "type": "object",
+    "required": ["id", "task_id", "description", "done_criteria"],
+    "properties": {
+      "id": {"type": "string"},
+      "task_id": {"type": "string"},
+      "description": {"type": "string"},
+      "done_criteria": {
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": 1
+      },
+      "selected_approach": {"type": "string"},
+      "locked": {"type": "boolean"},
+      "locked_at": {"type": "number"},
+      "locked_by": {"type": "string"},
+      "surgeon_decision_id": {"type": "string"},
+      "created_at": {"type": "number"}
+    }
+  },
+  "ttl_s": 7200,
+  "priority": "high"
+}
