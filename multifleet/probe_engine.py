@@ -150,6 +150,17 @@ class ProbeRegistry:
         }
         logger.debug("probe_registered id=%s category=%s", probe_id, category.value)
 
+    def _emit_probe_finding(self, result: ProbeResult) -> None:
+        """Emit a fleet.probe.finding event to the EventBus (best-effort)."""
+        try:
+            from multifleet.eventbus import FleetEventBus
+            import os
+            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+            bus = FleetEventBus(node_id=node_id)
+            bus.emit("probe.finding", result.to_dict())
+        except Exception:
+            pass  # Best-effort — never fail probe execution for event emission
+
     def _run_probe(self, probe_id: str, entry: dict, context: dict) -> ProbeResult:
         """Execute a single probe with timing and error handling."""
         t0 = time.monotonic()
@@ -161,11 +172,13 @@ class ProbeRegistry:
                     f"Probe returned {type(result).__name__}, expected ProbeResult"
                 )
             result.duration_ms = (time.monotonic() - t0) * 1000
+            self._emit_probe_finding(result)
             return result
         except Exception as e:
             logger.error("probe_error id=%s error=%s", probe_id, e)
             result = ProbeResult.error(probe_id, entry["category"].value, str(e))
             result.duration_ms = (time.monotonic() - t0) * 1000
+            self._emit_probe_finding(result)
             return result
 
     def run_all(self, context: Optional[dict] = None) -> list[ProbeResult]:

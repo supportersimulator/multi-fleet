@@ -59,6 +59,67 @@ def _build_memory_reasons(verdict_adjustments: dict) -> list:
     return reasons
 
 
+def _query_prior_failures(query_fn, files_touched: list) -> list:
+    """Check memory for prior failures related to specific files.
+
+    Returns list of failure descriptions found in memory for these files.
+    """
+    if not files_touched:
+        return []
+    failures = []
+    # Query with file paths to find file-specific failures
+    file_query = " ".join(files_touched[:5]) + " fail error regression"
+    try:
+        results = query_fn(file_query, limit=3)
+        for r in results:
+            text = r if isinstance(r, str) else str(r)
+            if any(kw in text.lower() for kw in _FAILURE_KEYWORDS):
+                failures.append(text[:200])
+    except Exception as e:
+        logger.debug("Prior failure check failed: %s", e)
+    return failures
+
+
+def _query_arch_decisions(query_fn, summary: str) -> list:
+    """Check memory for architectural decisions affecting this approach.
+
+    Returns list of relevant architectural decision descriptions.
+    """
+    if not summary:
+        return []
+    decisions = []
+    arch_query = summary + " architecture decision"
+    try:
+        results = query_fn(arch_query, limit=3)
+        for r in results:
+            text = r if isinstance(r, str) else str(r)
+            # Architectural decisions typically reference patterns, decisions, rationale
+            if any(kw in text.lower() for kw in (
+                "decision", "architecture", "pattern", "approach", "design",
+                "rationale", "alternative", "consequence",
+            )):
+                decisions.append(text[:200])
+    except Exception as e:
+        logger.debug("Arch decision check failed: %s", e)
+    return decisions
+
+
+def _query_professor(professor_fn, summary: str) -> Optional[str]:
+    """Consult the professor for distilled wisdom about this task.
+
+    Returns professor guidance string or None.
+    """
+    if not summary:
+        return None
+    try:
+        guidance = professor_fn(task=summary)
+        if guidance and isinstance(guidance, str) and len(guidance.strip()) > 10:
+            return guidance.strip()[:500]
+    except Exception as e:
+        logger.debug("Professor consult failed: %s", e)
+    return None
+
+
 def create_contextdna_analyzer():
     """Create a ContextDNA-backed analyzer for ChiefSynthesis.
 
@@ -68,6 +129,7 @@ def create_contextdna_analyzer():
     """
     # Try to import ContextDNA memory modules
     query_fn = None
+    professor_fn = None
 
     try:
         from memory.query import query_learnings
@@ -83,11 +145,21 @@ def create_contextdna_analyzer():
         except Exception:
             pass
 
+    # Try to import professor for distilled wisdom
+    try:
+        from memory.professor import consult as _consult
+        professor_fn = _consult
+    except Exception:
+        pass
+
     if query_fn is None:
         logger.info("ContextDNA memory not available — using confidence-only scoring")
         return None
 
-    logger.info("ContextDNA memory available — analyzer ready")
+    logger.info(
+        "ContextDNA memory available — analyzer ready (professor=%s)",
+        "yes" if professor_fn else "no",
+    )
 
     def analyzer(task_id: str, verdicts: dict) -> Optional["SynthesisResult"]:
         """Compare verdicts against ContextDNA memory for evidence-backed decisions."""
@@ -98,6 +170,8 @@ def create_contextdna_analyzer():
 
         # Collect adjustments per machine
         adjustments: dict[str, dict] = {}
+        # Collect memory reasons explaining WHY memory influenced the decision
+        memory_reasons_detail: list[dict] = []
 
         for mid, v in verdicts.items():
             summary = v.get("summary", "")
@@ -113,7 +187,7 @@ def create_contextdna_analyzer():
                 adjustments[mid] = {"delta": NO_MEMORY_MATCH, "reason": "no queryable content"}
                 continue
 
-            # Query memory
+            # 1. Query general memory for the summary
             try:
                 memory_results = query_fn(query_text, limit=5)
             except Exception as e:
@@ -123,22 +197,82 @@ def create_contextdna_analyzer():
 
             if not memory_results:
                 adjustments[mid] = {"delta": NO_MEMORY_MATCH, "reason": "no memory matches"}
+                # Still check for file-specific failures and arch decisions
+                prior_failures = _query_prior_failures(query_fn, files_touched)
+                arch_decisions = _query_arch_decisions(query_fn, summary)
+                if prior_failures or arch_decisions:
+                    delta = -PRIOR_FAILURE_PENALTY if prior_failures else ARCH_DECISION_BOOST
+                    adjustments[mid] = {
+                        "delta": delta,
+                        "reason": "; ".join(prior_failures or arch_decisions)[:200],
+                        "match_count": len(prior_failures) + len(arch_decisions),
+                    }
+                    memory_reasons_detail.append({
+                        "machine": mid,
+                        "prior_failures": prior_failures,
+                        "arch_decisions": arch_decisions,
+                        "source": "file_and_arch_check",
+                    })
                 continue
 
-            # Score memory results
+            # Score general memory results
             combined_text = " ".join(
                 r if isinstance(r, str) else str(r) for r in memory_results
             )
             delta = _score_memory_text(combined_text)
+
+            # 2. Check for prior failures on the specific files touched
+            prior_failures = _query_prior_failures(query_fn, files_touched)
+            if prior_failures and delta >= 0:
+                # File-specific failures override general success signal
+                delta = -PRIOR_FAILURE_PENALTY
+
+            # 3. Check for architectural decisions affecting the approach
+            arch_decisions = _query_arch_decisions(query_fn, summary)
+            if arch_decisions and delta == NO_MEMORY_MATCH:
+                # Arch decisions give a small boost (approach aligns with prior decisions)
+                delta = ARCH_DECISION_BOOST
+
             adjustments[mid] = {
                 "delta": delta,
                 "reason": combined_text[:200],
                 "match_count": len(memory_results),
             }
 
+            # Build detailed reason entry
+            reason_entry = {
+                "machine": mid,
+                "memory_matches": len(memory_results),
+                "delta": delta,
+                "source": "general_query",
+            }
+            if prior_failures:
+                reason_entry["prior_failures"] = prior_failures
+                reason_entry["source"] = "general_query+file_failures"
+            if arch_decisions:
+                reason_entry["arch_decisions"] = arch_decisions
+                reason_entry["source"] = reason_entry.get("source", "") + "+arch"
+            memory_reasons_detail.append(reason_entry)
+
+        # 4. Consult professor for overall task wisdom (once, using first non-empty summary)
+        professor_wisdom = None
+        if professor_fn:
+            for v in verdicts.values():
+                s = v.get("summary", "")
+                if s:
+                    professor_wisdom = _query_professor(professor_fn, s)
+                    if professor_wisdom:
+                        memory_reasons_detail.append({
+                            "source": "professor",
+                            "wisdom": professor_wisdom[:300],
+                        })
+                    break
+
         # If no adjustments have non-zero delta, let the default analyzer handle it
         if all(a["delta"] == NO_MEMORY_MATCH for a in adjustments.values()):
-            return None
+            # Even if all deltas are zero, if we have professor wisdom, still return
+            if not professor_wisdom:
+                return None
 
         # Re-score verdicts with memory adjustments
         scores: dict[str, float] = {}
@@ -196,6 +330,8 @@ def create_contextdna_analyzer():
         reasoning = f"Memory-informed scores: [{score_summary}]."
         if memory_reasons:
             reasoning += f" Memory: {'; '.join(memory_reasons)}."
+        if professor_wisdom:
+            reasoning += f" Professor: {professor_wisdom[:150]}."
 
         return SynthesisResult(
             task_id=task_id,
@@ -206,6 +342,7 @@ def create_contextdna_analyzer():
             cherry_pick_from=cherry_picks,
             followups=winner_verdict.get("followups", []),
             dissent_preserved=all_dissent,
+            metadata={"memory_reasons": memory_reasons_detail},
         )
 
     return analyzer

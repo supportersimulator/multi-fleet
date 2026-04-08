@@ -33,6 +33,7 @@ class SynthesisResult:
     cherry_pick_from: list = field(default_factory=list)  # [{machine, commit, reason}]
     followups: list = field(default_factory=list)
     dissent_preserved: list = field(default_factory=list)  # [{surgeon, machine, claim}]
+    metadata: dict = field(default_factory=dict)  # extensible metadata (e.g. memory_reasons)
 
     def to_chief_decision(self) -> dict:
         """Convert to chief_decision packet payload."""
@@ -47,6 +48,7 @@ class SynthesisResult:
             "followups": self.followups,
             "dissent_preserved": self.dissent_preserved,
             "dissent_count": len(self.dissent_preserved),
+            "metadata": self.metadata,
             "timestamp": time.time(),
         }
 
