@@ -2889,6 +2889,20 @@ TOOLS = [
         },
         "fn": fleet_accept,
     },
+    {
+        "name": "fleet_invariance",
+        "description": "GhostScan invariance rules — 7 machine-checkable protocol enforcement checks. Actions: check_all (run all rules), check_one (specific rule by ID), list (show all rule IDs).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["check_all", "check_one", "list"], "description": "Action to perform (default: check_all)", "default": "check_all"},
+                "rule_id": {"type": "string", "description": "Rule ID for check_one (e.g. INV-001)"},
+                "state_json": {"type": "string", "description": "JSON string of protocol state to check against"},
+            },
+            "required": [],
+        },
+        "fn": fleet_invariance,
+    },
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}

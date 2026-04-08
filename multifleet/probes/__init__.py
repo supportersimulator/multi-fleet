@@ -17,6 +17,8 @@ from multifleet.probes.hidden_dependency import probe_hidden_dependency
 from multifleet.probes.task_diff_mismatch import probe_task_diff_mismatch
 from multifleet.probes.worktree_contamination import probe_worktree_contamination
 from multifleet.probes.invariant_coverage import probe_invariant_coverage
+from multifleet.probes.blast_radius import probe_blast_radius
+from multifleet.probes.security_surface import probe_security_surface
 
 
 def register_all(registry: ProbeRegistry) -> None:
@@ -105,10 +107,30 @@ def register_all(registry: ProbeRegistry) -> None:
         description="Checks that gains-gate, evidence ledger, and hooks are active.",
         triggers=["manual", "session_start", "session_end"],
     )
+    registry.register(
+        probe_id="blast_radius",
+        fn=probe_blast_radius,
+        category=ProbeCategory.STRUCTURE,
+        description="Estimates change impact — importers, tests, churn, public API surface.",
+        triggers=["manual", "commit"],
+    )
+    registry.register(
+        probe_id="security_surface",
+        fn=probe_security_surface,
+        category=ProbeCategory.SECURITY,
+        description="Detects hardcoded secrets, shell injection, .env in git, private keys.",
+        triggers=["manual", "commit", "session_start"],
+    )
 
 
-def create_engine() -> ProbeEngine:
-    """Create a ProbeEngine with all built-in probes + bridged scanner probes."""
+def create_engine(wire_evidence_bridge: bool = True) -> ProbeEngine:
+    """Create a ProbeEngine with all built-in probes + bridged scanner probes.
+
+    Args:
+        wire_evidence_bridge: If True, connect the code_scanner EvidenceBridge
+            so scanner probe findings also feed into the evidence ledger and
+            EventBus regardless of which engine runs them.
+    """
     registry = ProbeRegistry()
     register_all(registry)
 
@@ -119,4 +141,26 @@ def create_engine() -> ProbeEngine:
     except (ImportError, Exception):
         pass  # Scanner bridge optional — graceful degradation
 
-    return ProbeEngine(registry=registry)
+    engine = ProbeEngine(registry=registry)
+
+    # Wire EvidenceBridge so code_scanner findings reach the evidence ledger
+    if wire_evidence_bridge:
+        try:
+            from multifleet.code_scanner.evidence_bridge import ProbeEvidenceBridge
+            from multifleet.evidence_ledger import EvidenceLedger
+            try:
+                from multifleet.eventbus import FleetEventBus
+                import os
+                eventbus = FleetEventBus(
+                    node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+                )
+            except Exception:
+                eventbus = None
+            engine._evidence_bridge = ProbeEvidenceBridge(
+                evidence_ledger=EvidenceLedger(),
+                eventbus=eventbus,
+            )
+        except (ImportError, Exception):
+            pass  # Evidence bridge optional — graceful degradation
+
+    return engine
