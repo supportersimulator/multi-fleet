@@ -386,14 +386,30 @@ class ProbeEngine:
     def scan(
         self, trigger: str = "manual", context: Optional[dict] = None
     ) -> list[ProbeResult]:
-        """Run probes matching the trigger and cache results."""
+        """Run probes matching the trigger and cache results.
+
+        Args:
+            trigger: "manual", "all", "incremental", or a registered trigger name.
+                     "incremental" uses git diff to run only relevant probes.
+            context: Optional dict passed to probe functions. For incremental,
+                     may include "since" key (default "HEAD~1").
+        """
         self._last_scan_trigger = trigger
         self._last_scan_at = time.time()
 
-        if trigger == "all":
+        if trigger == "incremental":
+            since = (context or {}).get("since", "HEAD~1")
+            inc = IncrementalTrigger(self._repo_path)
+            probe_ids = inc.map_to_probes(inc.changed_files(since), self.registry)
+            results = [self.registry.run_one(pid, context) for pid in probe_ids]
+        elif trigger == "all":
             results = self.registry.run_all(context)
         else:
             results = self.registry.run_by_trigger(trigger, context)
+
+        # Score and rank results
+        scorer = SignalScorer()
+        results = scorer.top_n(results, n=len(results))
 
         self._results_cache = results
         logger.info(
