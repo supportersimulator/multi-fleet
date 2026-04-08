@@ -1877,6 +1877,31 @@ class FleetNerveNATS:
                         })
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/metrics":
+                    # Prometheus text exposition — fleet-wide aggregated metrics
+                    try:
+                        from .fleet_metrics import FleetMetricsAggregator
+                        fa = FleetMetricsAggregator(
+                            daemon_port=daemon._http_port if hasattr(daemon, '_http_port') else 8855,
+                        )
+                        body = fa.to_prometheus().encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/metrics/json":
+                    # JSON fleet metrics — aggregate + per-node breakdown
+                    try:
+                        from .fleet_metrics import FleetMetricsAggregator
+                        fa = FleetMetricsAggregator(
+                            daemon_port=daemon._http_port if hasattr(daemon, '_http_port') else 8855,
+                        )
+                        self._json_response(200, fa.aggregate())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/scan/results":
                     # Wire 6: Return latest probe results and update overlay
                     try:
