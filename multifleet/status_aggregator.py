@@ -1,8 +1,20 @@
-"""Fleet Status Aggregator — single-source fleet status for IDE consumption.
+"""DEPRECATED: Use node_overlay.py (NodeOverlayManager) instead.
 
-Combines: daemon health, liaison state, rebuttal sessions, lease status,
-channel health, and recent events into one structured snapshot.
+Fleet Status Aggregator — single-source fleet status for IDE consumption.
+health_dot, status_bar_text, and daemon caching have been migrated to
+NodeOverlayManager. This module re-exports from node_overlay for backward
+compatibility.
 """
+
+import warnings
+warnings.warn(
+    "multifleet.status_aggregator is deprecated, use multifleet.node_overlay (NodeOverlayManager) instead",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+# Re-export NodeOverlayManager for callers expecting FleetStatusAggregator
+from multifleet.node_overlay import NodeOverlayManager  # noqa: F401
 
 import json
 import logging

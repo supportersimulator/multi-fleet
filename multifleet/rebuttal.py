@@ -1,8 +1,16 @@
-"""Rebuttal State Machine — structured disagreement and consensus protocol.
+"""DEPRECATED: Use cross_rebuttal.py instead. This module is kept for backward compatibility.
 
+Original: Rebuttal State Machine — structured disagreement and consensus protocol.
 States: proposed → under_review → accepted | rebutted → counter_proposed → resolved
 Auto-accept timeout: 5 minutes (if no rebuttal received, proposal auto-accepts).
 """
+
+import warnings
+warnings.warn(
+    "multifleet.rebuttal is deprecated, use multifleet.cross_rebuttal instead",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import json
 import logging

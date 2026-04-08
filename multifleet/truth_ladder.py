@@ -119,6 +119,24 @@ class TruthLadder:
         )
         self._insert(entry)
         logger.info("truth_ladder add_inbox id=%s title=%s", entry.id, title[:60])
+
+        # Record truth entry creation to evidence ledger (truth_ladder <-> evidence_ledger wiring)
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            EvidenceLedger().record(
+                event_type="truth_entry",
+                node_id="local",
+                subject=title,
+                payload={
+                    "entry_id": entry.id,
+                    "layer": "inbox",
+                    "title": title,
+                    "content": content[:200],
+                },
+            )
+        except Exception:
+            pass  # Best-effort
+
         return entry
 
     def promote_to_vision(self, inbox_id: str, evidence_refs: list[str] = None,

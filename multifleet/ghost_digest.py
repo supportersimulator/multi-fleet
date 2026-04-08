@@ -139,10 +139,17 @@ class GhostDigest:
                 self._extract_objections(synthesis_result)
             )
 
-        # Extract evidence from probes
+        # Extract evidence from probes (passed in)
         if probe_results:
             candidates.extend(
                 self._extract_from_probes(task_id, probe_results, ts)
+            )
+
+        # Also read recent probe findings from evidence ledger (ghost_digest <-> probe wiring)
+        ledger_probe_evidence = self._read_probe_evidence_from_ledger()
+        if ledger_probe_evidence:
+            candidates.extend(
+                self._extract_from_probes(task_id, ledger_probe_evidence, ts)
             )
 
         # Extract warnings from acceptance
@@ -275,6 +282,20 @@ class GhostDigest:
         if acceptance.get("unresolved_objection_ids"):
             hints.append("Carry forward unresolved objections")
         return hints
+
+    def _read_probe_evidence_from_ledger(self) -> list[dict]:
+        """Read recent probe findings from evidence ledger (ghost_digest <-> probe_engine wiring)."""
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            ledger = EvidenceLedger()
+            recent = ledger.latest(20)
+            probe_evidence = [
+                e.get("payload", e) for e in recent
+                if e.get("event_type") == "probe_finding"
+            ]
+            return probe_evidence
+        except Exception:
+            return []
 
     def _persist(self, result: DigestResult) -> None:
         """Write digest result to disk for persistence across sessions."""

@@ -107,7 +107,10 @@ class GhostPulse:
         if probe_warning:
             result.warnings.append(probe_warning)
 
-        # 6. Generate warnings
+        # 6. Trigger incremental probe scan on idle (ghost_pulse <-> probe_engine wiring)
+        self._run_idle_probes()
+
+        # 7. Generate warnings
         result.warnings.extend(self._generate_warnings())
 
         result.duration_ms = (time.monotonic() - t0) * 1000
@@ -245,6 +248,16 @@ class GhostPulse:
                 warnings.append(f"CLAUDE.md is {int(age_days)} days old — may need refresh")
 
         return warnings[:5]
+
+    def _run_idle_probes(self) -> None:
+        """Trigger incremental probe scan on idle heartbeat (ghost_pulse <-> probe_engine wiring)."""
+        try:
+            from multifleet.probes import create_engine
+            engine = create_engine()
+            engine.scan(trigger="idle")
+            logger.debug("ghost_pulse triggered idle probe scan")
+        except Exception as e:
+            logger.debug("ghost_pulse idle probe scan skipped: %s", e)
 
     def _check_probe_staleness(self) -> Optional[str]:
         """Check if probes haven't run recently (3-surgeon recommendation)."""

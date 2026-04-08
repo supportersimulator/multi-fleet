@@ -102,6 +102,11 @@ REPO_ROOT = Path(__file__).parent.parent
 _SUPERREPO = REPO_ROOT.parent if (REPO_ROOT.parent / ".git").exists() else REPO_ROOT
 
 
+# TODO: Migrate these checks to ProbeResult contract (see probes/fleet_health.py)
+# The fleet_health probe already wraps doctor — future: doctor becomes a thin wrapper
+# that runs fleet_health + other health probes via the probe engine.
+# Checks to migrate: FD-001 through FD-014 (14 total).
+
 class FleetDoctor:
     """Run structured diagnostic checks on fleet health."""
 

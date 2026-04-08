@@ -179,10 +179,18 @@ class NodeOverlay:
 
 
 class NodeOverlayManager:
-    """Manages overlay state for all fleet nodes."""
+    """Manages overlay state for all fleet nodes.
 
-    def __init__(self):
+    Also provides fleet-level aggregation (health_dot, status_bar_text)
+    originally from status_aggregator.py, which is now deprecated.
+    """
+
+    def __init__(self, daemon_url: str = "http://127.0.0.1:8855"):
         self._overlays: dict[str, NodeOverlay] = {}
+        self._daemon_url = daemon_url.rstrip("/")
+        self._cached_daemon_health: Optional[dict] = None
+        self._cached_daemon_health_ts: float = 0.0
+        self._CACHE_TTL_S = 5.0
 
     def update(self, node_id: str, **kwargs) -> NodeOverlay:
         """Update a node's overlay with new strip data.
@@ -286,3 +294,62 @@ class NodeOverlayManager:
             "correction_loop_count": surgeon_state.get("correction_loops", 0),
             "abstention_status": surgeon_state.get("abstention", False),
         })
+
+    # ── Fleet-level aggregation (migrated from status_aggregator.py) ──
+
+    def _fetch_daemon_health(self) -> dict:
+        """Fetch daemon /health with short cache to avoid hammering."""
+        import json
+        import urllib.request
+
+        now = time.time()
+        if self._cached_daemon_health is not None and (now - self._cached_daemon_health_ts) < self._CACHE_TTL_S:
+            return self._cached_daemon_health
+        try:
+            req = urllib.request.Request(f"{self._daemon_url}/health", method="GET")
+            resp = urllib.request.urlopen(req, timeout=3)
+            data = json.loads(resp.read().decode("utf-8"))
+            self._cached_daemon_health = data
+            self._cached_daemon_health_ts = now
+            return data
+        except Exception as exc:
+            logger.debug("Daemon health unavailable: %s", exc)
+            return {"status": "unreachable", "error": str(exc)}
+
+    def health_dot(self, daemon_health: Optional[dict] = None) -> str:
+        """Compute health indicator: green/yellow/red.
+
+        green:  daemon up + NATS connected + >=1 peer reachable
+        yellow: daemon up but degraded (no NATS or no peers)
+        red:    daemon down / unreachable
+        """
+        daemon = daemon_health or self._fetch_daemon_health()
+        status = daemon.get("status", "unreachable")
+        if status == "unreachable":
+            return "red"
+        nats_ok = daemon.get("nats", {}).get("connected", False) if isinstance(daemon.get("nats"), dict) else bool(daemon.get("nats_connected", False))
+        peers = daemon.get("peers", {})
+        reachable = 0
+        if isinstance(peers, dict):
+            reachable = sum(1 for p in peers.values() if isinstance(p, dict) and p.get("status") in ("online", "reachable", "ok"))
+        elif isinstance(peers, list):
+            reachable = sum(1 for p in peers if isinstance(p, dict) and p.get("status") in ("online", "reachable", "ok"))
+        if nats_ok and reachable >= 1:
+            return "green"
+        return "yellow"
+
+    def status_bar_text(self, daemon_health: Optional[dict] = None) -> str:
+        """One-line status for IDE status bar. E.g., 'F:2/3 ● 1 review'"""
+        daemon = daemon_health or self._fetch_daemon_health()
+        dot = self.health_dot(daemon)
+        dot_char = {"green": "\u25cf", "yellow": "\u25d0", "red": "\u25cb"}.get(dot, "?")
+        peers = daemon.get("peers", {})
+        if isinstance(peers, dict):
+            total = len(peers)
+            reachable = sum(1 for p in peers.values() if isinstance(p, dict) and p.get("status") in ("online", "reachable", "ok"))
+        elif isinstance(peers, list):
+            total = len(peers)
+            reachable = sum(1 for p in peers if isinstance(p, dict) and p.get("status") in ("online", "reachable", "ok"))
+        else:
+            total = reachable = 0
+        return f"F:{reachable}/{total} {dot_char}"
