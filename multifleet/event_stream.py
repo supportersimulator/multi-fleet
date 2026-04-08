@@ -19,6 +19,7 @@ logger = logging.getLogger("fleet-nerve.event-stream")
 _event_queues: list[queue.Queue] = []
 _event_queues_lock = threading.Lock()
 _aggregator = None  # Set via start_server()
+_ide_bridge = None  # Set via start_server()
 
 # Ring buffer for recent events (so new SSE clients get history)
 _recent_events: list[dict] = []
@@ -60,6 +61,12 @@ class EventStreamHandler(BaseHTTPRequestHandler):
             self._handle_status()
         elif self.path == "/health":
             self._handle_health()
+        elif self.path == "/extension/status-bar":
+            self._handle_extension_status_bar()
+        elif self.path == "/extension/activity-bar":
+            self._handle_extension_activity_bar()
+        elif self.path == "/extension/notifications":
+            self._handle_extension_notifications()
         else:
             self.send_error(404, "Not Found")
 
@@ -123,11 +130,53 @@ class EventStreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
 
+    def _handle_extension_status_bar(self):
+        """Return status bar data for VS Code extension."""
+        if _ide_bridge is not None:
+            body = json.dumps(_ide_bridge.get_status_bar_data())
+        else:
+            body = json.dumps({
+                "node_count": 0,
+                "health_dot": "red",
+                "text": "Fleet: off",
+                "tooltip": "IDE bridge not configured",
+            })
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def _handle_extension_activity_bar(self):
+        """Return activity bar tree data for VS Code extension."""
+        if _ide_bridge is not None:
+            body = json.dumps(_ide_bridge.get_activity_bar_data())
+        else:
+            body = json.dumps({"sections": [], "connected": False})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def _handle_extension_notifications(self):
+        """Return pending notifications for VS Code extension."""
+        if _ide_bridge is not None:
+            body = json.dumps(_ide_bridge.get_pending_notifications())
+        else:
+            body = json.dumps([])
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
 
 def start_server(
     host: str = "127.0.0.1",
     port: int = 8033,
     aggregator=None,
+    ide_bridge=None,
     daemon: bool = True,
 ) -> HTTPServer:
     """Start the SSE event stream server in a background thread.
@@ -136,13 +185,23 @@ def start_server(
         host: Bind address.
         port: Bind port.
         aggregator: FleetStatusAggregator instance for /status endpoint.
+        ide_bridge: IDEBridge instance for /extension/* endpoints.
+            If None and aggregator is provided, one is created automatically.
         daemon: If True, server thread is a daemon (dies with main process).
 
     Returns:
         The HTTPServer instance (call .shutdown() to stop).
     """
-    global _aggregator
+    global _aggregator, _ide_bridge
     _aggregator = aggregator
+
+    if ide_bridge is not None:
+        _ide_bridge = ide_bridge
+    elif aggregator is not None:
+        from multifleet.ide_bridge import IDEBridge
+        _ide_bridge = IDEBridge(aggregator=aggregator)
+    else:
+        _ide_bridge = None
 
     server = HTTPServer((host, port), EventStreamHandler)
     thread = threading.Thread(target=server.serve_forever, name="fleet-event-stream")

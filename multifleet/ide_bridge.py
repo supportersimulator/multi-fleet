@@ -1,0 +1,238 @@
+"""IDE Bridge — connects fleet events to IDE extension protocols.
+
+Translates fleet.* events into VS Code extension commands and notifications.
+Serves as the bridge between the Python fleet and TypeScript extension.
+
+Data contracts match:
+  - ExtensionEventWiring.ts (FleetPeerEvent, FleetHealthEvent)
+  - FleetDashboardPanel.ts (peer rows, probe data)
+  - NotificationsPanel (alerts, events, action items)
+  - Status bar format from FleetStatusAggregator.status_bar_text()
+"""
+
+import logging
+import time
+from typing import Optional
+
+logger = logging.getLogger("fleet-nerve.ide-bridge")
+
+# Event type -> IDE command mapping
+_EVENT_MAP = {
+    "fleet.peer.online": "statusBar",
+    "fleet.peer.offline": "statusBar",
+    "fleet.health.degraded": "warning",
+    "fleet.health.recovered": "statusBar",
+    "fleet.probe.finding": "notification",
+    "fleet.rebuttal.proposed": "badge",
+    "fleet.rebuttal.resolved": "badge",
+    "fleet.lease.acquired": "statusBar",
+    "fleet.lease.released": "statusBar",
+    "fleet.message.delivered": "notification",
+}
+
+# Severity mapping for notifications
+_SEVERITY_MAP = {
+    "fleet.health.degraded": "warning",
+    "fleet.probe.finding": "info",
+    "fleet.rebuttal.proposed": "info",
+    "fleet.message.delivered": "info",
+}
+
+
+class IDEBridge:
+    """Translates fleet events into IDE-consumable data structures."""
+
+    def __init__(self, aggregator=None):
+        """
+        Args:
+            aggregator: FleetStatusAggregator instance for snapshot data.
+        """
+        self._aggregator = aggregator
+        self._pending_notifications: list[dict] = []
+        self._max_notifications = 50
+
+    def translate_event(self, event_type: str, data: dict) -> dict:
+        """Translate fleet event into IDE-compatible format.
+
+        Returns dict with: command, event_type, payload, timestamp.
+        """
+        command = _EVENT_MAP.get(event_type, "notification")
+        payload = dict(data)
+
+        result = {
+            "command": command,
+            "event_type": event_type,
+            "payload": payload,
+            "timestamp": time.time(),
+        }
+
+        # Enrich based on event type
+        if event_type in ("fleet.peer.online", "fleet.peer.offline"):
+            result["payload"]["action"] = "online" if "online" in event_type else "offline"
+
+        if event_type == "fleet.health.degraded":
+            self._push_notification(
+                severity="warning",
+                message=f"Fleet health degraded: {data.get('nodeId', data.get('node_id', '?'))}",
+                source="fleet",
+            )
+
+        if event_type == "fleet.probe.finding":
+            self._push_notification(
+                severity=data.get("severity", "info"),
+                message=data.get("title", data.get("message", "Probe finding")),
+                source="probe",
+            )
+
+        if event_type == "fleet.rebuttal.proposed":
+            self._push_notification(
+                severity="info",
+                message=f"Rebuttal proposed: {data.get('subject', data.get('title', '?'))}",
+                source="rebuttal",
+            )
+
+        return result
+
+    def format_for_extension(self, event: dict) -> dict:
+        """Format translated event as VS Code extension message.
+
+        Returns the ContextDNA Event v1 schema shape expected by
+        WebSocketEventClient.onEvent().
+        """
+        return {
+            "type": event["event_type"],
+            "payload": event["payload"],
+            "source": "fleet-bridge",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(event["timestamp"])),
+        }
+
+    def get_status_bar_data(self) -> dict:
+        """Data for the status bar: node count, health dot, message.
+
+        Matches what FleetDashboardPanel and extension.ts status bar consume.
+        """
+        if self._aggregator is None:
+            return {
+                "node_count": 0,
+                "health_dot": "red",
+                "text": "Fleet: off",
+                "tooltip": "Fleet daemon not running",
+            }
+
+        snap = self._aggregator.snapshot()
+        peers = snap.get("peers", {})
+        reachable = peers.get("reachable", 0)
+        total = peers.get("total", 0)
+        dot = snap.get("health_dot", "red")
+
+        dot_char = {"green": "ok", "yellow": "degraded", "red": "down"}.get(dot, "unknown")
+        text = self._aggregator.status_bar_text()
+
+        return {
+            "node_count": reachable + 1,  # self + reachable peers
+            "total_peers": total,
+            "reachable_peers": reachable,
+            "health_dot": dot,
+            "health_status": dot_char,
+            "text": text,
+            "tooltip": f"Fleet: {snap.get('node_id', '?')} | {reachable}/{total} peers reachable",
+            "rebuttals": snap.get("rebuttals", {}).get("active", 0),
+            "pending_reviews": snap.get("liaison", {}).get("pending_reviews", 0),
+            "unread": snap.get("liaison", {}).get("unread", 0),
+        }
+
+    def get_activity_bar_data(self) -> dict:
+        """Data for activity bar tree view: peers, rebuttals, leases.
+
+        Structured for VS Code TreeDataProvider consumption.
+        """
+        if self._aggregator is None:
+            return {"sections": [], "connected": False}
+
+        snap = self._aggregator.snapshot()
+        daemon = snap.get("daemon", {})
+        peers_raw = daemon.get("peers", {})
+        rebuttals = snap.get("rebuttals", {})
+        leases = snap.get("leases", {})
+        liaison = snap.get("liaison", {})
+
+        # Build peer tree items
+        peer_items = []
+        if isinstance(peers_raw, dict):
+            for node_id, info in peers_raw.items():
+                if isinstance(info, dict):
+                    status = info.get("status", "unknown")
+                    last_seen = info.get("lastSeen", info.get("last_seen", -1))
+                    sessions = info.get("sessions", 0)
+                    peer_items.append({
+                        "id": node_id,
+                        "label": node_id,
+                        "status": status,
+                        "last_seen_s": last_seen,
+                        "sessions": sessions,
+                        "icon": "circle-filled" if status in ("online", "reachable") else "circle-outline",
+                    })
+
+        # Build rebuttal tree items
+        rebuttal_items = []
+        active = rebuttals.get("active", 0)
+        total_rebuttals = rebuttals.get("total", 0)
+        if active > 0:
+            rebuttal_items.append({
+                "id": "rebuttals-active",
+                "label": f"{active} active rebuttal{'s' if active != 1 else ''}",
+                "icon": "comment-discussion",
+                "badge": active,
+            })
+
+        # Build lease tree items
+        lease_items = []
+        active_leases = leases.get("active", 0)
+        held = leases.get("held_by_me", 0)
+        if active_leases > 0:
+            lease_items.append({
+                "id": "leases-active",
+                "label": f"{active_leases} active lease{'s' if active_leases != 1 else ''}",
+                "description": f"{held} held by me" if held else None,
+                "icon": "lock",
+            })
+
+        sections = [
+            {"id": "peers", "label": "Fleet Nodes", "items": peer_items, "count": len(peer_items)},
+            {"id": "rebuttals", "label": "Rebuttals", "items": rebuttal_items, "count": active},
+            {"id": "leases", "label": "Leases", "items": lease_items, "count": active_leases},
+        ]
+
+        # Add unread messages if any
+        unread = liaison.get("unread", 0)
+        if unread > 0:
+            sections.append({
+                "id": "messages",
+                "label": "Messages",
+                "items": [{"id": "unread", "label": f"{unread} unread", "icon": "mail", "badge": unread}],
+                "count": unread,
+            })
+
+        return {
+            "sections": sections,
+            "connected": daemon.get("status") != "unreachable",
+            "node_id": snap.get("node_id", ""),
+        }
+
+    def get_pending_notifications(self) -> list[dict]:
+        """Return and clear pending notifications."""
+        notifications = list(self._pending_notifications)
+        self._pending_notifications.clear()
+        return notifications
+
+    def _push_notification(self, severity: str, message: str, source: str) -> None:
+        """Add a notification to the pending queue."""
+        self._pending_notifications.append({
+            "id": f"fleet-{int(time.time() * 1000)}",
+            "severity": severity,
+            "message": message,
+            "source": source,
+            "timestamp": time.time(),
+        })
+        if len(self._pending_notifications) > self._max_notifications:
+            self._pending_notifications = self._pending_notifications[-self._max_notifications:]
