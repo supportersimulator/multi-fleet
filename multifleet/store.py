@@ -18,13 +18,17 @@ DEFAULT_DB = Path.home() / ".fleet-nerve" / "messages.db"
 
 
 class FleetNerveStore:
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, data_layer=None):
         self.db_path = str(db_path or DEFAULT_DB)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._data_layer = data_layer
         self._cached_conn = None
         self._init_db()
 
     def _conn(self):
+        # Prefer data layer when available
+        if self._data_layer is not None:
+            return self._data_layer.get_connection("messages")
         if self._cached_conn is not None:
             return self._cached_conn
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -32,6 +36,18 @@ class FleetNerveStore:
         conn.execute("PRAGMA journal_mode=WAL")
         self._cached_conn = conn
         return conn
+
+    def close(self):
+        """Close the cached connection (no-op if using data layer)."""
+        if self._data_layer is not None:
+            return  # data layer owns the connection
+        if self._cached_conn is not None:
+            try:
+                self._cached_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            self._cached_conn.close()
+            self._cached_conn = None
 
     def _migrate_ack_status(self, conn):
         """Migration-safe: add ack_status column if missing."""

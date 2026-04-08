@@ -27,15 +27,18 @@ class LeaseManager:
     falls back to local-only acquire with a warning.
     """
 
-    def __init__(self, store, node_id: str, chief_node_id: str = None, daemon_port: int = 8855):
+    def __init__(self, store, node_id: str, chief_node_id: str = None, daemon_port: int = 8855,
+                 data_layer=None):
         """
         Args:
             store: FleetNerveStore instance (has _conn() for SQLite)
             node_id: This node's ID
             chief_node_id: The chief node's ID (if set, non-chief acquire goes through chief)
             daemon_port: HTTP port for the fleet daemon (default 8855)
+            data_layer: Optional FleetDataLayer — if set, used for connection instead of store._conn()
         """
         self._store = store
+        self._data_layer = data_layer
         self._node_id = node_id
         self._chief_node_id = chief_node_id
         self._daemon_port = daemon_port
@@ -48,9 +51,15 @@ class LeaseManager:
         """Whether this node is the chief (or no chief configured)."""
         return self._is_chief
 
+    def _get_conn(self):
+        """Get connection from data layer or fall back to store."""
+        if self._data_layer is not None:
+            return self._data_layer.get_connection("messages")
+        return self._store._conn()
+
     def _init_table(self):
         """Create leases table if not exists."""
-        with self._store._conn() as conn:
+        with self._get_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS leases (
                     resource_id TEXT PRIMARY KEY,
@@ -157,7 +166,7 @@ class LeaseManager:
                 logger.warning(f"Chief unreachable, local-only acquire for {resource_id}")
 
         now = time.time()
-        conn = self._store._conn()
+        conn = self._get_conn()
 
         # Atomic: BEGIN IMMEDIATE prevents concurrent writers from interleaving
         conn.execute("BEGIN IMMEDIATE")
@@ -229,7 +238,7 @@ class LeaseManager:
             {"renewed": bool, "expires_at": float, "fence_token": int, "reason": str (if failed)}
         """
         now = time.time()
-        conn = self._store._conn()
+        conn = self._get_conn()
         row = conn.execute("SELECT * FROM leases WHERE resource_id = ?", (resource_id,)).fetchone()
 
         if not row:
@@ -256,7 +265,7 @@ class LeaseManager:
             {"released": bool, "reason": str (if failed)}
         """
         now = time.time()
-        conn = self._store._conn()
+        conn = self._get_conn()
         row = conn.execute("SELECT * FROM leases WHERE resource_id = ?", (resource_id,)).fetchone()
 
         if not row:
@@ -277,7 +286,7 @@ class LeaseManager:
         Returns:
             Lease dict with computed fields, or None if no lease exists.
         """
-        conn = self._store._conn()
+        conn = self._get_conn()
         row = conn.execute("SELECT * FROM leases WHERE resource_id = ?", (resource_id,)).fetchone()
         if not row:
             return None
@@ -292,7 +301,7 @@ class LeaseManager:
         Returns:
             List of lease dicts.
         """
-        conn = self._store._conn()
+        conn = self._get_conn()
         rows = conn.execute("SELECT * FROM leases WHERE released_at IS NULL").fetchall()
         now = time.time()
         result = []
@@ -310,7 +319,7 @@ class LeaseManager:
     def cleanup_expired(self) -> int:
         """Remove expired and released leases. Returns count removed."""
         now = time.time()
-        conn = self._store._conn()
+        conn = self._get_conn()
 
         # Find expired leases (where current time > acquired/renewed + ttl)
         # and released leases
@@ -337,7 +346,7 @@ class LeaseManager:
     @property
     def stats(self) -> dict:
         """Return lease stats for health endpoint."""
-        conn = self._store._conn()
+        conn = self._get_conn()
         total = conn.execute("SELECT COUNT(*) FROM leases WHERE released_at IS NULL").fetchone()[0]
         now = time.time()
         # Count truly active (not expired)

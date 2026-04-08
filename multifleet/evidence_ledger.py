@@ -32,9 +32,10 @@ class EvidenceLedger:
     breaks the chain from that point forward.
     """
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, data_layer=None):
         self._db_path = db_path or str(Path.home() / ".fleet-nerve" / "evidence.db")
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._data_layer = data_layer
         self._init_db()
 
     def _init_db(self):
@@ -69,12 +70,23 @@ class EvidenceLedger:
         conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
-        """Get a SQLite connection with WAL mode and Row factory."""
+        """Get a SQLite connection with WAL mode and Row factory.
+
+        When data_layer is set, returns the managed connection (caller must
+        NOT close it). Otherwise creates a new connection per call (legacy).
+        """
+        if self._data_layer is not None:
+            return self._data_layer.get_connection("evidence")
         conn = sqlite3.connect(self._db_path, check_same_thread=False, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    def _maybe_close(self, conn: sqlite3.Connection):
+        """Close connection only if NOT managed by data layer."""
+        if self._data_layer is None:
+            conn.close()
 
     def _compute_hash(self, entry_id: str, timestamp: float, event_type: str,
                       node_id: str, payload: str, prev_hash: str) -> str:
@@ -120,7 +132,7 @@ class EvidenceLedger:
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._maybe_close(conn)
 
         logger.info("Evidence recorded: %s [%s] by %s — %s",
                      entry_id[:8], event_type, node_id, subject or "(no subject)")
@@ -145,7 +157,7 @@ class EvidenceLedger:
             ).fetchone()
             return row["seq"] if row else None
         finally:
-            conn.close()
+            self._maybe_close(conn)
 
     def verify_chain(self, limit: int = None) -> dict:
         """Verify the hash chain integrity.
@@ -195,7 +207,7 @@ class EvidenceLedger:
             return {"valid": True, "checked": checked, "broken_at": None,
                     "detail": "chain intact"}
         finally:
-            conn.close()
+            self._maybe_close(conn)
 
     def query(self, event_type: str = None, node_id: str = None,
               since: float = None, limit: int = 50) -> list:
@@ -221,7 +233,7 @@ class EvidenceLedger:
             rows = conn.execute(sql, params).fetchall()
             return [self._row_to_dict(r) for r in rows]
         finally:
-            conn.close()
+            self._maybe_close(conn)
 
     def latest(self, count: int = 10) -> list:
         """Get the N most recent entries."""
@@ -232,7 +244,7 @@ class EvidenceLedger:
             ).fetchall()
             return [self._row_to_dict(r) for r in rows]
         finally:
-            conn.close()
+            self._maybe_close(conn)
 
     @property
     def stats(self) -> dict:
@@ -251,7 +263,7 @@ class EvidenceLedger:
             last_ts = last_row["timestamp"] if last_row else None
             last_hash = last_row["entry_hash"][:16] if last_row else None
         finally:
-            conn.close()
+            self._maybe_close(conn)
 
         # Quick chain check (only last 10 for speed in stats)
         chain_check = self.verify_chain(limit=10)
