@@ -691,9 +691,15 @@ def cmd_nats_cluster(args):
 # ---------------------------------------------------------------------------
 
 def main():
+    from multifleet import __version__
+
     parser = argparse.ArgumentParser(
         prog="fleet",
         description="Multi-Fleet CLI — one command to rule them all",
+    )
+    parser.add_argument(
+        "-V", "--version", action="version",
+        version=f"%(prog)s {__version__}",
     )
     sub = parser.add_subparsers(dest="command")
 

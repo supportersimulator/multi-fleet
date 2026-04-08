@@ -1,13 +1,31 @@
-# Multi-Fleet v2.0.0 -- Installation Guide
+# Multi-Fleet v5.0.0 -- Installation Guide
 
 Cross-machine AI collaboration: real-time peer-to-peer messaging, session-aware
 task agents, and fleet-wide productivity visibility.
 
+## Quick Install
+
+```bash
+pip install multifleet          # from PyPI (when published)
+# or from source:
+pip install ./multi-fleet       # from the superrepo
+```
+
+After install, the `fleet` command is available:
+
+```bash
+fleet --version                 # show version
+fleet status                    # fleet health overview
+fleet doctor                    # run diagnostics
+fleet dashboard                 # terminal dashboard
+fleet dashboard --web           # web dashboard in browser
+```
+
 ## Prerequisites
 
 - Python 3.10+
-- Redis (local or remote)
 - Network access between fleet nodes (port 8855)
+- NATS server on chief node (`brew install nats-server` or `apt install nats-server`)
 
 ## Environment Variables
 
