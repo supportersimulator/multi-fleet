@@ -132,6 +132,10 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_arbiter()
         elif path == "/arbiter/pending":
             self._serve_json(self._get_arbiter_pending())
+        elif path == "/regression":
+            self._serve_regression()
+        elif path == "/api/regression":
+            self._serve_json(self._get_regression())
         elif path.startswith("/extension/"):
             self._serve_extension(path)
         elif path == "/health":
@@ -215,6 +219,29 @@ class FleetWebHandler(BaseHTTPRequestHandler):
                     _sse_queues.remove(q)
                 except ValueError:
                     pass
+
+    def _serve_regression(self):
+        """Render the regression dashboard as HTML."""
+        try:
+            from multifleet.regression_dashboard import RegressionDashboard
+            repo_root = os.environ.get("MULTIFLEET_REPO_ROOT", ".")
+            dash = RegressionDashboard(repo_path=repo_root)
+            html = dash.render_html()
+        except Exception as e:
+            logger.warning("regression dashboard failed: %s", e)
+            html = f"<html><body><h1>Regression Dashboard</h1><p>Error: {e}</p></body></html>"
+        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _get_regression(self) -> dict:
+        """Return regression metrics as JSON."""
+        try:
+            from multifleet.regression_dashboard import RegressionDashboard
+            repo_root = os.environ.get("MULTIFLEET_REPO_ROOT", ".")
+            dash = RegressionDashboard(repo_path=repo_root)
+            return dash.collect_metrics()
+        except Exception as e:
+            logger.warning("regression API failed: %s", e)
+            return {"error": str(e)}
 
     def _serve_extension(self, path: str):
         bridge = _get_ide_bridge()
