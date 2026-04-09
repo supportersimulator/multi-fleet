@@ -223,7 +223,47 @@ class FleetLiaison:
         if probe_ctx:
             parts.append(probe_ctx)
 
+        # Add professor context
+        prof_ctx = self._get_professor_context()
+        if prof_ctx:
+            parts.append(prof_ctx)
+
         return "\n".join(parts) if parts else None
+
+    def _get_professor_context(self) -> Optional[str]:
+        """Get professor wisdom for injection context.
+
+        Uses ProfessorBridge to fetch recent wisdom and format for
+        systemMessage inclusion. Returns None if unavailable.
+        """
+        try:
+            from multifleet.professor_bridge import get_professor_bridge
+            bridge = get_professor_bridge()
+            panel = bridge.get_panel_data()
+
+            gotchas = panel.get("active_gotchas", [])
+            recent = panel.get("recent_wisdom", [])
+
+            if not gotchas and not recent:
+                return None
+
+            lines = ["## Professor Wisdom"]
+
+            # Surface active gotchas (most valuable for injection)
+            if gotchas:
+                lines.append(f"\n**Active Gotchas ({len(gotchas)}):**")
+                for g in gotchas[:3]:
+                    lines.append(f"- [{g.get('topic', '?')}] {g.get('gotcha', '')}")
+
+            # Recent the-one-thing insights
+            for w in recent[:2]:
+                one_thing = w.get("the_one_thing", "")
+                if one_thing:
+                    lines.append(f"- **{w.get('topic', '?')}**: {one_thing}")
+
+            return "\n".join(lines)
+        except Exception:
+            return None
 
     def mark_read(self, count: Optional[int] = None) -> None:
         """Mark messages as read (clear from unread queue).

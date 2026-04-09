@@ -43,6 +43,7 @@ _sse_lock = threading.Lock()
 # ── Singleton references (set via start_fleet_server) ──
 _aggregator = None
 _ide_bridge = None
+_professor_bridge = None
 _server_instance: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
 
@@ -70,6 +71,18 @@ def _get_ide_bridge():
         except Exception as e:
             logger.warning("Could not init IDE bridge: %s", e)
     return _ide_bridge
+
+
+def _get_professor_bridge():
+    """Lazy-init professor bridge."""
+    global _professor_bridge
+    if _professor_bridge is None:
+        try:
+            from multifleet.professor_bridge import get_professor_bridge
+            _professor_bridge = get_professor_bridge()
+        except Exception as e:
+            logger.warning("Could not init professor bridge: %s", e)
+    return _professor_bridge
 
 
 
@@ -124,6 +137,8 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_json(self._get_probe_review())
         elif path == "/api/surgeon-status":
             self._serve_json(self._get_surgeon_status())
+        elif path.startswith("/api/professor"):
+            self._serve_professor(path)
         elif path == "/metrics":
             self._serve_prometheus()
         elif path == "/events":
@@ -324,6 +339,32 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.warning("surgeon-status endpoint failed: %s", e)
             return {"available": False, "error": str(e)}
+
+    def _serve_professor(self, path: str):
+        """Handle /api/professor and /api/professor/panel endpoints."""
+        bridge = _get_professor_bridge()
+        if bridge is None:
+            self._serve_json({"error": "Professor bridge not available"})
+            return
+
+        sub = path.split("?")[0]
+        if sub == "/api/professor/panel":
+            self._serve_json(bridge.get_panel_data())
+        elif sub == "/api/professor":
+            # Extract topic from query string
+            query_string = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = {}
+            for pair in query_string.split("&"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    params[k] = v.replace("+", " ").replace("%20", " ")
+            topic = params.get("topic", "")
+            if not topic:
+                self._serve_json({"error": "Missing 'topic' query parameter"})
+                return
+            self._serve_json(bridge.query(topic))
+        else:
+            self.send_error(404, f"Unknown professor endpoint: {sub}")
 
     # ── Helpers ──
 

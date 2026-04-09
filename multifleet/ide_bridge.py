@@ -293,6 +293,7 @@ class IDEBridge:
             "pending_reviews": snap.get("liaison", {}).get("pending_reviews", 0),
             "unread": snap.get("liaison", {}).get("unread", 0),
             "stale": stale,
+            "gotcha_count": self._get_professor_gotcha_count(),
         }
 
     def get_activity_bar_data(self) -> dict:
@@ -389,11 +390,82 @@ class IDEBridge:
                 "count": decision_count,
             })
 
+        # Add professor wisdom section
+        professor_items = self._get_professor_activity_items()
+        if professor_items:
+            sections.append({
+                "id": "professor",
+                "label": "Professor Wisdom",
+                "items": professor_items,
+                "count": len(professor_items),
+            })
+
         return {
             "sections": sections,
             "connected": daemon.get("status") != "unreachable",
             "node_id": snap.get("node_id", ""),
         }
+
+    def _get_professor_bridge(self):
+        """Get professor bridge instance (lazy, cached)."""
+        if not hasattr(self, "_professor_bridge"):
+            self._professor_bridge = None
+        if self._professor_bridge is None:
+            try:
+                from multifleet.professor_bridge import get_professor_bridge
+                self._professor_bridge = get_professor_bridge()
+            except Exception:
+                pass
+        return self._professor_bridge
+
+    def _get_professor_gotcha_count(self) -> int:
+        """Count active gotchas from professor bridge for status bar."""
+        bridge = self._get_professor_bridge()
+        if bridge is None:
+            return 0
+        try:
+            gotchas = bridge._get_gotchas()
+            return len(gotchas)
+        except Exception:
+            return 0
+
+    def _get_professor_activity_items(self) -> list[dict]:
+        """Build tree items for professor wisdom in activity bar."""
+        bridge = self._get_professor_bridge()
+        if bridge is None:
+            return []
+        try:
+            panel = bridge.get_panel_data()
+            items = []
+
+            # Recent wisdom entries
+            for w in panel.get("recent_wisdom", [])[:5]:
+                topic = w.get("topic", "?")
+                one_thing = w.get("the_one_thing", "")
+                mines = w.get("landmine_count", 0)
+                label = topic[:30]
+                desc = one_thing[:60] if one_thing else None
+                items.append({
+                    "id": f"prof-{topic[:20]}",
+                    "label": label,
+                    "description": desc,
+                    "icon": "mortar-board",
+                    "badge": mines if mines > 0 else None,
+                })
+
+            # Active gotchas summary
+            gotchas = panel.get("active_gotchas", [])
+            if gotchas:
+                items.append({
+                    "id": "prof-gotchas",
+                    "label": f"{len(gotchas)} active gotcha{'s' if len(gotchas) != 1 else ''}",
+                    "icon": "warning",
+                    "badge": len(gotchas),
+                })
+
+            return items
+        except Exception:
+            return []
 
     def get_pending_decisions(self) -> list[dict]:
         """Get pending arbiter decisions for activity bar badge."""
