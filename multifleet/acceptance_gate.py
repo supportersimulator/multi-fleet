@@ -83,6 +83,7 @@ class AcceptanceGate:
         invariants_satisfied: bool = True,
         evidence_count: int = 0,
         epistemic_packet: Optional[dict] = None,
+        **_extra_kwargs,
     ) -> AcceptanceDecision:
         """Evaluate acceptance criteria. Supports two call patterns:
 

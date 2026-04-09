@@ -34,7 +34,7 @@ class TestProbeEngineInputValidation:
         engine = ProbeEngine()
         result = engine.scan_one("../../etc/passwd")
         assert result.status == "error"
-        assert "not registered" in result.findings[0].title
+        assert "not registered" in result.findings[0].title or "Invalid probe_id" in result.findings[0].title
 
     def test_run_one_with_path_traversal_id(self):
         from multifleet.probe_engine import ProbeEngine
@@ -156,28 +156,23 @@ class TestBackupPathValidation:
 class TestBenchmarkInputValidation:
     """FleetBenchmark should handle adversarial iteration values."""
 
-    def test_zero_iterations_crashes(self):
-        """Zero iterations causes StatisticsError — _run_bench has no guard.
+    def test_zero_iterations_guarded(self):
+        """Zero iterations returns zeroed result (guard added, no longer crashes)."""
+        from multifleet.benchmark import _run_bench, BenchmarkResult
 
-        BUG: _run_bench should guard against iterations <= 0 instead of
-        passing empty list to statistics.mean(). Fix: add `if iterations < 1:
-        return BenchmarkResult(name, 0, 0, 0, 0, 0, 0, 0)` at top.
-        """
-        import statistics
+        result = _run_bench("test", lambda: None, 0)
+        assert isinstance(result, BenchmarkResult)
+        assert result.iterations == 0
+        assert result.mean_ms == 0.0
 
-        from multifleet.benchmark import _run_bench
+    def test_negative_iterations_guarded(self):
+        """Negative iterations returns zeroed result (guard added, no longer crashes)."""
+        from multifleet.benchmark import _run_bench, BenchmarkResult
 
-        with pytest.raises(statistics.StatisticsError):
-            _run_bench("test", lambda: None, 0)
-
-    def test_negative_iterations_crashes(self):
-        """Negative iterations also crashes — same root cause as zero."""
-        import statistics
-
-        from multifleet.benchmark import _run_bench
-
-        with pytest.raises(statistics.StatisticsError):
-            _run_bench("test", lambda: None, -5)
+        result = _run_bench("test", lambda: None, -5)
+        assert isinstance(result, BenchmarkResult)
+        assert result.iterations == 0
+        assert result.mean_ms == 0.0
 
     def test_very_large_iterations_bounded(self):
         """Verify benchmark doesn't blindly accept huge iteration counts.

@@ -201,6 +201,7 @@ class FleetNerveNATS:
         }
         self._peers = {}  # node_id -> last heartbeat data
         self._running = True
+        self._active_subs: list = []  # Track subs for reconnect dedup
         # ACK tracking store
         try:
             from .store import FleetNerveStore
@@ -851,15 +852,27 @@ class FleetNerveNATS:
     # ── Local-first repair actions (Protocol: fix yourself before others SSH in) ──
 
     async def _subscribe_all(self):
-        """Subscribe to all fleet NATS subjects. Called on connect and reconnect."""
-        await self.nc.subscribe(_sub_direct(self.node_id), cb=self._handle_message)
-        await self.nc.subscribe(_sub_all(), cb=self._handle_message)
-        await self.nc.subscribe(_sub_heartbeat(), cb=self._handle_heartbeat)
-        await self.nc.subscribe(_sub_ack(self.node_id), cb=self._handle_ack)
+        """Subscribe to all fleet NATS subjects. Called on connect and reconnect.
+
+        Tracks subscription objects in self._active_subs. On reconnect,
+        existing subs are unsubscribed first to prevent duplicate delivery.
+        """
+        # Unsubscribe prior subs to prevent duplicates on reconnect
+        for sub in self._active_subs:
+            try:
+                await sub.unsubscribe()
+            except Exception:
+                pass
+        self._active_subs.clear()
+
+        self._active_subs.append(await self.nc.subscribe(_sub_direct(self.node_id), cb=self._handle_message))
+        self._active_subs.append(await self.nc.subscribe(_sub_all(), cb=self._handle_message))
+        self._active_subs.append(await self.nc.subscribe(_sub_heartbeat(), cb=self._handle_heartbeat))
+        self._active_subs.append(await self.nc.subscribe(_sub_ack(self.node_id), cb=self._handle_ack))
         # Session historian subscription (fleet.sessions.> wildcard)
         if fleet_historian_nats:
             sub, cb = fleet_historian_nats.subscribe_sessions(self)
-            await self.nc.subscribe(sub, cb=cb)
+            self._active_subs.append(await self.nc.subscribe(sub, cb=cb))
             logger.info(
                 f"NATS subscribed: fleet.{self.node_id}.> + fleet.all.> + "
                 f"fleet.heartbeat + ack + fleet.sessions.>"

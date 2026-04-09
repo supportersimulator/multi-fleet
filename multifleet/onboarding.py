@@ -35,13 +35,14 @@ class OnboardingWizard:
 
     def __init__(self, node_id: str = ""):
         import re
-        if node_id and not re.match(r'^[a-z][a-z0-9_-]{0,31}$', node_id):
-            logger.warning("Invalid node_id format, using hostname")
-            node_id = ""
+        # Store raw value for observability/audit — never shell-executed
         self.node_id = node_id or os.environ.get(
             "MULTIFLEET_NODE_ID",
             socket.gethostname().split(".")[0].lower(),
         )
+        # Warn but don't silently replace — callers need to see the real value
+        if node_id and not re.match(r'^[a-z][a-z0-9_-]{0,31}$', node_id):
+            logger.warning("node_id '%s' contains unsafe characters — will be sanitized for shell use", node_id)
 
     # ── Public API ──
 

@@ -321,6 +321,9 @@ class ChiefSynthesis:
         """Record synthesis decision to the evidence ledger (hash-chain)."""
         if not self._evidence_ledger:
             return
+        if not hasattr(self._evidence_ledger, 'record'):
+            logger.warning("Evidence ledger lacks .record() — skipping evidence write")
+            return
         try:
             self._evidence_ledger.record(
                 event_type="merge_decision",
