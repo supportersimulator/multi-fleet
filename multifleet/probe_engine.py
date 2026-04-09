@@ -160,7 +160,11 @@ class ProbeRegistry:
         logger.debug("probe_registered id=%s category=%s", probe_id, category.value)
 
     def _emit_probe_finding(self, result: ProbeResult) -> None:
-        """Emit a fleet.probe.finding event to the EventBus and record to evidence ledger (best-effort)."""
+        """Emit a fleet.probe.finding event to the EventBus (best-effort).
+
+        Note: Evidence ledger recording is handled by ProbeEngine._record_high_findings()
+        which filters to HIGH+ severity only, keeping the ledger signal-rich.
+        """
         try:
             from multifleet.eventbus import FleetEventBus
             import os
@@ -169,20 +173,6 @@ class ProbeRegistry:
             bus.emit("probe.finding", result.to_dict())
         except Exception:
             pass  # Best-effort — never fail probe execution for event emission
-
-        # P1-1: Record to evidence ledger
-        try:
-            from multifleet.evidence_ledger import EvidenceLedger
-            import os
-            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
-            EvidenceLedger().record(
-                event_type="probe_finding",
-                node_id=node_id,
-                subject=result.probe_id,
-                payload=result.to_dict(),
-            )
-        except Exception:
-            pass  # Best-effort
 
     def _get_cached(self, probe_id: str) -> Optional[ProbeResult]:
         """Return cached result if still valid, else None."""
@@ -561,6 +551,16 @@ class ProbeEngine:
         scorer = SignalScorer()
         results = scorer.top_n(results, n=len(results))
 
+        # Distributed dispatch: merge remote peer results when NATS/daemon is available
+        remote_results = self._dispatch_to_peers(trigger, context)
+        if remote_results:
+            results = results + remote_results
+            logger.info(
+                "distributed_merge trigger=%s remote_probes=%d",
+                trigger,
+                len(remote_results),
+            )
+
         self._results_cache = results
         logger.info(
             "scan_complete trigger=%s probes=%d findings=%d",
@@ -651,6 +651,79 @@ class ProbeEngine:
         if has_high_severity:
             return "standard"
         return "light"
+
+    def _dispatch_to_peers(
+        self, trigger: str, context: Optional[dict]
+    ) -> list[ProbeResult]:
+        """Dispatch probe scan to fleet peers via NATS/daemon and return merged results.
+
+        Non-blocking: returns [] if daemon is unreachable or NATS is unavailable.
+        Each peer's probe dicts are deserialized back into ProbeResult objects so
+        they can be ranked and recorded alongside local results.
+        """
+        try:
+            import os
+            from multifleet.probes.distributed import DistributedProbeRunner
+
+            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+            runner = DistributedProbeRunner(daemon_port=8855, node_id=node_id)
+
+            # Quick daemon reachability check — bail out fast if not running
+            health = runner._daemon_get("/health", timeout=2)
+            if not health:
+                return []
+
+            peers = {
+                k: v for k, v in health.get("peers", {}).items()
+                if not k.startswith("test")
+            }
+            if not peers:
+                return []
+
+            remote: list[ProbeResult] = []
+            for peer in peers:
+                peer_data = runner._request_peer_probes(peer, timeout_s=10)
+                if not peer_data:
+                    continue
+                # Deserialize peer probe dicts → ProbeResult objects
+                for probe_dict in peer_data.get("probes", []):
+                    try:
+                        findings = [
+                            ProbeFinding(
+                                title=f.get("title", ""),
+                                evidence=f.get("evidence", []),
+                                blast_radius=f.get("blast_radius", "low"),
+                                suggested_injections=f.get("suggested_injections", []),
+                                file_paths=f.get("file_paths", []),
+                            )
+                            for f in probe_dict.get("findings", [])
+                        ]
+                        pr = ProbeResult(
+                            probe_id=f"{peer}:{probe_dict.get('probe_id', 'unknown')}",
+                            category=probe_dict.get("category", "unknown"),
+                            status=probe_dict.get("status", "unknown"),
+                            confidence=float(probe_dict.get("confidence", 0.0)),
+                            severity=probe_dict.get("severity", "info"),
+                            findings=findings,
+                            missing_inputs=probe_dict.get("missing_inputs", []),
+                            duration_ms=float(probe_dict.get("duration_ms", 0.0)),
+                            generated_at=probe_dict.get(
+                                "generated_at",
+                                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            ),
+                        )
+                        remote.append(pr)
+                    except Exception as e:
+                        logger.debug("distributed_probe_deserialize peer=%s error=%s", peer, e)
+
+            return remote
+
+        except ImportError:
+            logger.debug("distributed_probes unavailable — running local-only")
+            return []
+        except Exception as e:
+            logger.debug("distributed_dispatch non_blocking error=%s", e)
+            return []
 
     def _record_high_findings(self, results: list[ProbeResult]) -> None:
         """Record HIGH/CRITICAL probe findings to the evidence ledger.
