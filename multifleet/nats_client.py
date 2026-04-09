@@ -1055,6 +1055,27 @@ class FleetNerveNATS:
                 continue
         return {"delivered": False}
 
+    async def _send_p2t_tailscale(self, target: str, message: dict) -> dict:
+        """P2t: HTTP direct via Tailscale overlay network. Cross-network connectivity."""
+        peer = self._resolve_peer(target)
+        try:
+            from multifleet.config import resolve_tailscale_ip
+            ts_ip = resolve_tailscale_ip(peer, target)
+        except (ImportError, Exception):
+            ts_ip = peer.get("tailscale_ip", "")
+        if not ts_ip:
+            return {"delivered": False}
+        import urllib.request
+        payload = json.dumps(message).encode()
+        url = f"http://{ts_ip}:8855/message"
+        try:
+            req = urllib.request.Request(url, data=payload,
+                headers={"Content-Type": "application/json"}, method="POST")
+            resp = urllib.request.urlopen(req, timeout=5)
+            return {"delivered": True, "url": url, "channel": "P2t_tailscale"}
+        except Exception:
+            return {"delivered": False}
+
     async def _send_p3_chief(self, target: str, message: dict) -> dict:
         """P3: Chief relay -- stores and forwards. Tries direct, then tunnel."""
         if not self._chief:
