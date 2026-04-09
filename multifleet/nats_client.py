@@ -1504,6 +1504,32 @@ class FleetNerveNATS:
         logger.warning(f"[broadcast] All channels failed: {errors}")
         return {"delivered": False, "mode": "broadcast_all_failed", "errors": errors}
 
+    async def _send_p0_discord(self, target: str, message: dict) -> dict:
+        """P0: Discord channel — highest priority, tried before all others.
+
+        Uses the DiscordFleetBridge from discord_bridge module. Falls through
+        gracefully when Discord is not configured or bridge is not connected.
+        """
+        try:
+            from .discord_bridge import DiscordFleetBridge, get_bot_token, validate_bot_token
+        except ImportError:
+            return {"delivered": False, "error": "discord_bridge not available"}
+
+        # Check if bridge is attached to this nerve instance
+        bridge = getattr(self, "_discord_bridge", None)
+        if bridge is None:
+            return {"delivered": False, "error": "Discord bridge not attached"}
+
+        try:
+            result = bridge.send_to_discord(message)
+            if result.get("sent"):
+                return {"delivered": True, "method": "discord"}
+            if result.get("queued"):
+                return {"delivered": False, "error": "queued (bridge disconnected)"}
+            return {"delivered": False, "error": "Discord send failed"}
+        except Exception as e:
+            return {"delivered": False, "error": f"discord send failed: {e}"}
+
     async def _send_p0_cloud(self, target: str, message: dict) -> dict:
         """P0: Cloud dispatch via RemoteTrigger API. Spawns isolated Claude Code in Anthropic cloud."""
         try:

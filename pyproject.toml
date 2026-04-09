@@ -32,6 +32,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+discord = [
+    "discord.py>=2.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

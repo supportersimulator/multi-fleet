@@ -640,6 +640,86 @@ def cmd_orchestrate(args):
             print(f"  [{status_sym}] {t['id']}  {t['description']}  ({mode}, {t.get('elapsed_s', '?')}s)")
 
 
+def cmd_discord(args):
+    """Discord bridge — start/stop/status for the P0 Discord channel."""
+    action = args.action
+
+    if action == "status":
+        try:
+            from multifleet.discord_bridge import status as discord_status
+            info = discord_status()
+            _header("Discord Bridge Status (P0 Channel)")
+            configured = info.get("configured", False)
+            has_lib = info.get("discord_py_installed", False)
+            if not has_lib:
+                _fail("discord.py not installed. Run: pip install multifleet\\[discord]")
+            elif configured:
+                _ok("Discord bridge: configured")
+                ch_id = info.get("channel_id")
+                if ch_id:
+                    print(f"  Channel ID: {ch_id}")
+                print(f"  Token present: {info.get('token_present', False)}")
+            else:
+                _fail("Discord bridge: not configured (set DISCORD_BOT_TOKEN + FLEET_DISCORD_CHANNEL_ID)")
+                print(f"  Token present: {info.get('token_present', False)}")
+                print(f"  Channel ID set: {bool(info.get('channel_id'))}")
+        except ImportError:
+            _fail("discord_bridge module not available")
+
+    elif action == "start":
+        try:
+            from multifleet.discord_bridge import (
+                DiscordFleetBridge, get_bot_token, validate_bot_token,
+                validate_channel_id, DISCORD_AVAILABLE,
+            )
+        except ImportError:
+            _die("discord_bridge module not available")
+            return
+
+        if not DISCORD_AVAILABLE:
+            _die("discord.py not installed. Run: pip install multifleet\\[discord]")
+            return
+
+        import os as _os
+        token = get_bot_token()
+        if not validate_bot_token(token):
+            _die("No Discord bot token. Set DISCORD_BOT_TOKEN env var or store in macOS Keychain.")
+            return
+
+        channel_id = _os.environ.get("FLEET_DISCORD_CHANNEL_ID", "")
+        if not validate_channel_id(channel_id):
+            _die("FLEET_DISCORD_CHANNEL_ID env var not set or invalid.")
+            return
+
+        node_id = _os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+        _header(f"Starting Discord bridge (node: {node_id}, channel: {channel_id})")
+        bridge = DiscordFleetBridge(bot_token=token, channel_id=channel_id)
+        print("Discord bridge initialized. Use fleet daemon to route messages through P0.")
+        print("(Bridge queues messages when disconnected, drains on reconnect.)")
+
+    elif action == "stop":
+        _warn("Discord bridge runs as a separate process. Use Ctrl-C or kill the process.")
+        # Check if bridge process is running
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "multifleet.discord_bridge"],
+                capture_output=True, text=True,
+            )
+            pids = result.stdout.strip().split("\n")
+            pids = [p for p in pids if p]
+            if pids:
+                print(f"  Running PIDs: {', '.join(pids)}")
+                print(f"  To stop: kill {' '.join(pids)}")
+            else:
+                print("  No Discord bridge process found.")
+        except FileNotFoundError:
+            print("  Cannot detect running processes (pgrep not available).")
+
+    else:
+        _die(f"Unknown discord action: {action}")
+
+
 def cmd_nats_cluster(args):
     """NATS cluster management — generate config, start/stop server, check status."""
     from multifleet.nats_cluster import (
@@ -795,6 +875,11 @@ def main():
     theater_p.add_argument("--port", type=int, default=8855, help="Daemon port")
     theater_p.add_argument("--refresh", type=float, default=2.0, help="Refresh rate (seconds)")
 
+    # discord — Discord bridge management (P0 channel)
+    disc_p = sub.add_parser("discord", help="Discord bridge — P0 communication channel")
+    disc_p.add_argument("action", choices=["start", "stop", "status"],
+                        help="start=launch bridge, stop=find/kill process, status=check config")
+
     # nats-cluster — NATS cluster management
     nc_p = sub.add_parser("nats-cluster", help="NATS cluster management (generate/start/stop/status)")
     nc_p.add_argument("action", choices=["generate", "start", "stop", "status", "client-urls", "restart"],
@@ -828,6 +913,7 @@ def main():
         "probe": cmd_probe,
         "orchestrate": cmd_orchestrate,
         "theater": cmd_theater,
+        "discord": cmd_discord,
         "nats-cluster": cmd_nats_cluster,
     }
 
