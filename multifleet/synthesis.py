@@ -112,6 +112,21 @@ class ChiefSynthesis:
 
         t0 = time.monotonic()
 
+        # Pull latest evidence from Context DNA before synthesis (bidirectional sync)
+        contextdna_context: list[dict] = []
+        try:
+            from multifleet.product_bridge import get_bridge
+            task_summary = next(
+                (v.get("summary", "") for v in verdicts.values() if v.get("summary")), ""
+            )
+            if task_summary:
+                cdna_result = get_bridge().memory_to_fleet(task_summary)
+                contextdna_context = cdna_result.get("results", [])
+                if contextdna_context:
+                    logger.info("Pre-synthesis ContextDNA pull: %d evidence entries", len(contextdna_context))
+        except Exception as e:
+            logger.debug("Pre-synthesis ContextDNA pull failed: %s", e)
+
         # Run probes on the task context to get fresh evidence before analyzing
         probe_summary = None
         try:
@@ -142,6 +157,8 @@ class ChiefSynthesis:
                 best = max(results, key=lambda r: r.confidence)
                 if probe_summary:
                     best.metadata["probe_summary"] = probe_summary
+                if contextdna_context:
+                    best.metadata["contextdna_evidence_count"] = len(contextdna_context)
                 # Resolve memory influence (the "holy shit" moment)
                 best = self._apply_memory_influence(best, task_id, verdicts)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
@@ -153,6 +170,8 @@ class ChiefSynthesis:
         result = self._default_analyzer(task_id, verdicts)
         if probe_summary:
             result.metadata["probe_summary"] = probe_summary
+        if contextdna_context:
+            result.metadata["contextdna_evidence_count"] = len(contextdna_context)
         # Resolve memory influence (the "holy shit" moment)
         result = self._apply_memory_influence(result, task_id, verdicts)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))

@@ -100,8 +100,14 @@ class GhostCorroborate:
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         )
 
+        # Pull latest fleet evidence from Context DNA (bidirectional sync)
+        contextdna_evidence = self._pull_contextdna_evidence(findings)
+
         # Load historical evidence
         history = self._load_history()
+        # Merge Context DNA evidence into history for richer corroboration
+        if contextdna_evidence:
+            history.extend(contextdna_evidence)
 
         for finding in findings:
             title = finding.get("title", "")
@@ -124,6 +130,8 @@ class GhostCorroborate:
         # Record corroboration to ledger
         if result.items:
             self._record_corroboration(result)
+            # Push corroboration results to Context DNA (closes learning loop)
+            self._push_to_contextdna(result)
 
         # Emit event
         self._emit_event(result)
@@ -235,6 +243,55 @@ class GhostCorroborate:
             )
         except Exception as e:
             logger.debug("Corroboration ledger write failed: %s", e)
+
+    def _push_to_contextdna(self, result: CorroborateResult) -> None:
+        """Push corroboration results to Context DNA via ProductBridge (closes learning loop)."""
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            bridge.fleet_to_memory({
+                "event_type": "ghost_corroboration",
+                "node_id": self._node_id,
+                "evidence": {
+                    "strengthened": result.strengthened,
+                    "weakened": result.weakened,
+                    "novel": result.novel,
+                    "total_items": len(result.items),
+                    "top_findings": [
+                        {"title": i.finding_title, "verdict": i.verdict,
+                         "confidence": i.adjusted_confidence}
+                        for i in result.items[:5]
+                    ],
+                },
+                "tags": ["ghost", "corroboration", "learning_loop"],
+            })
+        except Exception as e:
+            logger.debug("ghost->contextdna bridge (non-blocking): %s", e)
+
+    def _pull_contextdna_evidence(self, findings: list[dict]) -> list[dict]:
+        """Pull related evidence from Context DNA to enrich corroboration.
+
+        Queries Context DNA for historical evidence related to the findings
+        being corroborated. Returns entries in evidence-ledger-compatible format.
+        """
+        if not findings:
+            return []
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            # Build query from finding titles
+            titles = [f.get("title", "") for f in findings[:5] if f.get("title")]
+            if not titles:
+                return []
+            query = " ".join(titles)[:200]
+            result = bridge.memory_to_fleet(query)
+            entries = result.get("results", [])
+            logger.debug("contextdna->ghost pull: %d entries for %d findings",
+                         len(entries), len(findings))
+            return entries
+        except Exception as e:
+            logger.debug("contextdna->ghost pull (non-blocking): %s", e)
+            return []
 
     def _emit_event(self, result: CorroborateResult) -> None:
         """Emit ghost corroborate event."""

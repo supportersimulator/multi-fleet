@@ -658,12 +658,14 @@ class ProbeEngine:
         Only findings at severity HIGH or CRITICAL with actual findings
         are recorded, keeping the ledger signal-rich.
         """
+        high_count = 0
         try:
             from multifleet.evidence_ledger import EvidenceLedger
             import os
             ledger = EvidenceLedger()
             for result in results:
                 if result.severity in ("high", "critical") and result.findings:
+                    high_count += 1
                     ledger.record(
                         event_type="probe_finding",
                         node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
@@ -677,10 +679,59 @@ class ProbeEngine:
                             "finding_titles": [f.title for f in result.findings],
                         },
                     )
-            logger.debug("Evidence ledger: recorded %d HIGH+ probe findings",
-                         sum(1 for r in results if r.severity in ("high", "critical") and r.findings))
+            logger.debug("Evidence ledger: recorded %d HIGH+ probe findings", high_count)
         except Exception as e:
             logger.debug("Evidence ledger recording failed: %s", e)
+
+        # Push HIGH+ findings to Context DNA (bidirectional sync — closes learning loop)
+        if high_count > 0:
+            self._push_high_findings_to_contextdna(results)
+
+    def _push_high_findings_to_contextdna(self, results: list[ProbeResult]) -> None:
+        """Push HIGH/CRITICAL probe findings to Context DNA via ProductBridge."""
+        try:
+            from multifleet.product_bridge import get_bridge
+            import os
+            bridge = get_bridge()
+            high_findings = [
+                r for r in results
+                if r.severity in ("high", "critical") and r.findings
+            ]
+            bridge.fleet_to_memory({
+                "event_type": "probe_high_findings",
+                "node_id": os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "evidence": {
+                    "findings_count": len(high_findings),
+                    "probes": [
+                        {
+                            "probe_id": r.probe_id,
+                            "severity": r.severity,
+                            "category": r.category,
+                            "confidence": r.confidence,
+                            "finding_titles": [f.title for f in r.findings[:5]],
+                        }
+                        for r in high_findings[:10]
+                    ],
+                },
+                "tags": ["probe", "high_findings", "learning_loop"],
+            })
+        except Exception as e:
+            logger.debug("probe->contextdna bridge (non-blocking): %s", e)
+
+    def pull_contextdna_evidence(self, query: str) -> list[dict]:
+        """Pull relevant evidence from Context DNA for probe enrichment.
+
+        Used by probes that want historical context before scanning.
+        Returns list of evidence entries or empty list on failure.
+        """
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            result = bridge.memory_to_fleet(query)
+            return result.get("results", [])
+        except Exception as e:
+            logger.debug("contextdna->probe pull (non-blocking): %s", e)
+            return []
 
     def health(self) -> dict:
         """Return engine health: which probes are working vs broken.
