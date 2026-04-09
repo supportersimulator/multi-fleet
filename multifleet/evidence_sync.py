@@ -31,7 +31,8 @@ logger = logging.getLogger("fleet-nerve.evidence_sync")
 DAEMON_PORT = int(os.environ.get("FLEET_DAEMON_PORT", "8855"))
 FLEET_MESSAGES_DIR = Path(os.environ.get(
     "FLEET_MESSAGES_DIR",
-    str(Path(__file__).resolve().parent.parent.parent / ".fleet-messages"),
+    str(Path(os.environ.get("MULTIFLEET_REPO_ROOT",
+        str(Path(__file__).resolve().parent.parent))) / ".fleet-messages"),
 ))
 
 

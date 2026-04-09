@@ -8,8 +8,10 @@ Falls back to template-based interpretation when LLM is unavailable.
 """
 
 import logging
+import os
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from multifleet.probe_engine import ProbeResult
@@ -106,7 +108,8 @@ class ProbeInterpreter:
     def _llm_interpret(self, results: list[ProbeResult]) -> dict:
         """LLM-powered interpretation for rich insights."""
         # Import here to avoid hard dependency on memory module
-        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+        _superrepo = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", str(Path(__file__).resolve().parents[2]))
+        sys.path.insert(0, _superrepo)
         from memory.llm_priority_queue import Priority, llm_generate
 
         # Build compact prompt from results
