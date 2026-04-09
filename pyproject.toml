@@ -48,9 +48,9 @@ fleet-dashboard = "multifleet.web_dashboard:main"
 fleet-nats-cluster = "multifleet.nats_cluster:main"
 
 [project.urls]
-Homepage = "https://multi-fleet.dev"
-Repository = "https://github.com/supportersimulator/multi-fleet"
-Documentation = "https://multi-fleet.dev/docs"
+Homepage = "https://contextdna.dev/multifleet"
+Repository = "https://github.com/contextdna/multifleet"
+Documentation = "https://contextdna.dev/multifleet/docs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["multifleet"]
