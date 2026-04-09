@@ -194,16 +194,27 @@ def create_contextdna_analyzer():
         # Pull latest fleet evidence from Context DNA (bidirectional sync)
         contextdna_evidence: list[dict] = []
         try:
+            import signal
+
+            def _timeout_handler(signum, frame):
+                raise TimeoutError("product_bridge.memory_to_fleet timed out")
+
             from multifleet.product_bridge import get_bridge
             task_summary = next(
                 (v.get("summary", "") for v in verdicts.values() if v.get("summary")), ""
             )
             if task_summary:
-                cdna_result = get_bridge().memory_to_fleet(task_summary)
-                contextdna_evidence = cdna_result.get("results", [])
-                if contextdna_evidence:
-                    logger.debug("contextdna->analyzer pull: %d entries for task %s",
-                                 len(contextdna_evidence), task_id)
+                old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(3)  # 3s timeout for network call
+                try:
+                    cdna_result = get_bridge().memory_to_fleet(task_summary)
+                    contextdna_evidence = cdna_result.get("results", [])
+                    if contextdna_evidence:
+                        logger.debug("contextdna->analyzer pull: %d entries for task %s",
+                                     len(contextdna_evidence), task_id)
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
         except Exception as e:
             logger.debug("contextdna->analyzer pull (non-blocking): %s", e)
 
