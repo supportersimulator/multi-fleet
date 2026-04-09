@@ -359,10 +359,11 @@ class ProductBridge:
             from multifleet.evidence_ledger import EvidenceLedger
 
             ledger = EvidenceLedger()
-            entry_id = ledger.append(
+            entry_id = ledger.record(
                 event_type=msg.get("event_type", "fleet_evidence"),
                 node_id=msg.get("node_id", "unknown"),
-                data=msg.get("evidence", msg),
+                subject=msg.get("subject", "fleet_evidence_promotion"),
+                payload=msg.get("evidence", msg),
             )
             return {"stored": True, "entry_id": entry_id, "backend": "local_ledger"}
         except Exception as e:

@@ -55,7 +55,6 @@ except ImportError:
     sys.exit(1)
 
 REPO_ROOT = Path(os.environ.get("MULTIFLEET_REPO_ROOT", str(Path(__file__).parent.parent)))
-sys.path.insert(0, str(REPO_ROOT))
 
 # Session historian NATS (standalone module)
 try:

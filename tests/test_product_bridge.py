@@ -195,7 +195,7 @@ class TestFleetMemoryBridge:
 
         mock_ledger_cls = MagicMock()
         mock_ledger = MagicMock()
-        mock_ledger.append.return_value = "entry-abc"
+        mock_ledger.record.return_value = "entry-abc"
         mock_ledger_cls.return_value = mock_ledger
 
         with patch("multifleet.product_bridge.urllib.request.urlopen", side_effect=OSError), \

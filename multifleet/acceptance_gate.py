@@ -130,7 +130,7 @@ class AcceptanceGate:
         # Check 2: Evidence ledger
         if self._evidence_ledger:
             try:
-                entries = self._evidence_ledger.query(task_id=task_id) if hasattr(self._evidence_ledger, 'query') else self._evidence_ledger.query(task_id)
+                entries = self._evidence_ledger.query(event_type=task_id) if hasattr(self._evidence_ledger, 'query') else []
                 if not entries:
                     blocking.append(f"No evidence ledger entries for task {task_id}")
                 checks.append({"name": "evidence", "status": "pass" if entries else "fail"})

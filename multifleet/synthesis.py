@@ -338,6 +338,14 @@ class ChiefSynthesis:
         except Exception as e:
             logger.warning("Evidence ledger record failed: %s", e)
 
+        # Wire 2: push synthesis evidence to ContextDNA
+        try:
+            from multifleet.contextdna_evidence_bridge import ContextDNAEvidenceBridge
+            bridge = ContextDNAEvidenceBridge(ledger=self._evidence_ledger)
+            bridge.push_to_contextdna()
+        except Exception as e:
+            logger.debug("ContextDNA bridge push failed (non-critical): %s", e)
+
     def recent_decisions(self, limit: int = 10) -> list[dict]:
         """Read recent decisions from ledger."""
         if not self._ledger_path.exists():
