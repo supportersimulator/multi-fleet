@@ -389,6 +389,24 @@ def create_contextdna_analyzer():
         if professor_wisdom:
             reasoning += f" Professor: {professor_wisdom[:150]}."
 
+        # Write analysis back to Context DNA (close the learning loop)
+        try:
+            from multifleet.product_bridge import get_bridge
+            get_bridge().fleet_to_memory({
+                "event_type": "contextdna_analysis",
+                "node_id": "analyzer",
+                "evidence": {
+                    "task_id": task_id,
+                    "decision": decision,
+                    "memory_matches": sum(a.get("match_count", 0) for a in adjustments.values()),
+                    "professor_consulted": professor_wisdom is not None,
+                    "confidence": winner_score,
+                },
+                "tags": ["contextdna", "analysis", "learning_loop"],
+            })
+        except Exception:
+            pass
+
         return SynthesisResult(
             task_id=task_id,
             decision=decision,

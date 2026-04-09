@@ -146,6 +146,7 @@ class ChiefSynthesis:
                 best = self._apply_memory_influence(best, task_id, verdicts)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
                 self._record_evidence(best)
+                self._push_to_contextdna(best)
                 return best
 
         # Fallback to basic confidence-weighted scoring
@@ -156,6 +157,7 @@ class ChiefSynthesis:
         result = self._apply_memory_influence(result, task_id, verdicts)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
+        self._push_to_contextdna(result)
         # Track outcome for learning (high-value, zero-caller module)
         try:
             from memory.outcome_tracker import OutcomeTracker
@@ -340,6 +342,27 @@ class ChiefSynthesis:
             )
         except Exception as e:
             logger.warning("Evidence ledger record failed: %s", e)
+
+    def _push_to_contextdna(self, result: SynthesisResult):
+        """Push synthesis decision to Context DNA via ProductBridge (closes learning loop)."""
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            bridge.fleet_to_memory({
+                "event_type": "synthesis_decision",
+                "node_id": os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "evidence": {
+                    "task_id": result.task_id,
+                    "decision": result.decision,
+                    "winner_branch": result.winner_branch,
+                    "confidence": round(result.confidence, 4),
+                    "reasoning": result.reasoning[:300],
+                    "dissent_count": len(result.dissent_preserved),
+                },
+                "tags": ["synthesis", "fleet_decision"],
+            })
+        except Exception as e:
+            logger.debug("fleet->contextdna bridge (non-blocking): %s", e)
 
     def recent_decisions(self, limit: int = 10) -> list[dict]:
         """Read recent decisions from ledger."""
