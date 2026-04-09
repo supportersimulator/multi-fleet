@@ -136,23 +136,6 @@ def _get_node_id() -> str:
     return socket.gethostname().split(".")[0].lower()
 
 
-# ── Data Layer singleton (shared SQLite connection pool) ──
-_data_layer = None
-
-
-def _get_data_layer():
-    """Get or create the singleton FleetDataLayer for connection pooling."""
-    global _data_layer
-    if _data_layer is None:
-        try:
-            from multifleet.data_layer import get_data_layer
-            _data_layer = get_data_layer()
-            logger.info("FleetDataLayer initialized: %s", _data_layer.data_dir)
-        except Exception as e:
-            logger.warning("FleetDataLayer init failed: %s", e)
-    return _data_layer
-
-
 def _http_probe(url: str, timeout: int = 3) -> dict:
     """Probe a URL, return {"reachable": bool, "latency_ms": N, "error": ...}."""
     start = time.time()
@@ -1430,8 +1413,7 @@ def _get_lease_manager():
         from multifleet.store import FleetNerveStore
         config = _load_config()
         chief_id = config.get("chief", {}).get("nodeId", "")
-        dl = _get_data_layer()
-        store = FleetNerveStore(data_layer=dl)
+        store = FleetNerveStore()
         _lease_manager = LeaseManager(store, NODE_ID, chief_node_id=chief_id or None,
                                        daemon_port=FLEET_NERVE_PORT)
         return _lease_manager
@@ -1450,8 +1432,7 @@ def _get_rebuttal_manager():
     try:
         from multifleet.rebuttal import RebuttalManager
         from multifleet.store import FleetNerveStore
-        dl = _get_data_layer()
-        store = FleetNerveStore(data_layer=dl)
+        store = FleetNerveStore()
         _rebuttal_manager = RebuttalManager(store, NODE_ID)
         return _rebuttal_manager
     except Exception as e:
@@ -1468,8 +1449,7 @@ def _get_evidence_ledger():
         pass
     try:
         from multifleet.evidence_ledger import EvidenceLedger
-        dl = _get_data_layer()
-        _evidence_ledger = EvidenceLedger(data_layer=dl)
+        _evidence_ledger = EvidenceLedger()
         return _evidence_ledger
     except Exception as e:
         logger.warning(f"EvidenceLedger init failed: {e}")
@@ -2555,185 +2535,6 @@ def fleet_invariance(action: str = "check_all", rule_id: str = "",
     }
 
 
-def fleet_wisdom(action: str = "stats", hours: str = "24",
-                  min_severity: str = "medium") -> dict:
-    """Evidence → ContextDNA Memory Bridge — promotes fleet evidence into persistent memory.
-
-    Actions:
-        stats:   Show wisdom promotion stats (total, by type, last promotion)
-        promote: Trigger immediate promotion cycle
-        files:   List recent wisdom files
-
-    This is THE MOAT — transforms fleet evidence from disposable data
-    into compounding institutional intelligence.
-    """
-    try:
-        from multifleet.memory_bridge import MemoryBridge
-        from multifleet.evidence_ledger import EvidenceLedger
-    except ImportError as e:
-        return {"error": f"memory_bridge not available: {e}"}
-
-    bridge = MemoryBridge(evidence_ledger=EvidenceLedger())
-
-    if action == "stats":
-        return bridge.get_wisdom_stats()
-
-    if action == "promote":
-        result = bridge.run_promotion_cycle()
-        result["stats"] = bridge.get_wisdom_stats()
-        return result
-
-    if action == "files":
-        from pathlib import Path
-        wisdom_dir = Path(bridge._memory_path)
-        files = sorted(wisdom_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
-        files = [f for f in files if f.name != ".promoted.json"][:20]
-        return {
-            "files": [
-                {"name": f.name, "size": f.stat().st_size,
-                 "modified": f.stat().st_mtime}
-                for f in files
-            ],
-            "total": len(list(wisdom_dir.glob("*.json"))) - 1,
-            "path": str(wisdom_dir),
-        }
-
-    return {"error": f"Unknown action: {action}. Use: stats, promote, files"}
-
-
-def fleet_arbiter(action: str, task_id: str = "", feedback: str = "",
-                  chosen_branch: str = "") -> dict:
-    """Human arbiter interface for synthesis decisions.
-
-    Actions: present, approve, override, request_changes, defer, list_pending
-    """
-    try:
-        from multifleet.arbiter_view import ArbiterView
-        from multifleet.synthesis import ChiefSynthesis
-        from multifleet.evidence_ledger import EvidenceLedger
-    except ImportError as e:
-        return {"error": f"arbiter modules not available: {e}"}
-
-    try:
-        from multifleet.cross_rebuttal import RebuttalManager
-        rebuttal_mgr = RebuttalManager()
-    except ImportError:
-        rebuttal_mgr = None
-
-    # Use module-level singleton to preserve state across calls
-    global _arbiter_instance
-    if "_arbiter_instance" not in globals() or _arbiter_instance is None:
-        synthesis = ChiefSynthesis()
-        evidence = EvidenceLedger()
-        _arbiter_instance = ArbiterView(
-            synthesis=synthesis,
-            evidence_ledger=evidence,
-            rebuttal_mgr=rebuttal_mgr,
-        )
-
-    arbiter = _arbiter_instance
-
-    if action == "present":
-        if not task_id:
-            return {"error": "task_id required for present action"}
-        return arbiter.present_decision(task_id)
-
-    if action == "approve":
-        if not task_id:
-            return {"error": "task_id required for approve action"}
-        return arbiter.approve(task_id)
-
-    if action == "override":
-        if not task_id:
-            return {"error": "task_id required for override action"}
-        if not chosen_branch:
-            return {"error": "chosen_branch required for override action"}
-        return arbiter.override(task_id, chosen_branch, feedback or "No reason given")
-
-    if action == "request_changes":
-        if not task_id:
-            return {"error": "task_id required for request_changes action"}
-        if not feedback:
-            return {"error": "feedback required for request_changes action"}
-        return arbiter.request_changes(task_id, feedback)
-
-    if action == "defer":
-        if not task_id:
-            return {"error": "task_id required for defer action"}
-        return arbiter.defer(task_id)
-
-    if action == "list_pending":
-        pending = arbiter.list_pending()
-        return {"pending": pending, "count": len(pending)}
-
-    return {"error": f"Unknown action: {action}. Use: present, approve, override, request_changes, defer, list_pending"}
-
-
-_arbiter_instance = None
-
-
-def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
-    """Start/stop/status the fleet web server."""
-    try:
-        from multifleet.web_server import fleet_server_tool
-        return fleet_server_tool(action=action, port=port)
-    except ImportError as e:
-        return {"error": f"web_server module not available: {e}"}
-
-
-def fleet_arbiter(action: str = "pending", decision_id: str = "", details: str = "") -> dict:
-    """Human Arbiter — view and resolve pending fleet decisions.
-
-    When machines disagree (low confidence race, unresolved rebuttal),
-    decisions queue for human review. This tool lets you view and resolve them.
-
-    Args:
-        action: pending (list awaiting decisions), decide (record decision),
-                list (all decisions including resolved).
-        decision_id: Required for decide action.
-        details: JSON string with action details (for decide action).
-            For accept_recommendation: {}
-            For accept_alternative: {"alternative_index": 0, "node": "mac2"}
-            For override: {"custom_text": "Your decision here"}
-            For request_info: {"question": "What about X?"}
-    """
-    try:
-        from multifleet.arbiter_view import (
-            get_pending_decisions, record_decision, _pending_decisions, _decided,
-        )
-    except ImportError as e:
-        return {"error": f"arbiter_view module not available: {e}"}
-
-    if action == "pending":
-        pending = get_pending_decisions()
-        return {"decisions": pending, "count": len(pending)}
-
-    elif action == "decide":
-        if not decision_id:
-            return {"error": "decision_id required for decide action"}
-        try:
-            detail_dict = json.loads(details) if details else {}
-        except json.JSONDecodeError:
-            detail_dict = {"raw": details}
-        # Infer action from details
-        decide_action = detail_dict.pop("action", "accept_recommendation")
-        result = record_decision(decision_id, decide_action, detail_dict)
-        return result
-
-    elif action == "list":
-        pending = get_pending_decisions()
-        decided = list(_decided.values())
-        return {
-            "pending": pending,
-            "decided": decided[-20:],  # last 20
-            "total_pending": len(pending),
-            "total_decided": len(_decided),
-        }
-
-    else:
-        return {"error": f"unknown action: {action}. Use: pending, decide, list"}
-
-
 # ── MCP Server (stdin/stdout JSON-RPC) ──
 
 TOOLS = [
@@ -3041,20 +2842,6 @@ TOOLS = [
         "fn": fleet_evidence,
     },
     {
-        "name": "fleet_wisdom",
-        "description": "Evidence → ContextDNA Memory Bridge — THE MOAT. Promotes fleet evidence into persistent institutional memory. Actions: stats (promotion stats), promote (trigger promotion cycle), files (list wisdom files). This transforms fleet evidence from disposable data into compounding intelligence.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["stats", "promote", "files"], "description": "Action: stats (default), promote, files", "default": "stats"},
-                "hours": {"type": "string", "description": "Time window for promotion in hours (default 24)", "default": "24"},
-                "min_severity": {"type": "string", "description": "Minimum severity to promote: low, medium, high, critical (default medium)", "default": "medium"},
-            },
-            "required": [],
-        },
-        "fn": fleet_wisdom,
-    },
-    {
         "name": "fleet_race",
         "description": "Start a Competitive Branch Race — parallel problem-solving across fleet nodes. Each node works in an isolated worktree, then the fleet debates and converges to the best solution. The hero feature.",
         "inputSchema": {
@@ -3080,20 +2867,6 @@ TOOLS = [
             "required": [],
         },
         "fn": fleet_race_status,
-    },
-    {
-        "name": "fleet_arbiter",
-        "description": "Human Arbiter — view and resolve pending fleet decisions. When machines disagree (low confidence race, unresolved rebuttal), decisions queue for human review. Actions: pending (list), decide (resolve), list (all).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["pending", "decide", "list"], "description": "Action: pending (default), decide, list", "default": "pending"},
-                "decision_id": {"type": "string", "description": "Decision ID (required for decide)"},
-                "details": {"type": "string", "description": "JSON details for decide action"},
-            },
-            "required": [],
-        },
-        "fn": fleet_arbiter,
     },
     {
         "name": "fleet_liaison_status",
@@ -3260,19 +3033,17 @@ TOOLS = [
         "fn": fleet_orchestrate,
     },
     {
-        "name": "fleet_arbiter",
-        "description": "Human arbiter interface for synthesis decisions. When machines disagree, presents recommendations, alternatives, evidence, dissent, and one-click actions (approve/override/request_changes/defer). Actions: present (show decision), approve, override, request_changes, defer, list_pending.",
+        "name": "fleet_server",
+        "description": "Start/stop/status the fleet web server (dashboard + API on a single port). Serves HTML dashboard, JSON API (/api/status, /api/probes, /api/decisions, /api/branches), Prometheus metrics, SSE events, and IDE bridge endpoints.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["present", "approve", "override", "request_changes", "defer", "list_pending"], "description": "Arbiter action"},
-                "task_id": {"type": "string", "description": "Task ID (required for present/approve/override/request_changes/defer)"},
-                "feedback": {"type": "string", "description": "Feedback text (for request_changes) or override reason (for override)"},
-                "chosen_branch": {"type": "string", "description": "Branch to use (for override)"},
+                "action": {"type": "string", "enum": ["start", "stop", "status"], "description": "Server action: start, stop, or status", "default": "status"},
+                "port": {"type": "integer", "description": "Port for the web server (default 8856)", "default": 8856},
             },
-            "required": ["action"],
+            "required": [],
         },
-        "fn": fleet_arbiter,
+        "fn": _fleet_server_tool,
     },
 ]
 
@@ -3336,33 +3107,6 @@ def handle_request(request: dict) -> dict:
     return {"error": {"code": -32601, "message": f"Method not found: {method}"}}
 
 
-def _run_startup_migration():
-    """Run FleetMigration.check_version() on startup and auto-migrate if needed."""
-    try:
-        from multifleet.migration import FleetMigration
-        mig = FleetMigration()
-        status = mig.check_version()
-        if status.get("needs_migration"):
-            logger.info("Migration needed: %s -> %s", status["current_version"], status["expected_version"])
-            result = mig.migrate()
-            logger.info("Migration result: %s", result.get("status"))
-        else:
-            logger.debug("Fleet state up to date: %s", status.get("current_version", "unknown"))
-    except Exception as e:
-        logger.warning("Startup migration check failed: %s", e)
-
-
-def _run_shutdown_backup():
-    """Create a backup snapshot on graceful shutdown."""
-    try:
-        from multifleet.backup import FleetBackup
-        backup = FleetBackup()
-        path = backup.create_snapshot()
-        logger.info("Shutdown backup created: %s", path)
-    except Exception as e:
-        logger.warning("Shutdown backup failed: %s", e)
-
-
 def main():
     """Run as MCP server on stdin/stdout (JSON-RPC)."""
     logging.basicConfig(
@@ -3371,39 +3115,27 @@ def main():
         datefmt="%H:%M:%S",
         stream=sys.stderr,  # MCP uses stdout for JSON-RPC
     )
-
-    # Startup: initialize data layer + run migrations
-    _get_data_layer()
-    _run_startup_migration()
-
     import io
     reader = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8")
     writer = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-    try:
-        for line in reader:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                request = json.loads(line)
-                response = handle_request(request)
-                if response is None:
-                    continue  # notification, no response
-                response["jsonrpc"] = "2.0"
-                response["id"] = request.get("id")
-                writer.write(json.dumps(response) + "\n")
-                writer.flush()
-            except Exception as e:
-                error = {"jsonrpc": "2.0", "id": None, "error": {"code": -1, "message": str(e)}}
-                writer.write(json.dumps(error) + "\n")
-                writer.flush()
-    finally:
-        # Graceful shutdown: backup + close data layer
-        _run_shutdown_backup()
-        dl = _get_data_layer()
-        if dl:
-            dl.close_all()
+    for line in reader:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            response = handle_request(request)
+            if response is None:
+                continue  # notification, no response
+            response["jsonrpc"] = "2.0"
+            response["id"] = request.get("id")
+            writer.write(json.dumps(response) + "\n")
+            writer.flush()
+        except Exception as e:
+            error = {"jsonrpc": "2.0", "id": None, "error": {"code": -1, "message": str(e)}}
+            writer.write(json.dumps(error) + "\n")
+            writer.flush()
 
 
 if __name__ == "__main__":
