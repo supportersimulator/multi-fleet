@@ -28,6 +28,8 @@ Multi-Fleet is the first LLM-native fleet coordination system. Every node is ind
 
 ## What's New in v5.0.0
 
+- **NATS clustering** -- each node runs its own nats-server, clustered with all peers. Zero single point of failure. Auto-failover when any node goes down.
+- **Trip mode** -- one command locks fleet for remote operation: keepalive, API failover (OmniRoute), wake-on-LAN, power state management
 - **112 Python modules** across 5 architectural layers
 - **~2,000 tests** across 99 test files
 - **34 MCP tools** for complete fleet operation via protocol
@@ -53,15 +55,23 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, module map, a
 ## Quick Start
 
 ```bash
-# 1. Configure your fleet
+# Install
+pip install multifleet
+
+# Configure your fleet
 cp config/config.template.json .multifleet/config.json
-# Edit config.json -- add one entry per machine
+# Edit config.json — add one entry per machine
 
-# 2. Set your node identity and start
+# Set your node identity and start
 export MULTIFLEET_NODE_ID=mac2
-python3 bin/fleet_nerve_mcp.py
+fleet status              # Check fleet health
+fleet nats-cluster start  # Start clustered NATS server
+fleet-nerve               # Start fleet daemon
 
-# 3. Send a message (via MCP tools or direct HTTP)
+# Send a message
+fleet send mac1 "Hello from the CLI"
+
+# Or via HTTP
 curl -X POST http://127.0.0.1:8855/message \
   -H "Content-Type: application/json" \
   -d '{"type":"context","to":"mac1","payload":{"body":"Hello from mac2"}}'
