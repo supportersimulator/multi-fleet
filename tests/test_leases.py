@@ -548,6 +548,158 @@ class TestPartitionRecovery:
         assert resolution["fence_token"] == 2  # bumped past conflict
 
 
+class TestValidateFenceToken:
+    """Tests for fence token validation (cross-node visibility)."""
+
+    def test_validate_valid_token(self, mgr):
+        """Valid fence token passes validation."""
+        r = mgr.acquire("res-validate")
+        v = mgr.validate_fence_token("res-validate", r["fence_token"])
+        assert v["valid"] is True
+        assert v["current_fence"] == r["fence_token"]
+        assert v["holder"] == "mac1"
+
+    def test_validate_stale_token(self, mgr, mgr2):
+        """Stale fence token (from before re-acquire) is rejected."""
+        r1 = mgr.acquire("res-stale")
+        old_fence = r1["fence_token"]
+        mgr.release("res-stale")
+        mgr2.acquire("res-stale")  # fence increments
+        v = mgr.validate_fence_token("res-stale", old_fence)
+        assert v["valid"] is False
+        assert "stale" in v["reason"]
+
+    def test_validate_wrong_holder(self, mgr, mgr2):
+        """Fence token valid but holder is different node."""
+        r1 = mgr.acquire("res-holder")
+        # mgr2 tries to validate — correct fence but wrong holder
+        v = mgr2.validate_fence_token("res-holder", r1["fence_token"])
+        assert v["valid"] is False
+        assert "held by mac1" in v["reason"]
+
+    def test_validate_expired_lease(self, mgr):
+        """Expired lease fails validation."""
+        r = mgr.acquire("res-expired", lease_type="heartbeat")
+        conn = mgr._store._conn()
+        conn.execute(
+            "UPDATE leases SET acquired_at = ? WHERE resource_id = ?",
+            (time.time() - 100, "res-expired"),
+        )
+        conn.commit()
+        v = mgr.validate_fence_token("res-expired", r["fence_token"])
+        assert v["valid"] is False
+        assert "expired" in v["reason"]
+
+    def test_validate_nonexistent(self, mgr):
+        """Validating against nonexistent resource fails."""
+        v = mgr.validate_fence_token("nope", 1)
+        assert v["valid"] is False
+        assert "no lease found" in v["reason"]
+
+
+class TestCrossNodeVisibility:
+    """Tests for cross-node lease visibility — the core integration gap."""
+
+    def test_full_reconcile_flow_with_resolve(self, tmp_path):
+        """Full flow: partition -> provisional -> reconcile -> conflict -> resolve."""
+        chief_db = tmp_path / "chief_vis.db"
+        worker_db = tmp_path / "worker_vis.db"
+
+        chief_store = FleetNerveStore(db_path=chief_db)
+        worker_store = FleetNerveStore(db_path=worker_db)
+
+        chief = LeaseManager(chief_store, "mac1", chief_node_id="mac1")
+        worker = LeaseManager(worker_store, "mac2", chief_node_id="mac1", daemon_port=19999)
+
+        # Chief and worker both acquire same resource during partition
+        chief.acquire("shared-file")
+        worker_result = worker.acquire("shared-file")
+        assert worker_result.get("provisional") is True
+
+        # Also acquire non-conflicting resources
+        worker.acquire("worker-only")
+        chief.acquire("chief-only")
+
+        # Partition heals: get provisionals
+        provisionals = worker.list_provisional(node_id="mac2")
+        assert len(provisionals) == 2  # shared-file + worker-only
+
+        # Reconcile
+        verdicts = chief.reconcile(provisionals)
+        assert len(verdicts) == 2
+
+        verdict_map = {v["resource_id"]: v for v in verdicts}
+        assert verdict_map["shared-file"]["verdict"] == "conflict"
+        assert verdict_map["worker-only"]["verdict"] == "accepted"
+
+        # Resolve conflict — worker wins
+        resolution = chief.resolve_conflict("shared-file", "mac2")
+        assert resolution["resolved"] is True
+        assert resolution["fence_token"] >= 2
+
+        # Validate new fence token
+        v = chief.validate_fence_token("shared-file", resolution["fence_token"])
+        # Chief validates — but holder is mac2, so chief's own validation fails
+        assert v["valid"] is False
+        assert v["holder"] == "mac2"
+
+    def test_fence_token_prevents_stale_write_after_reconcile(self, tmp_path):
+        """After reconciliation, old fence tokens are invalid — prevents stale writes."""
+        db = tmp_path / "fence_stale.db"
+        store = FleetNerveStore(db_path=db)
+        mgr = LeaseManager(store, "mac1", chief_node_id="mac1")
+
+        r1 = mgr.acquire("critical-resource")
+        old_fence = r1["fence_token"]
+
+        # Simulate: conflict resolved, mac2 wins
+        mgr.resolve_conflict("critical-resource", "mac2")
+
+        # Old fence token from mac1 is now stale
+        v = mgr.validate_fence_token("critical-resource", old_fence)
+        assert v["valid"] is False
+
+    def test_reconcile_idempotent_same_holder(self, store):
+        """Reconciling a lease that chief already holds for same node is accepted."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        chief.acquire("task-idem")
+        verdicts = chief.reconcile([{
+            "resource_id": "task-idem",
+            "node_id": "mac1",
+            "fence_token": 1,
+            "partition_id": "part-idem",
+        }])
+        assert verdicts[0]["verdict"] == "accepted"
+
+    def test_multiple_workers_reconcile(self, tmp_path):
+        """Multiple workers send provisionals — chief handles all."""
+        chief_db = tmp_path / "chief_multi.db"
+        chief_store = FleetNerveStore(db_path=chief_db)
+        chief = LeaseManager(chief_store, "mac1", chief_node_id="mac1")
+
+        # Worker1 and Worker2 both acquired different resources provisionally
+        w1_provisionals = [
+            {"resource_id": "res-w1-a", "node_id": "mac2", "fence_token": 1,
+             "lease_type": "short_task", "partition_id": "part-1"},
+        ]
+        w2_provisionals = [
+            {"resource_id": "res-w2-a", "node_id": "mac3", "fence_token": 1,
+             "lease_type": "short_task", "partition_id": "part-2"},
+        ]
+
+        v1 = chief.reconcile(w1_provisionals)
+        v2 = chief.reconcile(w2_provisionals)
+
+        assert v1[0]["verdict"] == "accepted"
+        assert v2[0]["verdict"] == "accepted"
+
+        # Both should now be active on chief
+        active = chief.list_active()
+        holders = {l["node_id"] for l in active}
+        assert "mac2" in holders
+        assert "mac3" in holders
+
+
 class TestStats:
     def test_stats(self, mgr, mgr2):
         mgr.acquire("res-1")
