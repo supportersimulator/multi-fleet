@@ -88,10 +88,10 @@ class ReviewFlowOrchestrator:
         result = flow.run_synthesis("fix-auth")
     """
 
-    def __init__(self, node_id: str = ""):
+    def __init__(self, node_id: str = "", synthesis: Optional[ChiefSynthesis] = None):
         self._node_id = node_id or os.environ.get("MULTIFLEET_NODE_ID", "unknown")
         self._rebuttal = RebuttalManager()
-        self._synthesis = ChiefSynthesis()
+        self._synthesis = synthesis or self._init_synthesis()
         self._results: dict[str, ReviewFlowResult] = {}
         self._stats = {
             "reviews_started": 0,
@@ -102,6 +102,20 @@ class ReviewFlowOrchestrator:
             "blocked": 0,
             "errors": 0,
         }
+
+    @staticmethod
+    def _init_synthesis() -> ChiefSynthesis:
+        """Initialize ChiefSynthesis with graceful degradation."""
+        try:
+            return ChiefSynthesis()
+        except Exception:
+            # Return a bare synthesis engine without memory integration
+            s = ChiefSynthesis.__new__(ChiefSynthesis)
+            s._ledger_path = Path.home() / ".fleet-nerve" / "decisions.jsonl"
+            s._analyzers = []
+            s._default_analyzer = s._basic_confidence_analyzer
+            s._evidence_ledger = None
+            return s
 
     def start_review(
         self,
