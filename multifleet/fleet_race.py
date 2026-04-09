@@ -116,6 +116,16 @@ class FleetRace:
             except Exception as e:
                 logger.warning("EpistemicPacket build failed: %s", e)
 
+        # 0b. Ghost anticipate — predict session needs at race start
+        try:
+            from multifleet.ghost_anticipate import GhostAnticipate
+            anticipator = GhostAnticipate(repo_root=".", node_id=self._node_id)
+            anticipation = anticipator.anticipate()
+            race["anticipation"] = anticipation.to_dict()
+            logger.info("Race %s anticipation: %s", race_id, anticipation.summary())
+        except Exception as e:
+            logger.debug("Ghost anticipate failed (non-blocking): %s", e)
+
         # 1. Discover nodes
         if not nodes:
             nodes = self._discover_nodes()
@@ -627,7 +637,7 @@ class FleetRace:
                 "summary": sole["result"].get("summary", ""),
             }
             self._run_acceptance_gate(race)
-            if race["status"] != "blocked":
+            if race.get("status") != "blocked":
                 race["status"] = "done"
             self._record_evidence("race_completed", {
                 "race_id": race["race_id"],
@@ -704,7 +714,7 @@ class FleetRace:
 
         # Run acceptance gate before marking done
         self._run_acceptance_gate(race)
-        if race["status"] != "blocked":
+        if race.get("status") != "blocked":
             race["status"] = "done"
 
         self._record_evidence("race_completed", {

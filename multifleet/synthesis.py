@@ -143,6 +143,25 @@ class ChiefSynthesis:
         except Exception as e:
             logger.debug("Pre-synthesis probe scan failed: %s", e)
 
+        # Corroborate probe findings against historical evidence
+        try:
+            if probe_results:
+                from multifleet.ghost_corroborate import GhostCorroborate
+                corroborator = GhostCorroborate(
+                    node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                )
+                findings_list = []
+                for pr in probe_results:
+                    findings_list.extend(pr.get("findings", []) if isinstance(pr, dict) else [])
+                if findings_list:
+                    corr_result = corroborator.corroborate(findings_list)
+                    if probe_summary is None:
+                        probe_summary = {}
+                    probe_summary["corroboration"] = corr_result.to_dict()
+                    logger.info("Ghost corroborate: %s", corr_result.summary())
+        except Exception as e:
+            logger.debug("Ghost corroborate failed (non-blocking): %s", e)
+
         if self._analyzers:
             # Run registered analyzers, take highest-confidence result
             results = []

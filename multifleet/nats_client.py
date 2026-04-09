@@ -1677,6 +1677,19 @@ class FleetNerveNATS:
             except Exception as e:
                 logger.warning("Memory promotion cycle failed: %s", e)
 
+    async def _ghost_pulse_loop(self):
+        """Run ghost pulse every ~300s for epistemic health maintenance."""
+        while self._running:
+            try:
+                await asyncio.sleep(300)
+                if self._ghost_pulse:
+                    result = self._ghost_pulse.pulse()
+                    logger.info("Ghost pulse: %s (%.0fms)", result.summary(), result.duration_ms)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Ghost pulse cycle failed: %s", e)
+
     # ── Main Loop ──
 
     async def serve(self):
@@ -1790,6 +1803,16 @@ class FleetNerveNATS:
                 logger.info("ChiefSynthesis wired into TaskOrchestrator")
             except Exception as e:
                 logger.warning(f"ChiefSynthesis→TaskOrchestrator wiring failed: {e}")
+
+        # Start ghost pulse loop (epistemic health heartbeat, every ~300s)
+        try:
+            from multifleet.ghost_pulse import GhostPulse
+            self._ghost_pulse = GhostPulse(repo_root=".", evidence_ledger_path=None)
+            asyncio.create_task(self._ghost_pulse_loop())
+            logger.info("Ghost pulse started (interval=300s)")
+        except Exception as e:
+            logger.warning("Ghost pulse failed to start: %s", e)
+            self._ghost_pulse = None
 
         # Keep running
         try:
