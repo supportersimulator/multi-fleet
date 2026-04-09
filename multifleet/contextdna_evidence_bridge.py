@@ -138,7 +138,8 @@ class ContextDNAEvidenceBridge:
                     "reason": "no ledger configured"}
 
         since = since_ts or self._state.get("last_push_ts", 0.0)
-        entries = self._ledger.query(since=since, limit=200)
+        # Limit to 10 entries per push to avoid blocking synthesis
+        entries = self._ledger.query(since=since, limit=10)
 
         # Filter to specific IDs if provided
         if entry_ids:
