@@ -141,7 +141,30 @@ def create_contextdna_analyzer():
         try:
             from memory.brain import Brain
             brain = Brain()
-            query_fn = lambda q, **kw: brain.context(q)  # noqa: E731
+            if hasattr(brain, 'context'):
+                query_fn = lambda q, **kw: brain.context(q)  # noqa: E731
+        except Exception:
+            pass
+
+    # Fallback: use evidence ledger as local query source
+    if query_fn is None:
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            _ledger = EvidenceLedger()
+
+            def _ledger_query(q, limit=5, **kw):
+                """Query evidence ledger subjects/payloads for keyword matches."""
+                all_entries = _ledger.query(limit=100)
+                keywords = set(q.lower().split())
+                matches = []
+                for entry in all_entries:
+                    text = f"{entry.get('subject', '')} {entry.get('payload', '')}".lower()
+                    if any(kw in text for kw in keywords if len(kw) > 2):
+                        matches.append(entry.get('subject', str(entry.get('payload', '')))[:300])
+                return matches[:limit]
+
+            query_fn = _ledger_query
+            logger.info("Using evidence ledger as local memory fallback")
         except Exception:
             pass
 
