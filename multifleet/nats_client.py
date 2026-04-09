@@ -2388,7 +2388,11 @@ class FleetNerveNATS:
                         eval_kwargs["invariants_satisfied"] = body.get("invariants_satisfied", True)
                         eval_kwargs["epistemic_packet"] = body.get("epistemic_packet")
                         strict = body.get("strict", False)
-                        gate = AcceptanceGate(strict=strict)
+                        gate = AcceptanceGate(
+                            strict=strict,
+                            evidence_ledger=self._get_evidence_ledger(),
+                            probe_engine=self._get_probe_engine(),
+                        )
                         result = gate.evaluate(**eval_kwargs)
                         self._json_response(200, result.to_dict())
                     except Exception as e:

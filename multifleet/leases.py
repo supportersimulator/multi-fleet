@@ -292,6 +292,39 @@ class LeaseManager:
             return None
         return self._row_to_dict(row)
 
+    def validate_fence_token(self, resource_id: str, fence_token: int) -> dict:
+        """Validate a fence token before performing a fenced write operation.
+
+        A fence token becomes stale when another node has acquired (or re-acquired)
+        the lease since this node obtained it. Callers should check this before any
+        write that must not execute under a stale lease.
+
+        Returns:
+            {"valid": bool, "current_fence": int, "holder": str, "reason": str (if invalid)}
+        """
+        conn = self._get_conn()
+        row = conn.execute("SELECT * FROM leases WHERE resource_id = ?", (resource_id,)).fetchone()
+
+        if not row:
+            return {"valid": False, "current_fence": 0, "holder": "", "reason": "no lease found"}
+
+        current_fence = row["fence_token"] if "fence_token" in row.keys() else 0
+        holder = row["node_id"]
+
+        if not self._is_active(row):
+            return {"valid": False, "current_fence": current_fence, "holder": holder,
+                    "reason": "lease expired"}
+
+        if fence_token != current_fence:
+            return {"valid": False, "current_fence": current_fence, "holder": holder,
+                    "reason": f"stale fence_token {fence_token} != current {current_fence}"}
+
+        if holder != self._node_id:
+            return {"valid": False, "current_fence": current_fence, "holder": holder,
+                    "reason": f"lease held by {holder}, not {self._node_id}"}
+
+        return {"valid": True, "current_fence": current_fence, "holder": holder}
+
     def list_active(self, node_id: str = None) -> list:
         """List all active (non-expired, non-released) leases.
 
