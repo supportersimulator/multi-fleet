@@ -27,10 +27,9 @@ from typing import Optional
 
 logger = logging.getLogger("fleet.nats-cluster")
 
-REPO_ROOT = Path(__file__).parent.parent  # multi-fleet/
-SUPERREPO_ROOT = REPO_ROOT.parent         # er-simulator-superrepo/
-CONFIG_PATH = SUPERREPO_ROOT / ".multifleet" / "config.json"
-CONF_DIR = SUPERREPO_ROOT / ".multifleet" / "nats"
+REPO_ROOT = Path(os.environ.get("MULTIFLEET_REPO_ROOT", str(Path(__file__).parent.parent)))
+CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
+CONF_DIR = REPO_ROOT / ".multifleet" / "nats"
 CONF_FILE = CONF_DIR / "nats-server.conf"
 PID_FILE = CONF_DIR / "nats-server.pid"
 

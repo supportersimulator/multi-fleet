@@ -228,10 +228,11 @@ class MemoryBridge:
 
         Returns True on success.
         """
-        # Find brain.py relative to superrepo
+        # Find brain.py — check env override, then relative to repo, then home
+        _superrepo = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", "")
         brain_candidates = [
+            *([] if not _superrepo else [Path(_superrepo) / "memory" / "brain.py"]),
             Path(__file__).resolve().parent.parent.parent / "memory" / "brain.py",
-            Path.home() / "Documents" / "er-simulator-superrepo" / "memory" / "brain.py",
         ]
         brain_path = None
         for candidate in brain_candidates:

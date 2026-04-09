@@ -92,9 +92,9 @@ class SelfHealManager:
         """L3 escalation: SSH into peer and fix their broken channel after 2min timeout."""
         import subprocess as _sp
         REPAIR_COMMANDS = {
-            "restart_nats": "pkill -f fleet_nerve_nats; sleep 2; cd ~/dev/er-simulator-superrepo && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
+            "restart_nats": "pkill -f fleet_nerve_nats; sleep 2; cd ${MULTIFLEET_REPO_ROOT:-~/dev/multi-fleet} && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
             "restart_tunnel": "pkill -f 'ssh.*4222'; sleep 1; autossh -M 0 -f -N -L 4222:127.0.0.1:4222 chief 2>/dev/null || true",
-            "restart_daemon": "pkill -f fleet_nerve; sleep 2; cd ~/dev/er-simulator-superrepo && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
+            "restart_daemon": "pkill -f fleet_nerve; sleep 2; cd ${MULTIFLEET_REPO_ROOT:-~/dev/multi-fleet} && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
         }
         cmd = REPAIR_COMMANDS.get(action)
         if not cmd:
@@ -379,7 +379,7 @@ class SelfHealManager:
                     safe_target = "".join(c for c in target if c.isalnum() or c in "-_")
                     subprocess.run(
                         ["ssh", "-o", "ConnectTimeout=3", f"{user}@{ip}",
-                         f"pkill -f fleet_nerve_nats.py; sleep 2; cd ~/dev/er-simulator-superrepo && "
+                         f"pkill -f fleet_nerve_nats.py; sleep 2; cd ${{MULTIFLEET_REPO_ROOT:-~/dev/multi-fleet}} && "
                          f"MULTIFLEET_NODE_ID={safe_target} nohup python3 tools/fleet_nerve_nats.py serve &>/tmp/fleet-nats-{safe_target}.log &"],
                         capture_output=True, timeout=15)
                     await asyncio.sleep(10)
