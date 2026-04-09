@@ -49,6 +49,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# ── Billing gate ──
+from multifleet.billing import get_billing, BillingError, TOOL_FEATURE_MAP  # noqa: E402
+
 # ── Productive Waiter singleton ──
 _productive_waiter = None
 
@@ -3081,6 +3084,19 @@ def handle_request(request: dict) -> dict:
             if not allowed:
                 logger.warning("rate_limited tool=%s reason=%s", tool_name, reason)
                 return {"content": [{"type": "text", "text": json.dumps({"error": reason, "rate_limited": True})}], "isError": True}
+        # Billing tier gate (before any work)
+        try:
+            get_billing().require_tool(tool_name)
+        except BillingError as be:
+            logger.warning("billing_gated tool=%s tier=%s required=%s", tool_name, be.current_tier, be.required_tier)
+            payload = {
+                "error": str(be),
+                "billing_gated": True,
+                "current_tier": be.current_tier,
+                "required_tier": be.required_tier,
+                "upgrade_url": "https://contextdna.io/fleet/pricing",
+            }
+            return {"content": [{"type": "text", "text": json.dumps(payload)}], "isError": True}
         t0 = time.monotonic()
         try:
             result = tool["fn"](**args)
