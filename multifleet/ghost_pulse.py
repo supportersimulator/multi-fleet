@@ -110,6 +110,18 @@ class GhostPulse:
         # 6. Trigger incremental probe scan on idle (ghost_pulse <-> probe_engine wiring)
         self._run_idle_probes()
 
+        # 6b. Ghost mirror — detect code<->docs drift on pulse cycle
+        try:
+            from multifleet.ghost_mirror import GhostMirror
+            mirror = GhostMirror(repo_root=str(self._repo_root))
+            mirror_result = mirror.scan()
+            if mirror_result.drift_items:
+                result.warnings.append(
+                    f"docs drift: {mirror_result.summary()}"
+                )
+        except Exception as e:
+            logger.debug("Ghost mirror scan failed (non-blocking): %s", e)
+
         # 7. Generate warnings
         result.warnings.extend(self._generate_warnings())
 
