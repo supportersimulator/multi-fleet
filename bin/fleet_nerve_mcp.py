@@ -64,12 +64,12 @@ def _get_productive_waiter():
         _productive_waiter = ProductiveWaiter(node_id=_get_node_id())
     return _productive_waiter
 
-REPO_ROOT = Path(__file__).parent.parent
+REPO_ROOT = Path(os.environ.get("MULTIFLEET_REPO_ROOT", str(Path(__file__).parent.parent)))
 sys.path.insert(0, str(REPO_ROOT))
 
 # Superrepo fallback: if running inside the superrepo, also add its root
 # so that `tools.*` imports work for modules not yet in the multifleet package.
-_SUPERREPO_ROOT = REPO_ROOT.parent
+_SUPERREPO_ROOT = Path(os.environ.get("MULTIFLEET_SUPERREPO_ROOT", str(REPO_ROOT.parent)))
 if (_SUPERREPO_ROOT / "tools").is_dir():
     sys.path.insert(1, str(_SUPERREPO_ROOT))
 
@@ -756,7 +756,7 @@ def fleet_wake(target: str) -> dict:
                 ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
                  f"{user}@{ip}",
                  "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; source ~/.zshrc 2>/dev/null; "
-                 "cd ~/dev/er-simulator-superrepo && bash scripts/fleet-nerve-setup.sh 2>&1 | tail -2"],
+                 "cd ${MULTIFLEET_REPO_ROOT:-~/dev/multi-fleet} && bash scripts/fleet-nerve-setup.sh 2>&1 | tail -2"],
                 capture_output=True, text=True, timeout=15,
             )
             # Caffeinate to prevent re-sleep

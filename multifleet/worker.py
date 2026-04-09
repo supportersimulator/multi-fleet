@@ -30,7 +30,7 @@ from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.worker")
 
-REPO_ROOT = Path(__file__).parent.parent
+from ._paths import REPO_ROOT
 
 # Session-driver scripts location
 SCRIPTS_DIR = None

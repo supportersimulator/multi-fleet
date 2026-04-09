@@ -46,7 +46,7 @@ fleet-nats-cluster = "multifleet.nats_cluster:main"
 
 [project.urls]
 Homepage = "https://multi-fleet.dev"
-Repository = "https://github.com/supportersimulator/er-simulator-superrepo"
+Repository = "https://github.com/supportersimulator/multi-fleet"
 Documentation = "https://multi-fleet.dev/docs"
 
 [tool.hatch.build.targets.wheel]

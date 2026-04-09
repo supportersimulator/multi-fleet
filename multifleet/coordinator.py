@@ -29,7 +29,8 @@ logger = logging.getLogger("fleet-nerve.coordinator")
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).parent.parent
+from ._paths import REPO_ROOT
+
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
 LOCAL_DIR = REPO_ROOT / ".contextdna" / "local"
 QUEUE_DIR = REPO_ROOT / ".contextdna" / "packets"

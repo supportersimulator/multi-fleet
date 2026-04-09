@@ -15,8 +15,8 @@ from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.onboarding")
 
-REPO_ROOT = Path(__file__).parent.parent
-_SUPERREPO = REPO_ROOT.parent if (REPO_ROOT.parent / ".git").exists() else REPO_ROOT
+from ._paths import REPO_ROOT
+
 DAEMON_URL = "http://127.0.0.1:8855"
 NATS_PORT = 4222
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"

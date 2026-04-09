@@ -19,7 +19,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).parent.parent
+from ._paths import REPO_ROOT
+
 DB_PATH = REPO_ROOT / ".contextdna" / "local" / "multifleet.db"
 
 

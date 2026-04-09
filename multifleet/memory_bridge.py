@@ -229,9 +229,8 @@ class MemoryBridge:
         Returns True on success.
         """
         # Find brain.py — check env override, then relative to repo, then home
-        _superrepo = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", "")
-        if not _superrepo:
-            return False
+        from ._paths import get_superrepo_root
+        _superrepo = str(get_superrepo_root())
         brain_candidates = [
             Path(_superrepo) / "memory" / "brain.py",
         ]
@@ -260,9 +259,8 @@ class MemoryBridge:
         Uses subprocess to avoid importing heavy memory dependencies
         into the fleet process. Returns True on success.
         """
-        repo_root = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", "")
-        if not repo_root:
-            return False
+        from ._paths import get_superrepo_root
+        repo_root = str(get_superrepo_root())
         script = Path(repo_root) / "memory" / "auto_capture.py"
         if not script.exists():
             return False

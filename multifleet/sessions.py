@@ -24,8 +24,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("fleet_nats")
 
+from ._paths import REPO_ROOT
+
 SEED_DIR = "/tmp"
-REPO_ROOT = Path(__file__).parent.parent
 
 # UUID v4 format: 8-4-4-4-12 hex chars = 36 chars total
 _UUID_LEN = 36

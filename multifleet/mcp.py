@@ -12,7 +12,8 @@ from pathlib import Path
 
 def main():
     # Import the real MCP server module from bin/
-    bin_dir = Path(__file__).parent.parent / "bin"
+    from ._paths import REPO_ROOT
+    bin_dir = REPO_ROOT / "bin"
     if bin_dir.is_dir():
         sys.path.insert(0, str(bin_dir))
     # The bin module sets up its own sys.path for multifleet package imports

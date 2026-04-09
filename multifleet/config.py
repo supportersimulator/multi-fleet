@@ -15,9 +15,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
+from ._paths import REPO_ROOT
+
 logger = logging.getLogger("fleet.config")
 
-REPO_ROOT = Path(__file__).parent.parent
 JSON_CONF = REPO_ROOT / ".multifleet" / "config.json"
 SHELL_CONF = REPO_ROOT / "scripts" / "3s-network.local.conf"
 DISCOVERY_CACHE = REPO_ROOT / ".multifleet" / "discovered_peers.json"

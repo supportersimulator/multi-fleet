@@ -27,7 +27,8 @@ from typing import Optional
 
 logger = logging.getLogger("fleet.nats-cluster")
 
-REPO_ROOT = Path(os.environ.get("MULTIFLEET_REPO_ROOT", str(Path(__file__).parent.parent)))
+from ._paths import REPO_ROOT
+
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
 CONF_DIR = REPO_ROOT / ".multifleet" / "nats"
 CONF_FILE = CONF_DIR / "nats-server.conf"

@@ -18,7 +18,9 @@ try:
 except ImportError:
     pass
 
-BUILTIN_DIR = Path(__file__).parent.parent / "packet-types" / "_builtin"
+from ._paths import REPO_ROOT as _REPO_ROOT
+
+BUILTIN_DIR = _REPO_ROOT / "packet-types" / "_builtin"
 
 
 # ── Deduplication Filter ────────────────────────────────────────────────────

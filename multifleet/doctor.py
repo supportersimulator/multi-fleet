@@ -97,9 +97,9 @@ class DoctorReport:
 
 DAEMON_URL = "http://127.0.0.1:8855"
 NATS_PORT = 4222
-REPO_ROOT = Path(__file__).parent.parent
-# Doctor may run from plugin dir or from superrepo — find the actual repo root
-_SUPERREPO = REPO_ROOT.parent if (REPO_ROOT.parent / ".git").exists() else REPO_ROOT
+from ._paths import REPO_ROOT, get_git_root
+
+_SUPERREPO = get_git_root()
 
 
 # TODO: Migrate these checks to ProbeResult contract (see probes/fleet_health.py)

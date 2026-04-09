@@ -54,7 +54,7 @@ except ImportError:
     print("ERROR: nats-py not installed. Run: pip3 install nats-py")
     sys.exit(1)
 
-REPO_ROOT = Path(os.environ.get("MULTIFLEET_REPO_ROOT", str(Path(__file__).parent.parent)))
+from ._paths import REPO_ROOT  # noqa: E402 — must be before tools import
 
 # Session historian NATS (standalone module)
 try:
@@ -2255,6 +2255,39 @@ class FleetNerveNATS:
                         self._json_response(200, {"decisions": pending, "count": len(pending)})
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/review" or self.path.startswith("/review?"):
+                    try:
+                        from .review_flow import get_review_flow
+                        flow = get_review_flow()
+                        active = flow.list_active()
+                        self._json_response(200, {
+                            "reviews": active,
+                            "count": len(active),
+                            "stats": flow.stats,
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path.startswith("/review/") and not self.path.endswith("/submit"):
+                    try:
+                        from .review_flow import get_review_flow
+                        task_id = self.path.split("/")[2]
+                        status = get_review_flow().get_status(task_id)
+                        code = 404 if "error" in status else 200
+                        self._json_response(code, status)
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/adapters":
+                    try:
+                        from .adapters.chief_sync import get_chief_sync
+                        from .adapters.surgeon_events import get_surgeon_events
+                        from .adapters.overlay_stream import get_overlay_stream
+                        self._json_response(200, {
+                            "chief_sync": {"available": get_chief_sync().available},
+                            "surgeon_events": get_surgeon_events().stats,
+                            "overlay_stream": get_overlay_stream().stats,
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -2319,10 +2352,15 @@ class FleetNerveNATS:
                     return None
 
             def _get_supervisor(self):
-                """Lazy-init Supervisor singleton (preserves task state across requests)."""
+                """Lazy-init PersistentSupervisor singleton (state survives restart)."""
                 if Handler._supervisor is not None:
                     return Handler._supervisor
                 try:
+                    from .supervisor_store import PersistentSupervisor
+                    Handler._supervisor = PersistentSupervisor(node_id=daemon.node_id)
+                    return Handler._supervisor
+                except ImportError:
+                    # Fallback to non-persistent supervisor
                     from .supervisor import Supervisor
                     Handler._supervisor = Supervisor(node_id=daemon.node_id)
                     return Handler._supervisor
@@ -2661,6 +2699,52 @@ class FleetNerveNATS:
                         updates = {k: v for k, v in body.items() if k != "node_id"}
                         overlay = mgr.update(node_id, **updates)
                         self._json_response(200, overlay.to_dict())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/review":
+                    try:
+                        from .review_flow import get_review_flow
+                        flow = get_review_flow()
+                        action = body.get("action", "")
+                        if action == "start":
+                            session = flow.start_review(
+                                task_id=body.get("task_id", ""),
+                                assigned_machines=body.get("machines", []),
+                                task_summary=body.get("summary", ""),
+                                deadline_minutes=int(body.get("deadline_minutes", 30)),
+                            )
+                            self._json_response(200, {
+                                "ok": True,
+                                "task_id": session.task_id,
+                                "phase": session.phase.value,
+                            })
+                        elif action == "verdict":
+                            result = flow.submit_verdict(
+                                body.get("task_id", ""),
+                                body.get("machine", daemon.node_id),
+                                body.get("verdict", {}),
+                            )
+                            self._json_response(200, result)
+                        elif action == "critique":
+                            result = flow.submit_critique(
+                                body.get("task_id", ""),
+                                body.get("machine", daemon.node_id),
+                                body.get("critique", {}),
+                            )
+                            self._json_response(200, result)
+                        elif action == "synthesize":
+                            result = flow.run_synthesis(body.get("task_id", ""))
+                            self._json_response(200, result.to_dict())
+                        elif action == "cleanup":
+                            removed = flow.cleanup_expired()
+                            self._json_response(200, {"removed": removed})
+                        else:
+                            self._json_response(400, {
+                                "error": f"Unknown action: {action}. "
+                                         "Use: start, verdict, critique, synthesize, cleanup"
+                            })
+                    except ValueError as e:
+                        self._json_response(400, {"error": str(e)})
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
                 else:

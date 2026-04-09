@@ -589,7 +589,8 @@ class FleetMergeGate:
             ))
 
         # 5. Branch up-to-date with main (no conflicts)
-        rpath = repo_path or str(Path(__file__).parent.parent.parent)
+        from ._paths import get_git_root
+        rpath = repo_path or str(get_git_root())
         try:
             # Check if branch exists and is mergeable
             result = subprocess.run(

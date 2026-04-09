@@ -341,7 +341,8 @@ class FleetGainsGate:
     def _check_test_suite(self) -> CheckResult:
         """Run pytest quick check (non-critical)."""
         t0 = time.monotonic()
-        test_dir = Path(__file__).parent.parent / "tests"
+        from ._paths import REPO_ROOT as _repo
+        test_dir = _repo / "tests"
         if not test_dir.exists():
             return CheckResult("test_suite", True, "No tests dir (skipped)",
                                latency_ms=(time.monotonic() - t0) * 1000, critical=False)
@@ -356,7 +357,7 @@ class FleetGainsGate:
             r = subprocess.run(
                 cmd,
                 capture_output=True, text=True, timeout=30,
-                cwd=str(Path(__file__).parent.parent),
+                cwd=str(_repo),
             )
             latency = (time.monotonic() - t0) * 1000
             # Parse last line for pass/fail count

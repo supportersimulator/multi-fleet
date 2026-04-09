@@ -26,8 +26,9 @@ from .channels import ALL_CHANNELS, HEAL_SCORE_THRESHOLD
 
 logger = logging.getLogger("fleet_nats")
 
+from ._paths import REPO_ROOT
+
 SEED_DIR = "/tmp"
-REPO_ROOT = Path(__file__).parent.parent
 
 
 class SelfHealManager:
