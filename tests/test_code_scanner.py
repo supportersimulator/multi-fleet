@@ -18,8 +18,11 @@ try:
     from multifleet.code_scanner.probe_contract import Finding, ProbeContext, ProbeResult
     from multifleet.code_scanner.evidence_bridge import ProbeEvidenceBridge
     _HAS_CODE_SCANNER = True
-except ImportError:
+except (ImportError, ModuleNotFoundError, NameError):
     _HAS_CODE_SCANNER = False
+    # Stubs so module-level type annotations don't raise NameError at collection
+    ProbeContext = ProbeResult = Finding = ProbeEngine = create_engine = None
+    ProbeEvidenceBridge = None
 
 pytestmark = pytest.mark.skipif(
     not _HAS_CODE_SCANNER,

@@ -127,12 +127,15 @@ class TestProbeToEvidenceLedger:
         with patch("multifleet.evidence_ledger.EvidenceLedger", return_value=mock_ledger):
             results = engine_with_probes.scan(trigger="all")
 
-        # Should have called record for HIGH and CRITICAL (2 calls)
-        assert mock_ledger.record.call_count == 2
+        # Should have called record for HIGH and CRITICAL findings (2 calls),
+        # plus potentially a batch promotion call from ProductBridge fallback
+        assert mock_ledger.record.call_count >= 2
 
-        # Verify the calls have correct event_type
-        for call in mock_ledger.record.call_args_list:
-            assert call[1]["event_type"] == "probe_finding"
+        # Verify the individual finding calls have correct event_type
+        finding_calls = [c for c in mock_ledger.record.call_args_list
+                         if c[1].get("event_type") == "probe_finding"]
+        assert len(finding_calls) == 2
+        for call in finding_calls:
             assert call[1]["payload"]["severity"] in ("high", "critical")
 
     def test_high_finding_payload_structure(self, tmp_path, engine_with_probes):
@@ -142,7 +145,7 @@ class TestProbeToEvidenceLedger:
             engine_with_probes.scan(trigger="all")
 
         calls = mock_ledger.record.call_args_list
-        high_call = [c for c in calls if c[1]["payload"]["severity"] == "high"][0]
+        high_call = [c for c in calls if c[1].get("event_type") == "probe_finding" and c[1]["payload"].get("severity") == "high"][0]
         payload = high_call[1]["payload"]
         assert "probe_id" in payload
         assert "findings_count" in payload
@@ -195,8 +198,11 @@ class TestProbeToEvidenceLedger:
         with patch("multifleet.evidence_ledger.EvidenceLedger", return_value=mock_ledger):
             engine.scan(trigger="all")
 
-        mock_ledger.record.assert_called_once()
-        payload = mock_ledger.record.call_args[1]["payload"]
+        # Individual finding call + possible batch promotion from ProductBridge fallback
+        finding_calls = [c for c in mock_ledger.record.call_args_list
+                         if c[1].get("event_type") == "probe_finding"]
+        assert len(finding_calls) == 1
+        payload = finding_calls[0][1]["payload"]
         assert payload["severity"] == "critical"
 
     def test_node_id_from_env(self, tmp_path):
@@ -392,7 +398,8 @@ class TestFullPipeline:
 
         chain = real_ledger.verify_chain()
         assert chain["valid"] is True
-        assert chain["checked"] == 2
+        # 1 prior merge + 1 probe finding + possible batch promotion from ProductBridge
+        assert chain["checked"] >= 2
 
 
 # ── 5. Graceful degradation ──

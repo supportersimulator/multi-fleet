@@ -122,6 +122,11 @@ class GhostPulse:
         except Exception as e:
             logger.debug("Ghost mirror scan failed (non-blocking): %s", e)
 
+        # 6c. Ghost stale provisional check — flag leases stuck without reconciliation
+        stale_prov_warning = self._check_stale_provisionals()
+        if stale_prov_warning:
+            result.warnings.append(stale_prov_warning)
+
         # 7. Generate warnings
         result.warnings.extend(self._generate_warnings())
 
@@ -284,6 +289,49 @@ class GhostPulse:
             logger.debug("ghost_pulse triggered idle probe scan")
         except Exception as e:
             logger.debug("ghost_pulse idle probe scan skipped: %s", e)
+
+    def _check_stale_provisionals(self) -> Optional[str]:
+        """Flag provisional leases that exceed TTL without reconciliation.
+
+        Part of Raft-Lite lease consensus (Session B, item 4).
+        Stale provisionals indicate a partition that healed but reconciliation
+        never ran — or a worker that went offline permanently.
+        """
+        try:
+            from multifleet.leases import LeaseManager
+            from multifleet.store import FleetNerveStore
+            import os
+            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+            store = FleetNerveStore()
+            mgr = LeaseManager(store=store, node_id=node_id)
+            provisionals = mgr.list_provisional()
+            if not provisionals:
+                return None
+
+            now = time.time()
+            stale_threshold = 600  # 10 minutes
+            stale = [
+                p for p in provisionals
+                if (now - p.get("acquired_at", now)) > stale_threshold
+            ]
+            if stale:
+                resources = [p.get("resource_id", "?") for p in stale[:3]]
+                return (
+                    f"STALE PROVISIONALS: {len(stale)} lease(s) unreconciled >{stale_threshold}s "
+                    f"(resources: {', '.join(resources)}). "
+                    f"Reconcile or check chief connectivity."
+                )
+
+            if len(provisionals) >= 3:
+                return (
+                    f"PARTITION DRIFT: {len(provisionals)} provisional lease(s) active — "
+                    f"possible unresolved partition"
+                )
+
+            return None
+        except (ImportError, Exception) as e:
+            logger.debug("Stale provisional check failed (non-blocking): %s", e)
+            return None
 
     def _check_probe_staleness(self) -> Optional[str]:
         """Check if probes haven't run recently (3-surgeon recommendation)."""

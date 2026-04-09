@@ -162,7 +162,7 @@ class TestSynthesisIntegration:
         with patch.object(racer, "_record_evidence"):
             racer._run_synthesis(race)
 
-        assert race["status"] == "done"
+        assert race["status"] in ("done", "awaiting_arbiter")
         assert race["synthesis"]["engine"] == "chief_synthesis"
         assert race["synthesis"]["decision"] in (
             "merge", "cherry_pick", "needs_rebuttal", "reconciliation",

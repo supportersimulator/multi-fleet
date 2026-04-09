@@ -112,14 +112,14 @@ class TestTemplateInterpret:
 # ── LLM interpretation ──
 
 class TestLLMInterpret:
-    @patch("multifleet.probe_interpreter.sys")
-    def test_llm_fallback_on_import_error(self, mock_sys):
+    def test_llm_fallback_on_import_error(self):
         """When LLM module can't be imported, falls back to template."""
         interp = ProbeInterpreter()
-        # interpret() catches exceptions from _llm_interpret and falls back
-        result = interp.interpret([_make_result()])
+        # Force _llm_interpret to fail by patching the lazy import
+        with patch.object(interp, "_llm_interpret", side_effect=ImportError("no LLM")):
+            result = interp.interpret([_make_result()])
         # Should succeed via template fallback
-        assert result["source"] in ("template", "llm")
+        assert result["source"] == "template"
         assert "flagged" in result
 
     def test_interpret_falls_back_to_template(self):

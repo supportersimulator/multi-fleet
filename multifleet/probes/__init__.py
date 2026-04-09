@@ -21,6 +21,9 @@ from multifleet.probes.invariant_coverage import probe_invariant_coverage
 from multifleet.probes.blast_radius import probe_blast_radius
 from multifleet.probes.security_surface import probe_security_surface
 from multifleet.probes.injection_prioritizer import probe_injection_prioritizer
+from multifleet.probes.repeated_failure_cluster import probe_repeated_failure_cluster
+from multifleet.probes.worktree_divergence import probe_worktree_divergence
+from multifleet.probes.partition_lease_drift import probe_partition_lease_drift
 
 
 def register_all(registry: ProbeRegistry) -> None:
@@ -130,6 +133,27 @@ def register_all(registry: ProbeRegistry) -> None:
         description="Ranks context snippets by relevance for next prompt injection.",
         triggers=["manual", "session_start"],
     )
+    registry.register(
+        probe_id="repeated_failure_cluster",
+        fn=probe_repeated_failure_cluster,
+        category=ProbeCategory.RELIABILITY,
+        description="Detects recurring error patterns across sessions — systemic failures that need root-cause fixes.",
+        triggers=["manual", "session_start", "session_end"],
+    )
+    registry.register(
+        probe_id="worktree_divergence",
+        fn=probe_worktree_divergence,
+        category=ProbeCategory.CHANGE,
+        description="Detects git worktrees that have diverged from their tracking branch.",
+        triggers=["manual", "session_start"],
+    )
+    registry.register(
+        probe_id="partition_lease_drift",
+        fn=probe_partition_lease_drift,
+        category=ProbeCategory.RELIABILITY,
+        description="Detects provisional lease accumulation during network partitions — the split-brain early warning.",
+        triggers=["manual", "session_start", "synthesis"],
+    )
 
 
 def create_engine(wire_evidence_bridge: bool = True) -> ProbeEngine:
@@ -145,24 +169,8 @@ def create_engine(wire_evidence_bridge: bool = True) -> ProbeEngine:
 
     engine = ProbeEngine(registry=registry)
 
-    # Wire EvidenceBridge so findings reach the evidence ledger
-    if wire_evidence_bridge:
-        try:
-            from multifleet.code_scanner.evidence_bridge import ProbeEvidenceBridge
-            from multifleet.evidence_ledger import EvidenceLedger
-            try:
-                from multifleet.eventbus import FleetEventBus
-                import os
-                eventbus = FleetEventBus(
-                    node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown")
-                )
-            except Exception:
-                eventbus = None
-            engine._evidence_bridge = ProbeEvidenceBridge(
-                evidence_ledger=EvidenceLedger(),
-                eventbus=eventbus,
-            )
-        except (ImportError, Exception):
-            pass  # Evidence bridge optional — graceful degradation
+    # Note: Evidence recording is handled by ProbeEngine._record_high_findings()
+    # which records HIGH+ findings directly to the evidence ledger.
+    # The old code_scanner.evidence_bridge has been removed.
 
     return engine

@@ -205,6 +205,15 @@ class AcceptanceGate:
         followups = []
         objections = []
 
+        # Auto-determine surgeon intensity from probe results if not explicitly set
+        if probe_results and surgeon_intensity == "light":
+            try:
+                from multifleet.probe_intensity import intensity_for_acceptance
+                auto = intensity_for_acceptance(probe_results, epistemic_packet)
+                surgeon_intensity = auto.get("surgeon_intensity", surgeon_intensity)
+            except (ImportError, Exception):
+                pass  # Graceful degradation — probe_intensity not available
+
         # Check 1: Blocking probe findings
         if probe_results:
             for result in probe_results:

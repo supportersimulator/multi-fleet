@@ -35,14 +35,17 @@ class OnboardingWizard:
 
     def __init__(self, node_id: str = ""):
         import re
-        # Store raw value for observability/audit — never shell-executed
-        self.node_id = node_id or os.environ.get(
+        raw = node_id or os.environ.get(
             "MULTIFLEET_NODE_ID",
             socket.gethostname().split(".")[0].lower(),
         )
-        # Warn but don't silently replace — callers need to see the real value
-        if node_id and not re.match(r'^[a-z][a-z0-9_-]{0,31}$', node_id):
-            logger.warning("node_id '%s' contains unsafe characters — will be sanitized for shell use", node_id)
+        # Sanitize: keep only alphanumeric, dash, underscore. Fallback to hostname.
+        if raw and not re.match(r'^[a-z][a-z0-9_-]{0,31}$', raw):
+            logger.warning("node_id '%s' contains unsafe characters — sanitizing", raw)
+            sanitized = re.sub(r'[^a-z0-9_-]', '', raw.lower())[:32]
+            self.node_id = sanitized if sanitized else socket.gethostname().split(".")[0].lower()
+        else:
+            self.node_id = raw
 
     # ── Public API ──
 

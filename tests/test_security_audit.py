@@ -63,8 +63,9 @@ class TestOnboardingInputValidation:
         from multifleet.onboarding import OnboardingWizard
 
         wiz = OnboardingWizard(node_id="; rm -rf /")
-        # Should store the value but not execute it
-        assert wiz.node_id == "; rm -rf /"
+        # Should sanitize to safe characters only
+        assert ";" not in wiz.node_id
+        assert " " not in wiz.node_id
         # check_all should not crash
         result = wiz.check_all()
         assert "node_id" in result
@@ -73,8 +74,11 @@ class TestOnboardingInputValidation:
         from multifleet.onboarding import OnboardingWizard
 
         wiz = OnboardingWizard(node_id="../../etc/passwd")
+        # Path traversal chars should be stripped
+        assert ".." not in wiz.node_id
+        assert "/" not in wiz.node_id
         result = wiz.check_all()
-        assert result["node_id"] == "../../etc/passwd"
+        assert "node_id" in result
 
     def test_empty_node_id_defaults_to_hostname(self):
         from multifleet.onboarding import OnboardingWizard

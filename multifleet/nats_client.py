@@ -488,6 +488,14 @@ class FleetNerveNATS:
             body = payload.get("body", "")
             priority = data.get("type", "context")
 
+            # Sanitize incoming message body (defense against prompt injection + credential leaks)
+            try:
+                from multifleet.sanitize import sanitize_message
+                body = sanitize_message(body)
+                payload["body"] = body
+            except (ImportError, Exception):
+                pass  # Graceful degradation — sanitize not available
+
             logger.info(f"[{priority}] from {sender}: {subject}")
 
             # Handle repair requests (local-first self-healing)

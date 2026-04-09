@@ -156,7 +156,8 @@ class TestBatchInjection:
     """get_batch_for_injection() formatting and queue clearing."""
 
     def test_returns_none_when_empty(self, liaison):
-        assert liaison.get_batch_for_injection() is None
+        with patch.object(liaison, "get_probe_injection", return_value=None):
+            assert liaison.get_batch_for_injection() is None
 
     def test_returns_markdown_with_messages(self, liaison):
         liaison.process_message({"type": "context", "from": "mac2", "payload": {"subject": "hello"}})
@@ -170,7 +171,8 @@ class TestBatchInjection:
         liaison.process_message({"type": "context", "from": "mac2"})
         liaison.get_batch_for_injection()
         assert len(liaison.state.unread_messages) == 0
-        assert liaison.get_batch_for_injection() is None
+        with patch.object(liaison, "get_probe_injection", return_value=None):
+            assert liaison.get_batch_for_injection() is None
 
     def test_groups_by_escalation_level(self, liaison):
         liaison.process_message({"type": "alert", "from": "mac2", "payload": {"subject": "fire"}})
