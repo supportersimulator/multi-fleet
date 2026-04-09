@@ -172,10 +172,10 @@ class SnapshotBuilder:
         self._surgeon_intensity = "light"
 
     def add_probe_results(self, results: list) -> "SnapshotBuilder":
-        """Extract truths from probe results (code_scanner ProbeResult objects or dicts)."""
+        """Extract truths from probe results (ProbeResult objects or dicts)."""
         for result in results:
             self._probe_count += 1
-            # Handle both code_scanner.ProbeResult and probe_engine.ProbeResult
+            # Handle both ProbeResult objects and plain dicts
             if hasattr(result, "findings"):
                 findings = result.findings
                 probe_id = result.probe_id
@@ -189,21 +189,57 @@ class SnapshotBuilder:
 
             for finding in findings:
                 self._finding_count += 1
-                title = finding.title if hasattr(finding, "title") else finding.get("title", "")
-                blast = finding.blast_radius if hasattr(finding, "blast_radius") else finding.get("blast_radius", "low")
-                file_path = finding.file_path if hasattr(finding, "file_path") else finding.get("file_path", "")
-                summary = finding.summary if hasattr(finding, "summary") else finding.get("summary", "")
+                if hasattr(finding, "title"):
+                    title = finding.title
+                elif isinstance(finding, dict):
+                    title = finding.get("title", "")
+                else:
+                    title = ""
+
+                if hasattr(finding, "blast_radius"):
+                    blast = finding.blast_radius
+                elif isinstance(finding, dict):
+                    blast = finding.get("blast_radius", "low")
+                else:
+                    blast = "low"
+
+                # Handle both ProbeFinding.file_paths (list) and Finding.file_path (str)
+                if hasattr(finding, "file_path") and isinstance(getattr(finding, "file_path"), str):
+                    file_path = finding.file_path
+                elif hasattr(finding, "file_paths"):
+                    fps = finding.file_paths
+                    file_path = fps[0] if fps else ""
+                elif isinstance(finding, dict):
+                    file_path = finding.get("file_path", finding.get("file_paths", [""])[0] if finding.get("file_paths") else "")
+                else:
+                    file_path = ""
+
+                # Handle ProbeFinding.evidence (list) vs Finding.summary (str)
+                if hasattr(finding, "summary"):
+                    summary = finding.summary
+                elif hasattr(finding, "evidence"):
+                    ev = finding.evidence
+                    summary = ev[0] if ev else ""
+                elif isinstance(finding, dict):
+                    summary = finding.get("summary", "")
+                else:
+                    summary = ""
 
                 if blast == "high":
                     self._blocking_count += 1
 
                 # Probes with OK status → code truths
-                if status in ("ok", "warn"):
+                if status in ("ok", "warn", "warning"):
+                    confidence_val = 0.5
+                    if hasattr(finding, "confidence"):
+                        confidence_val = finding.confidence
+                    elif isinstance(finding, dict):
+                        confidence_val = finding.get("confidence", 0.5)
                     self._code_truths.append(CodeTruth(
                         file_path=file_path or "(global)",
                         assertion=title,
                         probe_id=probe_id,
-                        confidence=finding.confidence if hasattr(finding, "confidence") else finding.get("confidence", 0.5),
+                        confidence=confidence_val,
                     ))
                 # Mirror drift findings → doc truths
                 if probe_id == "mirror_drift" and summary:

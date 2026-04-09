@@ -288,24 +288,50 @@ class NodeOverlayManager:
         """Update overlay from 3-surgeon state.
 
         If surgeon_adapter (SurgeonAdapter) is provided and available,
-        queries live state instead of trusting the provided dict.
+        queries live state via get_surgeon_state() for full per-surgeon
+        detail, then extracts overlay fields. Falls back to get_state()
+        for basic overlay, then to provided dict.
 
         Args:
             node_id: Fleet node identifier.
             surgeon_state: dict with phase, disagreement_score, correction_loops, abstention.
             surgeon_adapter: Optional SurgeonAdapter for live state queries.
         """
+        detailed_state: Optional[dict] = None
         if surgeon_adapter is not None and surgeon_adapter.is_available():
-            surgeon_state = surgeon_adapter.get_state()
-            logger.info("Surgeon overlay for %s from adapter: %s", node_id, surgeon_state)
-        elif surgeon_state is None:
+            try:
+                detailed_state = surgeon_adapter.get_surgeon_state()
+                # Extract overlay-compatible fields from detailed state
+                overlay_data = detailed_state.get("overlay", {})
+                surgeon_state = {
+                    "phase": overlay_data.get("phase", "idle"),
+                    "disagreement_score": overlay_data.get("disagreement_score", 0.0),
+                    "correction_loops": overlay_data.get("correction_loops", 0),
+                    "abstention": overlay_data.get("abstention", False),
+                }
+                logger.info("Surgeon overlay for %s from adapter (detailed): %s", node_id, surgeon_state)
+            except Exception as exc:
+                logger.warning("Surgeon get_surgeon_state failed for %s, falling back: %s", node_id, exc)
+                try:
+                    surgeon_state = surgeon_adapter.get_state()
+                    logger.info("Surgeon overlay for %s from adapter (basic): %s", node_id, surgeon_state)
+                except Exception as exc2:
+                    logger.warning("Surgeon get_state also failed for %s: %s", node_id, exc2)
+        if surgeon_state is None:
             surgeon_state = {}
-        return self.update(node_id, surgeon={
+
+        overlay = self.update(node_id, surgeon={
             "phase": surgeon_state.get("phase", "idle"),
             "disagreement_score": surgeon_state.get("disagreement_score", 0.0),
             "correction_loop_count": surgeon_state.get("correction_loops", 0),
             "abstention_status": surgeon_state.get("abstention", False),
         })
+
+        # Attach detailed surgeon state for dashboard consumers
+        if detailed_state is not None:
+            overlay._surgeon_detail = detailed_state
+
+        return overlay
 
     # ── Fleet-level aggregation (migrated from status_aggregator.py) ──
 

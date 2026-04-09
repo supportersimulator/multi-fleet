@@ -381,6 +381,14 @@ class ChiefSynthesis:
         except Exception as e:
             logger.warning("Evidence ledger record failed: %s", e)
 
+        # Wire 2: push synthesis evidence to ContextDNA
+        try:
+            from multifleet.contextdna_evidence_bridge import ContextDNAEvidenceBridge
+            bridge = ContextDNAEvidenceBridge(ledger=self._evidence_ledger)
+            bridge.push_to_contextdna()
+        except Exception as e:
+            logger.debug("ContextDNA bridge push failed (non-critical): %s", e)
+
     def _push_to_contextdna(self, result: SynthesisResult):
         """Push synthesis decision to Context DNA via ProductBridge (closes learning loop)."""
         try:

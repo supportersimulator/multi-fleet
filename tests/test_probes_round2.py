@@ -1,7 +1,7 @@
 """Tests for round 2 probes: stale_context, security_surface, injection_prioritizer.
 
-Covers: stale context detection, security surface scanning, injection prioritization,
-and 6-probe registration verification.
+DEPRECATED: code_scanner has been merged into the unified probes/ system.
+These tests are skipped if code_scanner is not available.
 """
 
 import json
@@ -12,8 +12,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from multifleet.code_scanner import ProbeEngine, create_engine
-from multifleet.code_scanner.probe_contract import Finding, ProbeContext, ProbeResult
+try:
+    from multifleet.code_scanner import ProbeEngine, create_engine
+    from multifleet.code_scanner.probe_contract import Finding, ProbeContext, ProbeResult
+    _HAS_CODE_SCANNER = True
+except ImportError:
+    _HAS_CODE_SCANNER = False
+
+pytestmark = pytest.mark.skipif(
+    not _HAS_CODE_SCANNER,
+    reason="code_scanner removed — probes unified into multifleet.probes",
+)
 
 
 # ── Stale Context Probe tests ──

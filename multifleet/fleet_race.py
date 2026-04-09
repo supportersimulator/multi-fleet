@@ -65,6 +65,25 @@ class FleetRace:
         Returns:
             Race state dict with race_id, participants, status, timestamps.
         """
+        # Wire 5: Check superpowers workflow phase before dispatching
+        try:
+            from multifleet.superpowers_adapter import get_adapter
+            adapter = get_adapter()
+            can_dispatch, reason = adapter.can_dispatch_race()
+            if not can_dispatch:
+                logger.info("Race dispatch blocked: %s", reason)
+                adapter.queue_race({"task": task, "nodes": nodes,
+                                    "branch_prefix": branch_prefix,
+                                    "timeout_s": timeout_s})
+                return {
+                    "race_id": None,
+                    "status": "blocked_by_workflow",
+                    "reason": reason,
+                    "queued": True,
+                }
+        except ImportError:
+            pass  # Superpowers adapter not available — proceed normally
+
         race_id = str(uuid.uuid4())[:8]
         now = time.time()
 
@@ -626,6 +645,8 @@ class FleetRace:
                 "completions": len(completed),
                 "elapsed_s": round(time.time() - race["started_at"], 1),
             })
+            # Wire 2: push race evidence to ContextDNA
+            self._push_to_contextdna(race["race_id"], race.get("synthesis"))
             return
 
         # Multiple completions — build verdict dict for ChiefSynthesis
@@ -705,6 +726,8 @@ class FleetRace:
             "accepted": race.get("acceptance", {}).get("accepted", True),
             "elapsed_s": round(time.time() - race["started_at"], 1),
         })
+        # Wire 2: push race evidence to ContextDNA
+        self._push_to_contextdna(race["race_id"], race.get("synthesis"))
 
         # Arbiter escalation: low confidence or unresolved dissent -> human review
         synthesis = race.get("synthesis", {})
@@ -837,6 +860,20 @@ class FleetRace:
             logger.info("Ghost digest for race %s: %s", race["race_id"], result.summary())
         except (ImportError, Exception) as e:
             logger.debug("Ghost digest skipped: %s", e)
+
+    # ── ContextDNA Bridge (Wire 2) ────────────────────────────────
+
+    def _push_to_contextdna(self, task_id: str, result: dict = None):
+        """Push race evidence to ContextDNA via bidirectional bridge.
+
+        Non-critical: failure here must never block race logic.
+        """
+        try:
+            from multifleet.contextdna_evidence_bridge import ContextDNAEvidenceBridge
+            bridge = ContextDNAEvidenceBridge()
+            bridge.on_race_completed(task_id, result or {})
+        except Exception as e:
+            logger.debug("ContextDNA bridge push failed (non-critical): %s", e)
 
     # ── Evidence Recording ──────────────────────────────────────────
 

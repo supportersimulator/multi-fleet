@@ -13,7 +13,28 @@ import os
 import subprocess
 from pathlib import Path
 
-from multifleet.code_scanner.probe_contract import ProbeContext
+try:
+    from multifleet.code_scanner.probe_contract import ProbeContext
+except ImportError:
+    # Fallback: code_scanner removed — use a simple dataclass
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class ProbeContext:
+        repo_path: str
+        branch: str = ""
+        changed_files: list[str] = field(default_factory=list)
+        task_description: str = ""
+        node_id: str = ""
+
+        def to_dict(self) -> dict:
+            return {
+                "repo_path": self.repo_path,
+                "branch": self.branch,
+                "changed_files": self.changed_files,
+                "task_description": self.task_description,
+                "node_id": self.node_id,
+            }
 
 logger = logging.getLogger("fleet-nerve.probe_context_factory")
 

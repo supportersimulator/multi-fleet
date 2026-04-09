@@ -108,6 +108,34 @@ class FleetDiscoveryManager:
                     except Exception as e:
                         logger.debug(f"Session publish failed: {e}")
 
+                # Ghost Pulse — tick every 30th heartbeat (~5 min at 10s interval)
+                if getattr(nerve, '_ghost_pulse', None):
+                    try:
+                        nerve._ghost_pulse_counter += 1
+                        if nerve._ghost_pulse_counter >= 30:
+                            nerve._ghost_pulse_counter = 0
+                            pulse_result = nerve._ghost_pulse.pulse()
+                            if pulse_result:
+                                logger.debug("GhostPulse: %s", pulse_result.get("status", "ok"))
+                    except Exception as e:
+                        logger.debug(f"GhostPulse tick failed: {e}")
+
+                # Evidence Sync — tick every 30th heartbeat (~5 min)
+                if getattr(nerve, '_evidence_sync', None):
+                    try:
+                        nerve._evidence_sync_counter += 1
+                        if nerve._evidence_sync_counter >= 30:
+                            nerve._evidence_sync_counter = 0
+                            packet = nerve._evidence_sync.export_recent(since_hours=1)
+                            if packet and nerve.nc and nerve.nc.is_connected:
+                                await nerve.nc.publish(
+                                    f"fleet.{nerve.node_id}.evidence",
+                                    json.dumps(packet).encode(),
+                                )
+                                logger.debug("EvidenceSync: exported %d items", len(packet.get("items", [])))
+                    except Exception as e:
+                        logger.debug(f"EvidenceSync tick failed: {e}")
+
             except Exception as e:
                 logger.debug(f"Heartbeat publish failed: {e}")
             await asyncio.sleep(10)

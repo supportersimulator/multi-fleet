@@ -1,6 +1,7 @@
 """Built-in probes for the ContextDNA Probe Engine.
 
 Registers all priority probes with the engine on import.
+All probes unified from code_scanner + probe_engine into a single system.
 """
 
 from multifleet.probe_engine import ProbeCategory, ProbeEngine, ProbeRegistry
@@ -19,6 +20,7 @@ from multifleet.probes.worktree_contamination import probe_worktree_contaminatio
 from multifleet.probes.invariant_coverage import probe_invariant_coverage
 from multifleet.probes.blast_radius import probe_blast_radius
 from multifleet.probes.security_surface import probe_security_surface
+from multifleet.probes.injection_prioritizer import probe_injection_prioritizer
 
 
 def register_all(registry: ProbeRegistry) -> None:
@@ -27,14 +29,14 @@ def register_all(registry: ProbeRegistry) -> None:
         probe_id="mirror_drift",
         fn=probe_mirror_drift,
         category=ProbeCategory.CONTEXT_QUALITY,
-        description="Checks if CLAUDE.md and README reference files/paths that no longer exist.",
+        description="Checks if docs reference files/paths that no longer exist, plus param drift and env drift.",
         triggers=["manual", "commit", "session_end"],
     )
     registry.register(
         probe_id="stale_context",
         fn=probe_stale_context,
         category=ProbeCategory.CONTEXT_QUALITY,
-        description="Detects stale fleet messages (>7d) and stale plan docs (>30d, NOT STARTED).",
+        description="Detects stale CLAUDE.md, deprecated comments, fleet messages, and stale plans.",
         triggers=["manual", "session_start", "session_end"],
     )
     registry.register(
@@ -83,7 +85,7 @@ def register_all(registry: ProbeRegistry) -> None:
         probe_id="hidden_dependency",
         fn=probe_hidden_dependency,
         category=ProbeCategory.STRUCTURE,
-        description="Scans Python imports for undeclared dependencies not in requirements/pyproject.",
+        description="Scans Python imports for undeclared dependencies, subprocess binaries, and cross-module coupling.",
         triggers=["manual", "commit"],
     )
     registry.register(
@@ -121,29 +123,29 @@ def register_all(registry: ProbeRegistry) -> None:
         description="Detects hardcoded secrets, shell injection, .env in git, private keys.",
         triggers=["manual", "commit", "session_start"],
     )
+    registry.register(
+        probe_id="injection_prioritizer",
+        fn=probe_injection_prioritizer,
+        category=ProbeCategory.AGENT_READINESS,
+        description="Ranks context snippets by relevance for next prompt injection.",
+        triggers=["manual", "session_start"],
+    )
 
 
 def create_engine(wire_evidence_bridge: bool = True) -> ProbeEngine:
-    """Create a ProbeEngine with all built-in probes + bridged scanner probes.
+    """Create a ProbeEngine with all built-in probes registered.
 
     Args:
-        wire_evidence_bridge: If True, connect the code_scanner EvidenceBridge
-            so scanner probe findings also feed into the evidence ledger and
-            EventBus regardless of which engine runs them.
+        wire_evidence_bridge: If True, connect the EvidenceBridge
+            so probe findings also feed into the evidence ledger and
+            EventBus.
     """
     registry = ProbeRegistry()
     register_all(registry)
 
-    # Bridge code_scanner probes into unified registry
-    try:
-        from multifleet.probes.scanner_bridge import register_scanner_probes
-        register_scanner_probes(registry)
-    except (ImportError, Exception):
-        pass  # Scanner bridge optional — graceful degradation
-
     engine = ProbeEngine(registry=registry)
 
-    # Wire EvidenceBridge so code_scanner findings reach the evidence ledger
+    # Wire EvidenceBridge so findings reach the evidence ledger
     if wire_evidence_bridge:
         try:
             from multifleet.code_scanner.evidence_bridge import ProbeEvidenceBridge

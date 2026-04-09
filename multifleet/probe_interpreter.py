@@ -9,7 +9,6 @@ Falls back to template-based interpretation when LLM is unavailable.
 
 import logging
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -108,9 +107,10 @@ class ProbeInterpreter:
     def _llm_interpret(self, results: list[ProbeResult]) -> dict:
         """LLM-powered interpretation for rich insights."""
         # Import here to avoid hard dependency on memory module
-        _superrepo = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", str(Path(__file__).resolve().parents[2]))
-        sys.path.insert(0, _superrepo)
-        from memory.llm_priority_queue import Priority, llm_generate
+        try:
+            from memory.llm_priority_queue import Priority, llm_generate
+        except ImportError:
+            return self._template_interpret(results)
 
         # Build compact prompt from results
         probe_lines = []

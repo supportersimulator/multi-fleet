@@ -230,9 +230,10 @@ class MemoryBridge:
         """
         # Find brain.py — check env override, then relative to repo, then home
         _superrepo = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", "")
+        if not _superrepo:
+            return False
         brain_candidates = [
-            *([] if not _superrepo else [Path(_superrepo) / "memory" / "brain.py"]),
-            Path(__file__).resolve().parent.parent.parent / "memory" / "brain.py",
+            Path(_superrepo) / "memory" / "brain.py",
         ]
         brain_path = None
         for candidate in brain_candidates:
@@ -259,14 +260,16 @@ class MemoryBridge:
         Uses subprocess to avoid importing heavy memory dependencies
         into the fleet process. Returns True on success.
         """
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        script = repo_root / "memory" / "auto_capture.py"
+        repo_root = os.environ.get("MULTIFLEET_SUPERREPO_ROOT", "")
+        if not repo_root:
+            return False
+        script = Path(repo_root) / "memory" / "auto_capture.py"
         if not script.exists():
             return False
 
         try:
             code = (
-                f"import sys; sys.path.insert(0, {str(repo_root)!r}); "
+                f"import sys; sys.path.insert(0, {repo_root!r}); "
                 f"from memory.auto_capture import capture_success; "
                 f"capture_success(task={task!r}, details={details!r}, area={area!r})"
             )
