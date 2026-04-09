@@ -352,6 +352,202 @@ class TestPersistence:
         assert result["holder"] == "mac1"
 
 
+class TestProvisionalLeases:
+    """Tests for provisional lease acquisition during partition."""
+
+    def test_provisional_flag_on_chief_unreachable(self, mgr_non_chief):
+        """Non-chief with unreachable chief creates provisional lease."""
+        result = mgr_non_chief.acquire("res-prov")
+        assert result["acquired"] is True
+        assert result.get("provisional") is True
+        assert result.get("partition_id") is not None
+        assert result["partition_id"].startswith("part-")
+
+    def test_provisional_stored_in_db(self, mgr_non_chief):
+        """Provisional flag persists in SQLite."""
+        mgr_non_chief.acquire("res-prov-db")
+        info = mgr_non_chief.query("res-prov-db")
+        assert info["provisional"] is True
+        assert info["partition_id"] is not None
+
+    def test_chief_lease_not_provisional(self, mgr_chief):
+        """Chief-acquired leases are never provisional."""
+        result = mgr_chief.acquire("res-auth")
+        assert result["acquired"] is True
+        assert "provisional" not in result  # not set on authoritative
+        info = mgr_chief.query("res-auth")
+        assert info["provisional"] is False
+
+    def test_list_provisional(self, store):
+        """list_provisional returns only provisional leases."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        worker = LeaseManager(store, "mac2", chief_node_id="mac1", daemon_port=19999)
+        chief.acquire("res-auth-1")
+        worker.acquire("res-prov-1")
+        worker.acquire("res-prov-2")
+        provisionals = worker.list_provisional()
+        assert len(provisionals) == 2
+        assert all(p["provisional"] for p in provisionals)
+
+    def test_list_provisional_filtered_by_node(self, store):
+        """list_provisional can filter by node_id."""
+        worker1 = LeaseManager(store, "mac2", chief_node_id="mac1", daemon_port=19999)
+        worker2 = LeaseManager(store, "mac3", chief_node_id="mac1", daemon_port=19999)
+        worker1.acquire("res-w1")
+        worker2.acquire("res-w2")
+        assert len(worker1.list_provisional(node_id="mac2")) == 1
+        assert len(worker1.list_provisional(node_id="mac3")) == 1
+
+
+class TestReconciliation:
+    """Tests for partition-heal reconciliation protocol."""
+
+    def test_reconcile_accept_no_chief_lease(self, store):
+        """Provisional lease accepted when chief has no lease for that resource."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        verdicts = chief.reconcile([{
+            "resource_id": "task-orphan",
+            "node_id": "mac2",
+            "fence_token": 1,
+            "lease_type": "short_task",
+            "partition_id": "part-abc",
+        }])
+        assert len(verdicts) == 1
+        assert verdicts[0]["verdict"] == "accepted"
+        # Promoted lease should now exist on chief
+        info = chief.query("task-orphan")
+        assert info is not None
+        assert info["node_id"] == "mac2"
+        assert info["provisional"] is False
+        assert info["reconciled_at"] is not None
+
+    def test_reconcile_reject_chief_higher_fence(self, store):
+        """Chief lease with higher fence token wins — provisional rejected."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        # Chief acquires first (fence=1), then again (fence=2)
+        chief.acquire("task-contested")
+        chief.release("task-contested")
+        chief.acquire("task-contested")  # fence=2
+        verdicts = chief.reconcile([{
+            "resource_id": "task-contested",
+            "node_id": "mac2",
+            "fence_token": 1,
+            "partition_id": "part-xyz",
+        }])
+        assert len(verdicts) == 1
+        assert verdicts[0]["verdict"] == "rejected"
+        assert verdicts[0]["chief_fence"] == 2
+        assert verdicts[0]["provisional_fence"] == 1
+
+    def test_reconcile_conflict_split_brain(self, store):
+        """Same fence token, different holders — true split-brain conflict."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        chief.acquire("task-split")  # fence=1, held by mac1
+        verdicts = chief.reconcile([{
+            "resource_id": "task-split",
+            "node_id": "mac2",
+            "fence_token": 1,
+            "partition_id": "part-split",
+        }])
+        assert len(verdicts) == 1
+        assert verdicts[0]["verdict"] == "conflict"
+        assert "split-brain" in verdicts[0]["reason"]
+
+    def test_reconcile_must_be_chief(self, store):
+        """Non-chief node cannot reconcile."""
+        worker = LeaseManager(store, "mac2", chief_node_id="mac1", daemon_port=19999)
+        verdicts = worker.reconcile([{
+            "resource_id": "task-x",
+            "node_id": "mac2",
+            "fence_token": 1,
+        }])
+        assert verdicts[0]["verdict"] == "error"
+
+    def test_reconcile_multiple_leases(self, store):
+        """Reconcile handles a batch of provisional leases."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        chief.acquire("task-a")  # will conflict
+        # task-b has no chief lease — will be accepted
+        verdicts = chief.reconcile([
+            {"resource_id": "task-a", "node_id": "mac2", "fence_token": 1, "partition_id": "p1"},
+            {"resource_id": "task-b", "node_id": "mac2", "fence_token": 1, "partition_id": "p1",
+             "lease_type": "short_task"},
+        ])
+        assert len(verdicts) == 2
+        verdict_map = {v["resource_id"]: v["verdict"] for v in verdicts}
+        assert verdict_map["task-a"] == "conflict"  # split-brain
+        assert verdict_map["task-b"] == "accepted"
+
+
+class TestConflictResolution:
+    """Tests for arbiter-driven conflict resolution."""
+
+    def test_resolve_conflict(self, store):
+        """Resolve a conflict by choosing the winning node."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        chief.acquire("task-conflict")  # mac1 holds, fence=1
+        result = chief.resolve_conflict("task-conflict", "mac2")
+        assert result["resolved"] is True
+        assert result["holder"] == "mac2"
+        assert result["fence_token"] == 2  # bumped
+        # Verify the lease is now authoritative for mac2
+        info = chief.query("task-conflict")
+        assert info["node_id"] == "mac2"
+        assert info["provisional"] is False
+
+    def test_resolve_nonexistent(self, store):
+        """Resolving a nonexistent resource fails gracefully."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        result = chief.resolve_conflict("nope", "mac2")
+        assert result["resolved"] is False
+
+    def test_fence_token_invalidated_after_resolve(self, store):
+        """Old fence tokens become invalid after conflict resolution."""
+        chief = LeaseManager(store, "mac1", chief_node_id="mac1")
+        r = chief.acquire("task-fence-inv")
+        old_fence = r["fence_token"]
+        chief.resolve_conflict("task-fence-inv", "mac2")
+        # Old fence should be invalid (holder changed + fence bumped)
+        v = chief.validate_fence_token("task-fence-inv", old_fence)
+        assert v["valid"] is False
+
+
+class TestPartitionRecovery:
+    """End-to-end partition simulation: partition -> work -> heal -> reconcile."""
+
+    def test_full_partition_recovery_flow(self, tmp_path):
+        """Simulate: chief + worker partition, both acquire, heal, reconcile."""
+        # Separate DBs to simulate true partition (no shared state)
+        chief_db = tmp_path / "chief.db"
+        worker_db = tmp_path / "worker.db"
+
+        chief_store = FleetNerveStore(db_path=chief_db)
+        worker_store = FleetNerveStore(db_path=worker_db)
+
+        chief = LeaseManager(chief_store, "mac1", chief_node_id="mac1")
+        worker = LeaseManager(worker_store, "mac2", chief_node_id="mac1", daemon_port=19999)
+
+        # During partition: both acquire the same resource
+        chief.acquire("task-X")  # authoritative, fence=1
+        worker_result = worker.acquire("task-X")  # provisional, fence=1
+        assert worker_result.get("provisional") is True
+
+        # Partition heals: worker sends provisionals to chief
+        worker_provisionals = worker.list_provisional(node_id="mac2")
+        assert len(worker_provisionals) == 1
+
+        verdicts = chief.reconcile(worker_provisionals)
+        assert len(verdicts) == 1
+        # Split-brain: same fence, different holders
+        assert verdicts[0]["verdict"] == "conflict"
+
+        # Arbiter resolves: mac2 wins
+        resolution = chief.resolve_conflict("task-X", "mac2")
+        assert resolution["resolved"] is True
+        assert resolution["holder"] == "mac2"
+        assert resolution["fence_token"] == 2  # bumped past conflict
+
+
 class TestStats:
     def test_stats(self, mgr, mgr2):
         mgr.acquire("res-1")
