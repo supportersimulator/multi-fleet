@@ -1,0 +1,28 @@
+site_name: Multi-Fleet
+site_url: https://multi-fleet.dev
+site_description: Multi-machine fleet coordination for Claude Code sessions
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: deep purple
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/install.md
+    - Quick Start: getting-started/quickstart.md
+    - Configuration: getting-started/config.md
+  - Architecture:
+    - Overview: architecture/overview.md
+    - 5 Layers: architecture/layers.md
+    - Probe Engine: architecture/probes.md
+  - API Reference:
+    - MCP Tools: api/mcp-tools.md
+    - Skills: api/skills.md
+    - Packet Types: api/packets.md
+  - Pricing: pricing.md

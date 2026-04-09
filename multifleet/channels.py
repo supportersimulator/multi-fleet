@@ -28,12 +28,13 @@ logger = logging.getLogger("fleet_nats")
 SEED_DIR = "/tmp"
 
 # ── Channel Priority Constants ──
-ALL_CHANNELS = ("P1_nats", "P2_http", "P3_chief", "P4_seed", "P5_ssh", "P6_wol", "P7_git")
+ALL_CHANNELS = ("P1_nats", "P2_http", "P2t_tailscale", "P3_chief", "P4_seed", "P5_ssh", "P6_wol", "P7_git")
 HEAL_SCORE_THRESHOLD = 5  # Score below this triggers automatic repair escalation
 
 CHANNEL_P0_CLOUD = "P0_cloud"
 CHANNEL_P1_NATS = "P1_nats"
 CHANNEL_P2_HTTP = "P2_http"
+CHANNEL_P2T_TAILSCALE = "P2t_tailscale"
 CHANNEL_P3_CHIEF = "P3_chief"
 CHANNEL_P4_SEED = "P4_seed"
 CHANNEL_P5_SSH = "P5_ssh"
@@ -42,9 +43,9 @@ CHANNEL_P7_GIT = "P7_git"
 CHANNEL_P8_KEYSTROKE = "P8_keystroke"
 
 CHANNEL_ORDER = [
-    CHANNEL_P1_NATS, CHANNEL_P2_HTTP, CHANNEL_P3_CHIEF,
-    CHANNEL_P4_SEED, CHANNEL_P5_SSH, CHANNEL_P6_WOL,
-    CHANNEL_P7_GIT, CHANNEL_P8_KEYSTROKE,
+    CHANNEL_P1_NATS, CHANNEL_P2_HTTP, CHANNEL_P2T_TAILSCALE,
+    CHANNEL_P3_CHIEF, CHANNEL_P4_SEED, CHANNEL_P5_SSH,
+    CHANNEL_P6_WOL, CHANNEL_P7_GIT, CHANNEL_P8_KEYSTROKE,
 ]
 
 # Per-channel timeout (30s max each, but tuned per channel for efficiency)
@@ -52,6 +53,7 @@ CHANNEL_TIMEOUT_S = {
     CHANNEL_P0_CLOUD: 30,
     CHANNEL_P1_NATS: 30,
     CHANNEL_P2_HTTP: 30,
+    CHANNEL_P2T_TAILSCALE: 30,
     CHANNEL_P3_CHIEF: 30,
     CHANNEL_P4_SEED: 30,
     CHANNEL_P5_SSH: 30,
@@ -207,6 +209,7 @@ class CommunicationProtocol:
         channels.extend([
             (CHANNEL_P1_NATS, self._nerve._send_p1_nats),
             (CHANNEL_P2_HTTP, self._nerve._send_p2_http),
+            (CHANNEL_P2T_TAILSCALE, self._nerve._send_p2t_tailscale),
             (CHANNEL_P3_CHIEF, self._nerve._send_p3_chief),
             (CHANNEL_P4_SEED, self._nerve._send_p4_seed),
             (CHANNEL_P5_SSH, self._nerve._send_p5_ssh),
@@ -239,7 +242,7 @@ class CommunicationProtocol:
                     self.channel_state.record_success(target, name, elapsed_ms)
                     logger.info(f"[{name}] Delivered to {target} ({elapsed_ms}ms)")
                     # If we fell through to P3+, earlier channels are broken -- trigger heal
-                    if name not in (CHANNEL_P0_CLOUD, CHANNEL_P1_NATS, CHANNEL_P2_HTTP):
+                    if name not in (CHANNEL_P0_CLOUD, CHANNEL_P1_NATS, CHANNEL_P2_HTTP, CHANNEL_P2T_TAILSCALE):
                         broken = [e.split(":")[0] for e in errors if "skipped" not in e]
                         if broken:
                             asyncio.ensure_future(self._trigger_heal(target, name, broken))
@@ -514,6 +517,7 @@ class CommunicationProtocol:
             sender_map = {
                 CHANNEL_P1_NATS: self._nerve._send_p1_nats,
                 CHANNEL_P2_HTTP: self._nerve._send_p2_http,
+                CHANNEL_P2T_TAILSCALE: self._nerve._send_p2t_tailscale,
                 CHANNEL_P3_CHIEF: self._nerve._send_p3_chief,
                 CHANNEL_P4_SEED: self._nerve._send_p4_seed,
                 CHANNEL_P5_SSH: self._nerve._send_p5_ssh,

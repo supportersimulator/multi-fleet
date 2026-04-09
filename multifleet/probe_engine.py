@@ -18,8 +18,10 @@ Probe categories:
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import subprocess
+import threading
 import time
 import json
 import logging
@@ -121,8 +123,13 @@ class ProbeResult:
 class ProbeRegistry:
     """Central registry for all probes. GhostScan's SCANNERS pattern."""
 
-    def __init__(self):
+    def __init__(self, default_timeout: float = 10.0, cache_ttl: float = 60.0):
         self._probes: dict[str, dict] = {}  # probe_id -> {fn, category, description, triggers}
+        self._default_timeout = default_timeout
+        self._cache_ttl = cache_ttl
+        self._cache: dict[str, tuple[float, ProbeResult]] = {}  # probe_id -> (timestamp, result)
+        self._cache_lock = threading.Lock()
+        self._probe_health: dict[str, dict] = {}  # probe_id -> {status, last_error, last_run, consecutive_failures}
 
     def register(
         self,
@@ -177,31 +184,134 @@ class ProbeRegistry:
         except Exception:
             pass  # Best-effort
 
-    def _run_probe(self, probe_id: str, entry: dict, context: dict) -> ProbeResult:
-        """Execute a single probe with timing and error handling."""
+    def _get_cached(self, probe_id: str) -> Optional[ProbeResult]:
+        """Return cached result if still valid, else None."""
+        with self._cache_lock:
+            if probe_id in self._cache:
+                ts, result = self._cache[probe_id]
+                if (time.monotonic() - ts) < self._cache_ttl:
+                    return result
+                del self._cache[probe_id]
+        return None
+
+    def _set_cached(self, probe_id: str, result: ProbeResult) -> None:
+        with self._cache_lock:
+            self._cache[probe_id] = (time.monotonic(), result)
+
+    def invalidate_cache(self, probe_id: Optional[str] = None) -> None:
+        """Clear cache for one probe or all probes."""
+        with self._cache_lock:
+            if probe_id:
+                self._cache.pop(probe_id, None)
+            else:
+                self._cache.clear()
+
+    def _update_health(self, probe_id: str, success: bool, error_msg: str = "") -> None:
+        if probe_id not in self._probe_health:
+            self._probe_health[probe_id] = {
+                "status": "ok", "last_error": "", "last_run": 0.0, "consecutive_failures": 0
+            }
+        h = self._probe_health[probe_id]
+        h["last_run"] = time.time()
+        if success:
+            h["status"] = "ok"
+            h["consecutive_failures"] = 0
+            h["last_error"] = ""
+        else:
+            h["consecutive_failures"] += 1
+            h["last_error"] = error_msg
+            h["status"] = "broken" if h["consecutive_failures"] >= 3 else "degraded"
+
+    def get_health(self) -> dict[str, dict]:
+        """Return health status for all registered probes."""
+        result = {}
+        for pid in self._probes:
+            if pid in self._probe_health:
+                result[pid] = dict(self._probe_health[pid])
+            else:
+                result[pid] = {"status": "unknown", "last_error": "", "last_run": 0.0, "consecutive_failures": 0}
+        return result
+
+    def _run_probe(self, probe_id: str, entry: dict, context: dict,
+                   timeout: Optional[float] = None, use_cache: bool = True) -> ProbeResult:
+        """Execute a single probe with timing, timeout, caching, and error isolation."""
+        # Check cache first
+        if use_cache:
+            cached = self._get_cached(probe_id)
+            if cached is not None:
+                logger.debug("probe_cache_hit id=%s", probe_id)
+                return cached
+
+        effective_timeout = timeout if timeout is not None else self._default_timeout
         t0 = time.monotonic()
+
         try:
-            result = entry["fn"](context)
+            # Run probe in a thread to enforce timeout
+            result_holder: list[ProbeResult] = []
+            error_holder: list[Exception] = []
+
+            def _execute():
+                try:
+                    r = entry["fn"](context)
+                    result_holder.append(r)
+                except Exception as exc:
+                    error_holder.append(exc)
+
+            thread = threading.Thread(target=_execute, daemon=True)
+            thread.start()
+            thread.join(timeout=effective_timeout)
+
+            if thread.is_alive():
+                # Probe timed out
+                logger.warning("probe_timeout id=%s timeout=%.1fs", probe_id, effective_timeout)
+                result = ProbeResult.error(
+                    probe_id, entry["category"].value,
+                    f"Probe timed out after {effective_timeout:.1f}s"
+                )
+                result.duration_ms = (time.monotonic() - t0) * 1000
+                self._update_health(probe_id, False, f"timeout after {effective_timeout:.1f}s")
+                self._emit_probe_finding(result)
+                return result
+
+            if error_holder:
+                raise error_holder[0]
+
+            if not result_holder:
+                raise RuntimeError("Probe returned no result")
+
+            result = result_holder[0]
             if not isinstance(result, ProbeResult):
                 result = ProbeResult.error(
                     probe_id, entry["category"].value,
                     f"Probe returned {type(result).__name__}, expected ProbeResult"
                 )
+                self._update_health(probe_id, False, "bad return type")
+            else:
+                self._update_health(probe_id, True)
+
             result.duration_ms = (time.monotonic() - t0) * 1000
+            self._set_cached(probe_id, result)
             self._emit_probe_finding(result)
             return result
+
         except Exception as e:
             logger.error("probe_error id=%s error=%s", probe_id, e)
             result = ProbeResult.error(probe_id, entry["category"].value, str(e))
             result.duration_ms = (time.monotonic() - t0) * 1000
+            self._update_health(probe_id, False, str(e))
             self._emit_probe_finding(result)
             return result
 
-    def run_all(self, context: Optional[dict] = None) -> list[ProbeResult]:
+    def run_all(self, context: Optional[dict] = None, concurrent: bool = True,
+                max_workers: int = 8) -> list[ProbeResult]:
         """Run every registered probe and return results.
 
         If no context is provided, auto-builds one from live git state
         via probe_context_factory.
+
+        Args:
+            concurrent: If True, run independent probes in parallel via ThreadPoolExecutor.
+            max_workers: Max concurrent probe threads (default 8).
         """
         if context is None:
             try:
@@ -211,9 +321,24 @@ class ProbeRegistry:
                 ctx = {}
         else:
             ctx = context
-        results = []
-        for probe_id, entry in self._probes.items():
-            results.append(self._run_probe(probe_id, entry, ctx))
+
+        if not concurrent or len(self._probes) <= 1:
+            return [self._run_probe(pid, entry, ctx) for pid, entry in self._probes.items()]
+
+        results: list[ProbeResult] = []
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(self._probes))) as pool:
+            futures = {
+                pool.submit(self._run_probe, pid, entry, ctx): pid
+                for pid, entry in self._probes.items()
+            }
+            for future in as_completed(futures):
+                pid = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    logger.error("probe_future_error id=%s error=%s", pid, e)
+                    entry = self._probes[pid]
+                    results.append(ProbeResult.error(pid, entry["category"].value, str(e)))
         return results
 
     def run_category(
@@ -533,12 +658,14 @@ class ProbeEngine:
         Only findings at severity HIGH or CRITICAL with actual findings
         are recorded, keeping the ledger signal-rich.
         """
+        high_count = 0
         try:
             from multifleet.evidence_ledger import EvidenceLedger
             import os
             ledger = EvidenceLedger()
             for result in results:
                 if result.severity in ("high", "critical") and result.findings:
+                    high_count += 1
                     ledger.record(
                         event_type="probe_finding",
                         node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
@@ -552,10 +679,92 @@ class ProbeEngine:
                             "finding_titles": [f.title for f in result.findings],
                         },
                     )
-            logger.debug("Evidence ledger: recorded %d HIGH+ probe findings",
-                         sum(1 for r in results if r.severity in ("high", "critical") and r.findings))
+            logger.debug("Evidence ledger: recorded %d HIGH+ probe findings", high_count)
         except Exception as e:
             logger.debug("Evidence ledger recording failed: %s", e)
+
+        # Push HIGH+ findings to Context DNA (bidirectional sync — closes learning loop)
+        if high_count > 0:
+            self._push_high_findings_to_contextdna(results)
+
+    def _push_high_findings_to_contextdna(self, results: list[ProbeResult]) -> None:
+        """Push HIGH/CRITICAL probe findings to Context DNA via ProductBridge."""
+        try:
+            from multifleet.product_bridge import get_bridge
+            import os
+            bridge = get_bridge()
+            high_findings = [
+                r for r in results
+                if r.severity in ("high", "critical") and r.findings
+            ]
+            bridge.fleet_to_memory({
+                "event_type": "probe_high_findings",
+                "node_id": os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "evidence": {
+                    "findings_count": len(high_findings),
+                    "probes": [
+                        {
+                            "probe_id": r.probe_id,
+                            "severity": r.severity,
+                            "category": r.category,
+                            "confidence": r.confidence,
+                            "finding_titles": [f.title for f in r.findings[:5]],
+                        }
+                        for r in high_findings[:10]
+                    ],
+                },
+                "tags": ["probe", "high_findings", "learning_loop"],
+            })
+        except Exception as e:
+            logger.debug("probe->contextdna bridge (non-blocking): %s", e)
+
+    def pull_contextdna_evidence(self, query: str) -> list[dict]:
+        """Pull relevant evidence from Context DNA for probe enrichment.
+
+        Used by probes that want historical context before scanning.
+        Returns list of evidence entries or empty list on failure.
+        """
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            result = bridge.memory_to_fleet(query)
+            return result.get("results", [])
+        except Exception as e:
+            logger.debug("contextdna->probe pull (non-blocking): %s", e)
+            return []
+
+    def health(self) -> dict:
+        """Return engine health: which probes are working vs broken.
+
+        Returns dict with:
+            probes: per-probe health status
+            summary: {total, ok, degraded, broken, unknown}
+            engine_status: "healthy" | "degraded" | "unhealthy"
+        """
+        probe_health = self.registry.get_health()
+        counts = {"total": 0, "ok": 0, "degraded": 0, "broken": 0, "unknown": 0}
+        for info in probe_health.values():
+            counts["total"] += 1
+            status = info.get("status", "unknown")
+            if status in counts:
+                counts[status] += 1
+            else:
+                counts["unknown"] += 1
+
+        if counts["broken"] > 0:
+            engine_status = "unhealthy"
+        elif counts["degraded"] > 0:
+            engine_status = "degraded"
+        else:
+            engine_status = "healthy"
+
+        return {
+            "probes": probe_health,
+            "summary": counts,
+            "engine_status": engine_status,
+            "last_scan_at": self._last_scan_at,
+            "last_trigger": self._last_scan_trigger,
+        }
 
     def blocking_findings(self) -> list[ProbeFinding]:
         """Return all findings with high blast radius (blocking)."""

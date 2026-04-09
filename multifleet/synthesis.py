@@ -112,6 +112,21 @@ class ChiefSynthesis:
 
         t0 = time.monotonic()
 
+        # Pull latest evidence from Context DNA before synthesis (bidirectional sync)
+        contextdna_context: list[dict] = []
+        try:
+            from multifleet.product_bridge import get_bridge
+            task_summary = next(
+                (v.get("summary", "") for v in verdicts.values() if v.get("summary")), ""
+            )
+            if task_summary:
+                cdna_result = get_bridge().memory_to_fleet(task_summary)
+                contextdna_context = cdna_result.get("results", [])
+                if contextdna_context:
+                    logger.info("Pre-synthesis ContextDNA pull: %d evidence entries", len(contextdna_context))
+        except Exception as e:
+            logger.debug("Pre-synthesis ContextDNA pull failed: %s", e)
+
         # Run probes on the task context to get fresh evidence before analyzing
         probe_summary = None
         try:
@@ -142,20 +157,26 @@ class ChiefSynthesis:
                 best = max(results, key=lambda r: r.confidence)
                 if probe_summary:
                     best.metadata["probe_summary"] = probe_summary
+                if contextdna_context:
+                    best.metadata["contextdna_evidence_count"] = len(contextdna_context)
                 # Resolve memory influence (the "holy shit" moment)
                 best = self._apply_memory_influence(best, task_id, verdicts)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
                 self._record_evidence(best)
+                self._push_to_contextdna(best)
                 return best
 
         # Fallback to basic confidence-weighted scoring
         result = self._default_analyzer(task_id, verdicts)
         if probe_summary:
             result.metadata["probe_summary"] = probe_summary
+        if contextdna_context:
+            result.metadata["contextdna_evidence_count"] = len(contextdna_context)
         # Resolve memory influence (the "holy shit" moment)
         result = self._apply_memory_influence(result, task_id, verdicts)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
+        self._push_to_contextdna(result)
         # Track outcome for learning (high-value, zero-caller module)
         try:
             from memory.outcome_tracker import OutcomeTracker
@@ -321,6 +342,9 @@ class ChiefSynthesis:
         """Record synthesis decision to the evidence ledger (hash-chain)."""
         if not self._evidence_ledger:
             return
+        if not hasattr(self._evidence_ledger, 'record'):
+            logger.warning("Evidence ledger lacks .record() — skipping evidence write")
+            return
         try:
             self._evidence_ledger.record(
                 event_type="merge_decision",
@@ -345,6 +369,27 @@ class ChiefSynthesis:
             bridge.push_to_contextdna()
         except Exception as e:
             logger.debug("ContextDNA bridge push failed (non-critical): %s", e)
+
+    def _push_to_contextdna(self, result: SynthesisResult):
+        """Push synthesis decision to Context DNA via ProductBridge (closes learning loop)."""
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            bridge.fleet_to_memory({
+                "event_type": "synthesis_decision",
+                "node_id": os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "evidence": {
+                    "task_id": result.task_id,
+                    "decision": result.decision,
+                    "winner_branch": result.winner_branch,
+                    "confidence": round(result.confidence, 4),
+                    "reasoning": result.reasoning[:300],
+                    "dissent_count": len(result.dissent_preserved),
+                },
+                "tags": ["synthesis", "fleet_decision"],
+            })
+        except Exception as e:
+            logger.debug("fleet->contextdna bridge (non-blocking): %s", e)
 
     def recent_decisions(self, limit: int = 10) -> list[dict]:
         """Read recent decisions from ledger."""

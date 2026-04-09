@@ -168,6 +168,22 @@ def create_contextdna_analyzer():
         if not verdicts:
             return None
 
+        # Pull latest fleet evidence from Context DNA (bidirectional sync)
+        contextdna_evidence: list[dict] = []
+        try:
+            from multifleet.product_bridge import get_bridge
+            task_summary = next(
+                (v.get("summary", "") for v in verdicts.values() if v.get("summary")), ""
+            )
+            if task_summary:
+                cdna_result = get_bridge().memory_to_fleet(task_summary)
+                contextdna_evidence = cdna_result.get("results", [])
+                if contextdna_evidence:
+                    logger.debug("contextdna->analyzer pull: %d entries for task %s",
+                                 len(contextdna_evidence), task_id)
+        except Exception as e:
+            logger.debug("contextdna->analyzer pull (non-blocking): %s", e)
+
         # Query evidence ledger for recent probe findings to inform scoring
         probe_evidence: list[dict] = []
         try:
@@ -175,6 +191,9 @@ def create_contextdna_analyzer():
             ledger = EvidenceLedger()
             recent = ledger.query(event_type="probe_finding", limit=20)
             probe_evidence = recent
+            # Merge Context DNA evidence into probe evidence for richer scoring
+            if contextdna_evidence:
+                probe_evidence.extend(contextdna_evidence)
         except Exception as e:
             logger.debug("Evidence ledger probe query failed: %s", e)
 
@@ -388,6 +407,24 @@ def create_contextdna_analyzer():
             reasoning += f" Memory: {'; '.join(memory_reasons)}."
         if professor_wisdom:
             reasoning += f" Professor: {professor_wisdom[:150]}."
+
+        # Write analysis back to Context DNA (close the learning loop)
+        try:
+            from multifleet.product_bridge import get_bridge
+            get_bridge().fleet_to_memory({
+                "event_type": "contextdna_analysis",
+                "node_id": "analyzer",
+                "evidence": {
+                    "task_id": task_id,
+                    "decision": decision,
+                    "memory_matches": sum(a.get("match_count", 0) for a in adjustments.values()),
+                    "professor_consulted": professor_wisdom is not None,
+                    "confidence": winner_score,
+                },
+                "tags": ["contextdna", "analysis", "learning_loop"],
+            })
+        except Exception:
+            pass
 
         return SynthesisResult(
             task_id=task_id,

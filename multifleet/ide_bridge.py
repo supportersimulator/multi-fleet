@@ -11,8 +11,9 @@ Data contracts match:
 """
 
 import logging
+import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("fleet-nerve.ide-bridge")
 
@@ -41,17 +42,152 @@ _SEVERITY_MAP = {
 }
 
 
-class IDEBridge:
-    """Translates fleet events into IDE-consumable data structures."""
+class EventQueueOverflow(Exception):
+    """Raised when event queue exceeds capacity (informational only)."""
+    pass
 
-    def __init__(self, aggregator=None):
+
+class IDEBridge:
+    """Translates fleet events into IDE-consumable data structures.
+
+    Production hardening:
+    - Connection retry with exponential backoff (3 attempts)
+    - Event queue overflow protection (max 1000 events, drop oldest)
+    - Stale data detection (snapshot > 30s marked stale)
+    - Graceful shutdown (flush pending before close)
+    """
+
+    def __init__(self, aggregator=None, max_events: int = 1000,
+                 stale_threshold: float = 30.0, max_retries: int = 3):
         """
         Args:
             aggregator: FleetStatusAggregator instance for snapshot data.
+            max_events: Maximum events in queue before dropping oldest.
+            stale_threshold: Seconds after which snapshot is considered stale.
+            max_retries: Number of connection retry attempts.
         """
         self._aggregator = aggregator
         self._pending_notifications: list[dict] = []
         self._max_notifications = 50
+        # Production hardening
+        self._event_queue: list[dict] = []
+        self._max_events = max_events
+        self._stale_threshold = stale_threshold
+        self._max_retries = max_retries
+        self._last_snapshot_at: float = 0.0
+        self._connected = False
+        self._shutting_down = False
+        self._lock = threading.Lock()
+        self._on_overflow_callbacks: list[Callable] = []
+        self._dropped_count = 0
+
+    def connect(self, connect_fn: Optional[Callable] = None) -> bool:
+        """Connect to EventBus with retry logic (exponential backoff).
+
+        Args:
+            connect_fn: Callable that attempts connection. Returns True on success.
+                        If None, uses default EventBus connection on port 8031.
+
+        Returns:
+            True if connection succeeded, False after all retries exhausted.
+        """
+        if connect_fn is None:
+            def connect_fn():
+                try:
+                    from multifleet.eventbus import FleetEventBus
+                    import os
+                    bus = FleetEventBus(node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"))
+                    self._connected = True
+                    return True
+                except Exception:
+                    return False
+
+        for attempt in range(self._max_retries):
+            try:
+                if connect_fn():
+                    self._connected = True
+                    logger.info("ide_bridge connected attempt=%d", attempt + 1)
+                    return True
+            except Exception as e:
+                logger.warning("ide_bridge connect_failed attempt=%d error=%s", attempt + 1, e)
+
+            if attempt < self._max_retries - 1:
+                backoff = min(2 ** attempt, 8)  # 1s, 2s, 4s (capped at 8s)
+                logger.info("ide_bridge retry_backoff seconds=%.1f", backoff)
+                time.sleep(backoff)
+
+        self._connected = False
+        logger.error("ide_bridge connection_exhausted retries=%d", self._max_retries)
+        return False
+
+    def enqueue_event(self, event: dict) -> None:
+        """Add event to queue with overflow protection.
+
+        If queue exceeds max_events, oldest events are dropped.
+        """
+        with self._lock:
+            self._event_queue.append(event)
+            if len(self._event_queue) > self._max_events:
+                overflow = len(self._event_queue) - self._max_events
+                self._event_queue = self._event_queue[overflow:]
+                self._dropped_count += overflow
+                logger.warning("ide_bridge event_overflow dropped=%d total_dropped=%d",
+                               overflow, self._dropped_count)
+                for cb in self._on_overflow_callbacks:
+                    try:
+                        cb(overflow, self._dropped_count)
+                    except Exception:
+                        pass
+
+    def drain_events(self) -> list[dict]:
+        """Return and clear all queued events."""
+        with self._lock:
+            events = list(self._event_queue)
+            self._event_queue.clear()
+            return events
+
+    @property
+    def dropped_count(self) -> int:
+        return self._dropped_count
+
+    @property
+    def queue_size(self) -> int:
+        with self._lock:
+            return len(self._event_queue)
+
+    def on_overflow(self, callback: Callable) -> None:
+        """Register a callback for overflow events. callback(dropped, total_dropped)."""
+        self._on_overflow_callbacks.append(callback)
+
+    def is_stale(self) -> bool:
+        """Check if the last snapshot is older than stale_threshold."""
+        if self._last_snapshot_at == 0.0:
+            return True
+        return (time.time() - self._last_snapshot_at) > self._stale_threshold
+
+    def shutdown(self) -> list[dict]:
+        """Graceful shutdown: flush pending notifications and events.
+
+        Returns all pending items that were flushed.
+        """
+        self._shutting_down = True
+        flushed = []
+
+        # Flush pending notifications
+        notifications = self.get_pending_notifications()
+        flushed.extend(notifications)
+
+        # Flush event queue
+        events = self.drain_events()
+        flushed.extend(events)
+
+        logger.info("ide_bridge shutdown flushed=%d items", len(flushed))
+        self._connected = False
+        return flushed
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and not self._shutting_down
 
     def translate_event(self, event_type: str, data: dict) -> dict:
         """Translate fleet event into IDE-compatible format.
@@ -120,6 +256,7 @@ class IDEBridge:
         """Data for the status bar: node count, health dot, message.
 
         Matches what FleetDashboardPanel and extension.ts status bar consume.
+        Marks data as stale if snapshot is older than stale_threshold.
         """
         if self._aggregator is None:
             return {
@@ -127,8 +264,10 @@ class IDEBridge:
                 "health_dot": "red",
                 "text": "Fleet: off",
                 "tooltip": "Fleet daemon not running",
+                "stale": True,
             }
 
+        self._last_snapshot_at = time.time()
         snap = self._aggregator.snapshot()
         peers = snap.get("peers", {})
         reachable = peers.get("reachable", 0)
@@ -137,6 +276,10 @@ class IDEBridge:
 
         dot_char = {"green": "ok", "yellow": "degraded", "red": "down"}.get(dot, "unknown")
         text = self._aggregator.status_bar_text()
+
+        stale = self.is_stale()
+        if stale:
+            text = f"[STALE] {text}"
 
         return {
             "node_count": reachable + 1,  # self + reachable peers
@@ -149,6 +292,7 @@ class IDEBridge:
             "rebuttals": snap.get("rebuttals", {}).get("active", 0),
             "pending_reviews": snap.get("liaison", {}).get("pending_reviews", 0),
             "unread": snap.get("liaison", {}).get("unread", 0),
+            "stale": stale,
         }
 
     def get_activity_bar_data(self) -> dict:

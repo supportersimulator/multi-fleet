@@ -49,6 +49,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# ── Billing gate ──
+from multifleet.billing import get_billing, BillingError, TOOL_FEATURE_MAP  # noqa: E402
+
 # ── Productive Waiter singleton ──
 _productive_waiter = None
 
@@ -2448,6 +2451,117 @@ def fleet_brainstorm(action: str, task_id: str = "", brainstorm_id: str = "",
         return {"error": f"unknown action: {action}, expected: create|add_option|adjudicate|lock_vision|execute_init|execute_step|escalate|chief_decide|status|list"}
 
 
+# ── Superpowers <-> 3-Surgeons Handoff ──────────────────────────
+
+
+def _get_superpowers_bridge():
+    """Lazy-load the superpowers bridge."""
+    try:
+        from multifleet.superpowers_bridge import SuperpowersBridge, get_store
+        return SuperpowersBridge(), get_store()
+    except ImportError:
+        return None, None
+
+
+def fleet_handoff(action: str, task_id: str = "", approach: str = "",
+                  files_affected: str = "", risks: str = "",
+                  confidence: str = "", done_criteria: str = "",
+                  node_id: str = "") -> dict:
+    """Superpowers <-> 3-Surgeons handoff pipeline.
+
+    Actions:
+      submit  — package brainstorm from superpowers and send to 3-surgeons for review
+      check   — check if 3-surgeons has rendered a decision for a task
+      list    — list pending and decided handoffs
+    """
+    bridge, store = _get_superpowers_bridge()
+    if bridge is None:
+        return {"error": "superpowers_bridge module not available"}
+
+    vp = _get_vision_packets()
+    if vp is None:
+        return {"error": "vision_packets module not available"}
+
+    BrainstormPacket = vp["BrainstormPacket"]
+    effective_node = node_id or NODE_ID
+
+    if action == "submit":
+        if not task_id:
+            return {"error": "task_id required for submit"}
+        if not approach:
+            return {"error": "approach required for submit"}
+
+        # Build a BrainstormPacket from the superpowers output
+        bp = BrainstormPacket(task_id=task_id, node_id=effective_node)
+        files_list = [f.strip() for f in files_affected.split(",")] if files_affected else []
+        risks_list = [r.strip() for r in risks.split(",")] if risks else []
+        conf = float(confidence) if confidence else 0.5
+
+        opt = bp.add_option(
+            title=approach,
+            description=approach,
+            pros=[],
+            cons=risks_list,
+            confidence=conf,
+        )
+        bp.recommended = opt.id
+
+        # Submit for surgical review
+        sdp = bridge.submit_for_review(bp)
+
+        result = {
+            "brainstorm_id": bp.id,
+            "decision_id": sdp.id,
+            "task_id": task_id,
+            "consensus": sdp.consensus,
+            "opinions_count": len(sdp.opinions),
+            "files_affected": files_list,
+        }
+
+        # If consensus and done_criteria provided, auto-create contract
+        if sdp.consensus and done_criteria:
+            criteria = [c.strip() for c in done_criteria.split(",")]
+            try:
+                vc = bridge.create_contract(bp, sdp, criteria, node_id=effective_node)
+                result["contract_id"] = vc.id
+                result["contract_locked"] = vc.locked
+            except ValueError as exc:
+                result["contract_error"] = str(exc)
+
+        if sdp.selected_option:
+            result["selected_option"] = sdp.selected_option
+        if sdp.unresolved_objections:
+            result["unresolved_objections"] = sdp.unresolved_objections
+        return result
+
+    elif action == "check":
+        if not task_id:
+            return {"error": "task_id required for check"}
+        sdp = bridge.check_decision(task_id)
+        if sdp is None:
+            return {"task_id": task_id, "status": "pending", "decision": None}
+        return {
+            "task_id": task_id,
+            "status": "decided",
+            "decision_id": sdp.id,
+            "consensus": sdp.consensus,
+            "selected_option": sdp.selected_option,
+            "opinions_count": len(sdp.opinions),
+            "requires_chief": sdp.requires_chief,
+            "unresolved_objections": sdp.unresolved_objections,
+        }
+
+    elif action == "list":
+        return {
+            "pending": store.list_pending(),
+            "decided": store.list_decided(),
+            "counters": bridge.get_counters(),
+        }
+
+    else:
+        return {"error": f"unknown action: {action}, expected: submit|check|list"}
+
+
 # ── Node Overlay + Acceptance Gate ──────────────────────────────
 
 
@@ -2536,6 +2650,27 @@ def fleet_invariance(action: str = "check_all", rule_id: str = "",
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
+
+
+def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
+    """Lazy wrapper for multifleet.web_server.fleet_server_tool."""
+    from multifleet.web_server import fleet_server_tool
+    return fleet_server_tool(action=action, port=port)
+
+
+def _run_startup_migration() -> None:
+    """Run fleet migration check on startup."""
+    from multifleet.migration import FleetMigration
+    mig = FleetMigration()
+    mig.check_version()
+
+
+def _run_shutdown_backup() -> None:
+    """Create a fleet backup snapshot on shutdown."""
+    from multifleet.backup import FleetBackup
+    backup = FleetBackup()
+    backup.create_snapshot()
+
 
 TOOLS = [
     {
@@ -2975,6 +3110,25 @@ TOOLS = [
         "fn": fleet_brainstorm,
     },
     {
+        "name": "fleet_handoff",
+        "description": "Superpowers <-> 3-Surgeons handoff pipeline. Submit brainstorm output for surgical review, check decisions, or list pending handoffs. Bridges the gap between creative brainstorming and rigorous multi-model consensus.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["submit", "check", "list"], "description": "Handoff action: submit (brainstorm->surgeons), check (get decision), list (pending handoffs)"},
+                "task_id": {"type": "string", "description": "Task ID (required for submit and check)"},
+                "approach": {"type": "string", "description": "Proposed approach description (required for submit)"},
+                "files_affected": {"type": "string", "description": "Comma-separated file paths affected (for submit)"},
+                "risks": {"type": "string", "description": "Comma-separated risks identified (for submit)"},
+                "confidence": {"type": "string", "description": "Confidence 0-1 (for submit, default 0.5)"},
+                "done_criteria": {"type": "string", "description": "Comma-separated done criteria — if provided with submit and consensus reached, auto-creates VisionContract"},
+                "node_id": {"type": "string", "description": "Override node ID (default: this node)"},
+            },
+            "required": ["action"],
+        },
+        "fn": fleet_handoff,
+    },
+    {
         "name": "fleet_overlay",
         "description": "Node overlay state — the 5-strip view of what each fleet node 'thinks' (epistemic, surgeon, invariant, evidence, probe). Actions: get (single node), list (all nodes), update.",
         "inputSchema": {
@@ -3081,6 +3235,19 @@ def handle_request(request: dict) -> dict:
             if not allowed:
                 logger.warning("rate_limited tool=%s reason=%s", tool_name, reason)
                 return {"content": [{"type": "text", "text": json.dumps({"error": reason, "rate_limited": True})}], "isError": True}
+        # Billing tier gate (before any work)
+        try:
+            get_billing().require_tool(tool_name)
+        except BillingError as be:
+            logger.warning("billing_gated tool=%s tier=%s required=%s", tool_name, be.current_tier, be.required_tier)
+            payload = {
+                "error": str(be),
+                "billing_gated": True,
+                "current_tier": be.current_tier,
+                "required_tier": be.required_tier,
+                "upgrade_url": "https://contextdna.io/fleet/pricing",
+            }
+            return {"content": [{"type": "text", "text": json.dumps(payload)}], "isError": True}
         t0 = time.monotonic()
         try:
             result = tool["fn"](**args)

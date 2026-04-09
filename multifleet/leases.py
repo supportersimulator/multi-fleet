@@ -1,9 +1,15 @@
-"""Lease-based task ownership — prevents two nodes from working on the same resource."""
+"""Lease-based task ownership — prevents two nodes from working on the same resource.
+
+Supports provisional leases during network partitions. When chief is unreachable,
+workers acquire provisional leases locally. On partition heal, provisional leases
+are reconciled against the chief's authoritative state.
+"""
 
 import json
 import logging
 import time
 import urllib.request
+import uuid
 from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.leases")
@@ -78,6 +84,16 @@ class LeaseManager:
                 conn.execute("SELECT fence_token FROM leases LIMIT 1")
             except Exception:
                 conn.execute("ALTER TABLE leases ADD COLUMN fence_token INTEGER NOT NULL DEFAULT 0")
+            # Migration: add provisional lease columns
+            for col, typedef in [
+                ("provisional", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("reconciled_at", "REAL DEFAULT NULL"),
+                ("partition_id", "TEXT DEFAULT NULL"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM leases LIMIT 1")
+                except Exception:
+                    conn.execute(f"ALTER TABLE leases ADD COLUMN {col} {typedef}")
 
     def _expires_at(self, row) -> float:
         """Calculate expiry time from a lease row."""
@@ -96,6 +112,9 @@ class LeaseManager:
         d["expires_at"] = self._expires_at(row)
         d["active"] = self._is_active(row)
         d["fence_token"] = d.get("fence_token", 0)
+        d["provisional"] = bool(d.get("provisional", 0))
+        d["reconciled_at"] = d.get("reconciled_at")
+        d["partition_id"] = d.get("partition_id")
         if d["metadata"]:
             try:
                 d["metadata"] = json.loads(d["metadata"])
@@ -158,12 +177,14 @@ class LeaseManager:
 
         # Non-chief: try chief coordination first
         local_only = False
+        partition_id = None
         if not self._is_chief and self._chief_node_id:
             chief_resp = self._request_from_chief(resource_id, lease_type, metadata)
             if chief_resp is None:
-                # Chief unreachable — fall through to local acquire with warning
+                # Chief unreachable — fall through to local acquire with provisional flag
                 local_only = True
-                logger.warning(f"Chief unreachable, local-only acquire for {resource_id}")
+                partition_id = f"part-{uuid.uuid4().hex[:8]}"
+                logger.warning(f"Chief unreachable, provisional acquire for {resource_id} (partition={partition_id})")
 
         now = time.time()
         conn = self._get_conn()
@@ -212,11 +233,15 @@ class LeaseManager:
 
             # Available (no lease, expired, or released) — acquire it
             meta_json = json.dumps(metadata) if metadata else None
+            provisional = 1 if local_only else 0
             conn.execute(
                 """INSERT OR REPLACE INTO leases
-                   (resource_id, node_id, lease_type, acquired_at, ttl_seconds, renewed_at, released_at, metadata, fence_token)
-                   VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)""",
-                (resource_id, self._node_id, lease_type, now, ttl, meta_json, next_fence),
+                   (resource_id, node_id, lease_type, acquired_at, ttl_seconds,
+                    renewed_at, released_at, metadata, fence_token,
+                    provisional, reconciled_at, partition_id)
+                   VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL, ?)""",
+                (resource_id, self._node_id, lease_type, now, ttl, meta_json,
+                 next_fence, provisional, partition_id),
             )
             conn.commit()
         except Exception:
@@ -225,10 +250,12 @@ class LeaseManager:
 
         self._stats["acquired"] += 1
         expires = now + ttl
-        logger.info(f"Lease acquired: {resource_id} by {self._node_id} ({lease_type}, ttl={ttl}s, fence={next_fence})")
+        logger.info(f"Lease acquired: {resource_id} by {self._node_id} ({lease_type}, ttl={ttl}s, fence={next_fence}, provisional={local_only})")
         result = {"acquired": True, "holder": self._node_id, "expires_at": expires, "fence_token": next_fence}
         if local_only:
             result["_local_only"] = True
+            result["provisional"] = True
+            result["partition_id"] = partition_id
         return result
 
     def renew(self, resource_id: str) -> dict:
@@ -324,6 +351,185 @@ class LeaseManager:
                     "reason": f"lease held by {holder}, not {self._node_id}"}
 
         return {"valid": True, "current_fence": current_fence, "holder": holder}
+
+    def list_provisional(self, node_id: str = None) -> list:
+        """List all active provisional leases (acquired during partition).
+
+        Args:
+            node_id: If provided, filter to this node's provisionals only.
+
+        Returns:
+            List of lease dicts where provisional=True and still active.
+        """
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM leases WHERE provisional = 1 AND released_at IS NULL AND reconciled_at IS NULL"
+        ).fetchall()
+        now = time.time()
+        result = []
+        for row in rows:
+            base = row["renewed_at"] if row["renewed_at"] else row["acquired_at"]
+            if now >= base + row["ttl_seconds"]:
+                continue  # expired
+            if node_id and row["node_id"] != node_id:
+                continue
+            result.append(self._row_to_dict(row))
+        return result
+
+    def reconcile(self, provisional_leases: list) -> list:
+        """Reconcile provisional leases against chief's authoritative state.
+
+        Called by the chief when a worker sends its provisional leases after
+        partition heals. For each provisional lease:
+        - No chief lease exists for resource -> ACCEPT (promote to authoritative)
+        - Chief lease has HIGHER fence_token -> REJECT (chief wins)
+        - Chief lease has LOWER fence_token -> CONFLICT (needs human arbitration)
+
+        Args:
+            provisional_leases: List of dicts with at minimum:
+                resource_id, node_id, fence_token, partition_id
+
+        Returns:
+            List of verdict dicts: {"resource_id", "verdict", "reason", ...}
+            verdict is one of: "accepted", "rejected", "conflict"
+        """
+        if not self._is_chief:
+            return [{"resource_id": p.get("resource_id", "?"), "verdict": "error",
+                      "reason": "reconcile must be called on chief node"}
+                    for p in provisional_leases]
+
+        now = time.time()
+        conn = self._get_conn()
+        verdicts = []
+
+        for prov in provisional_leases:
+            rid = prov.get("resource_id", "")
+            prov_node = prov.get("node_id", "")
+            prov_fence = prov.get("fence_token", 0)
+            prov_partition = prov.get("partition_id", "")
+
+            row = conn.execute("SELECT * FROM leases WHERE resource_id = ?", (rid,)).fetchone()
+
+            if not row or not self._is_active(row):
+                # No active chief lease — accept the provisional
+                meta_json = json.dumps(prov.get("metadata")) if prov.get("metadata") else None
+                ttl = LEASE_TTLS.get(prov.get("lease_type", "short_task"), 60)
+                # Promote: write authoritative lease with next fence token
+                max_fence_row = conn.execute(
+                    "SELECT COALESCE(MAX(fence_token), 0) as max_ft FROM leases WHERE resource_id = ?",
+                    (rid,),
+                ).fetchone()
+                next_fence = (max_fence_row["max_ft"] if max_fence_row else 0) + 1
+                conn.execute(
+                    """INSERT OR REPLACE INTO leases
+                       (resource_id, node_id, lease_type, acquired_at, ttl_seconds,
+                        renewed_at, released_at, metadata, fence_token,
+                        provisional, reconciled_at, partition_id)
+                       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, 0, ?, ?)""",
+                    (rid, prov_node, prov.get("lease_type", "short_task"), now, ttl,
+                     meta_json, next_fence, now, prov_partition),
+                )
+                conn.commit()
+                verdicts.append({
+                    "resource_id": rid,
+                    "verdict": "accepted",
+                    "node_id": prov_node,
+                    "fence_token": next_fence,
+                    "reason": "no active chief lease — provisional promoted",
+                })
+                logger.info(f"Reconcile ACCEPT: {rid} from {prov_node} (partition={prov_partition})")
+
+            elif row["fence_token"] > prov_fence:
+                # Chief has higher fence — chief wins, reject provisional
+                verdicts.append({
+                    "resource_id": rid,
+                    "verdict": "rejected",
+                    "node_id": prov_node,
+                    "chief_holder": row["node_id"],
+                    "chief_fence": row["fence_token"],
+                    "provisional_fence": prov_fence,
+                    "reason": f"chief fence_token {row['fence_token']} > provisional {prov_fence}",
+                })
+                logger.info(f"Reconcile REJECT: {rid} from {prov_node} — chief fence wins")
+
+            elif row["fence_token"] < prov_fence:
+                # Provisional has higher fence — conflict (shouldn't happen in normal ops)
+                verdicts.append({
+                    "resource_id": rid,
+                    "verdict": "conflict",
+                    "node_id": prov_node,
+                    "chief_holder": row["node_id"],
+                    "chief_fence": row["fence_token"],
+                    "provisional_fence": prov_fence,
+                    "partition_id": prov_partition,
+                    "reason": f"provisional fence_token {prov_fence} > chief {row['fence_token']} — needs arbitration",
+                })
+                logger.warning(f"Reconcile CONFLICT: {rid} — provisional fence > chief fence, needs arbiter")
+
+            else:
+                # Equal fence tokens — same resource, same generation
+                if row["node_id"] == prov_node:
+                    # Same holder — idempotent, accept
+                    verdicts.append({
+                        "resource_id": rid,
+                        "verdict": "accepted",
+                        "node_id": prov_node,
+                        "fence_token": row["fence_token"],
+                        "reason": "same holder and fence — already authoritative",
+                    })
+                else:
+                    # Different holders, same fence — true split-brain conflict
+                    verdicts.append({
+                        "resource_id": rid,
+                        "verdict": "conflict",
+                        "node_id": prov_node,
+                        "chief_holder": row["node_id"],
+                        "chief_fence": row["fence_token"],
+                        "provisional_fence": prov_fence,
+                        "partition_id": prov_partition,
+                        "reason": f"split-brain: both acquired fence {prov_fence} — needs arbitration",
+                    })
+                    logger.warning(f"Reconcile CONFLICT (split-brain): {rid} — {row['node_id']} vs {prov_node}")
+
+        return verdicts
+
+    def resolve_conflict(self, resource_id: str, winning_node: str) -> dict:
+        """Resolve a lease conflict by choosing the winning node.
+
+        Called by the arbiter (human or automated) to resolve conflicts
+        surfaced during reconciliation.
+
+        Args:
+            resource_id: The contested resource.
+            winning_node: The node that should hold the lease.
+
+        Returns:
+            {"resolved": bool, "holder": str, "fence_token": int, "reason": str}
+        """
+        conn = self._get_conn()
+        now = time.time()
+
+        # Get current state
+        row = conn.execute("SELECT * FROM leases WHERE resource_id = ?", (resource_id,)).fetchone()
+        if not row:
+            return {"resolved": False, "holder": "", "fence_token": 0,
+                    "reason": "no lease found for resource"}
+
+        # Bump fence token to invalidate any stale tokens from the conflict
+        max_fence_row = conn.execute(
+            "SELECT COALESCE(MAX(fence_token), 0) as max_ft FROM leases WHERE resource_id = ?",
+            (resource_id,),
+        ).fetchone()
+        next_fence = (max_fence_row["max_ft"] if max_fence_row else 0) + 1
+
+        conn.execute(
+            """UPDATE leases SET node_id = ?, fence_token = ?, provisional = 0,
+               reconciled_at = ?, renewed_at = ? WHERE resource_id = ?""",
+            (winning_node, next_fence, now, now, resource_id),
+        )
+        conn.commit()
+        logger.info(f"Conflict resolved: {resource_id} → {winning_node} (fence={next_fence})")
+        return {"resolved": True, "holder": winning_node, "fence_token": next_fence}
 
     def list_active(self, node_id: str = None) -> list:
         """List all active (non-expired, non-released) leases.

@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import socket
+import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -158,6 +159,7 @@ def _load_from_json(path: Path) -> Tuple[dict, Optional[str]]:
             "port": node.get("port", 8855),
             "role": node.get("role", "worker"),
             "mac_address": node.get("mac_address", ""),
+            "tailscale_ip": node.get("tailscale_ip", ""),
         }
 
     return peers, chief
@@ -187,3 +189,57 @@ def _load_from_shell(path: Path) -> Tuple[dict, Optional[str]]:
         chief = chief_match.group(1)
 
     return peers, chief
+
+
+def is_tailscale_available() -> bool:
+    """Check if Tailscale is running on this machine."""
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout)
+        return data.get("BackendState") == "Running"
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        logger.debug("Tailscale availability check failed: %s", e)
+        return False
+
+
+def resolve_tailscale_ip(peer_config: dict, peer_name: str = "") -> Optional[str]:
+    """Resolve Tailscale IP for a peer.
+
+    Priority:
+    1. Static config field 'tailscale_ip' (from .multifleet/config.json)
+    2. Dynamic lookup via 'tailscale status --json' matching peer hostname
+
+    Returns the Tailscale IP string, or None if unavailable.
+    """
+    # 1. Static config
+    static_ip = peer_config.get("tailscale_ip", "")
+    if static_ip:
+        return static_ip
+
+    # 2. Dynamic fallback — search tailscale status for peer hostname
+    if not peer_name:
+        return None
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        for _node_key, node_info in data.get("Peer", {}).items():
+            # Match by hostname (case-insensitive, strip trailing dot)
+            ts_hostname = node_info.get("HostName", "").lower().rstrip(".")
+            if ts_hostname == peer_name.lower():
+                addrs = node_info.get("TailscaleIPs", [])
+                if addrs:
+                    return addrs[0]  # prefer first (IPv4 typically)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        logger.debug("Tailscale IP resolution failed for %s: %s", peer_name, e)
+
+    return None
