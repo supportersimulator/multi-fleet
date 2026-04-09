@@ -158,6 +158,21 @@ _ACCEPTANCE_EVENTS = [
               ("task_id", "blocking_issues")),
 ]
 
+# ── Superpowers Workflow Events (Wire 5: workflow-fleet coordination) ──
+_SUPERPOWERS_EVENTS = [
+    EventType("superpowers.phase_changed", "superpowers",
+              "Workflow phase transitioned",
+              ("old_phase", "new_phase", "source"),
+              ("queued_races",)),
+    EventType("superpowers.race_blocked", "superpowers",
+              "Race dispatch blocked by workflow phase",
+              ("phase", "task"),
+              ("queued",)),
+    EventType("superpowers.race_released", "superpowers",
+              "Queued races released after phase transition",
+              ("phase", "count")),
+]
+
 # ══════════════════════════════════════════════════════════════
 # Master registry
 # ══════════════════════════════════════════════════════════════
@@ -167,6 +182,7 @@ for _group in [
     _SCAN_EVENTS, _SUPERVISOR_EVENTS, _PEER_EVENTS, _LEASE_EVENTS,
     _HEALTH_EVENTS, _MESSAGE_EVENTS, _RACE_EVENTS, _EVIDENCE_EVENTS,
     _TRUTH_EVENTS, _REBUTTAL_EVENTS, _ACCEPTANCE_EVENTS,
+    _SUPERPOWERS_EVENTS,
 ]:
     for evt in _group:
         EVENTS[evt.name] = evt

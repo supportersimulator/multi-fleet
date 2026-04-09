@@ -1,7 +1,8 @@
 """Tests for ContextDNA Code Scanner (GhostScan Probe Engine).
 
-Covers: ProbeEngine, probe_contract dataclasses, mirror_drift probe,
-hidden_dependency probe, blast_radius probe, and evidence bridge.
+DEPRECATED: code_scanner has been merged into the unified probes/ system.
+These tests are skipped if code_scanner is not available.
+See test_probes_unified.py for current probe tests.
 """
 
 import json
@@ -12,9 +13,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from multifleet.code_scanner import ProbeEngine, create_engine
-from multifleet.code_scanner.probe_contract import Finding, ProbeContext, ProbeResult
-from multifleet.code_scanner.evidence_bridge import ProbeEvidenceBridge
+try:
+    from multifleet.code_scanner import ProbeEngine, create_engine
+    from multifleet.code_scanner.probe_contract import Finding, ProbeContext, ProbeResult
+    from multifleet.code_scanner.evidence_bridge import ProbeEvidenceBridge
+    _HAS_CODE_SCANNER = True
+except ImportError:
+    _HAS_CODE_SCANNER = False
+
+pytestmark = pytest.mark.skipif(
+    not _HAS_CODE_SCANNER,
+    reason="code_scanner removed — probes unified into multifleet.probes",
+)
 
 
 # ── ProbeContract tests ──

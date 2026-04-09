@@ -247,6 +247,127 @@ class FleetNerveNATS:
         # Session management (injection, detection, notifications)
         self._sessions = SessionManager(self)
 
+        # ── Orphan module wiring (initialized here, connected in serve()) ──
+
+        # Ghost Pulse — background epistemic health monitor
+        self._ghost_pulse = None
+        self._ghost_pulse_counter = 0  # tick every 30th heartbeat (~5 min)
+        try:
+            from .ghost_pulse import GhostPulse
+            self._ghost_pulse = GhostPulse(repo_root=str(REPO_ROOT))
+            logger.info("GhostPulse initialized")
+        except Exception as e:
+            logger.warning(f"GhostPulse init failed: {e}")
+
+        # Ghost Digest — session evidence digestion
+        self._ghost_digest = None
+        try:
+            from .ghost_digest import GhostDigest
+            self._ghost_digest = GhostDigest(node_id=self.node_id)
+            logger.info("GhostDigest initialized")
+        except Exception as e:
+            logger.warning(f"GhostDigest init failed: {e}")
+
+        # Evidence Sync — cross-node evidence sharing (periodic)
+        self._evidence_sync = None
+        self._evidence_sync_counter = 0  # tick every 30th heartbeat (~5 min)
+        try:
+            from .evidence_sync import EvidenceSync
+            self._evidence_sync = EvidenceSync(node_id=self.node_id)
+            logger.info("EvidenceSync initialized")
+        except Exception as e:
+            logger.warning(f"EvidenceSync init failed: {e}")
+
+        # Supervisor Watchdog — detects stalled supervisor phases
+        self._supervisor_watchdog = None
+        try:
+            from .supervisor import Supervisor
+            from .supervisor_watchdog import SupervisorWatchdog
+            supervisor = Supervisor(node_id=self.node_id)
+            self._supervisor_watchdog = SupervisorWatchdog(supervisor)
+            logger.info("SupervisorWatchdog initialized")
+        except Exception as e:
+            logger.warning(f"SupervisorWatchdog init failed: {e}")
+
+        # Dashboard Event Consumer — live state from EventBus (attached in serve())
+        self._dashboard_events = None
+        try:
+            from .dashboard_events import DashboardEventConsumer
+            self._dashboard_events = DashboardEventConsumer()
+            logger.info("DashboardEventConsumer initialized (bus attached in serve())")
+        except Exception as e:
+            logger.warning(f"DashboardEventConsumer init failed: {e}")
+
+        # IDE Bridge — translates fleet events for VS Code
+        self._ide_bridge = None
+        try:
+            from .ide_bridge import IDEBridge
+            self._ide_bridge = IDEBridge()
+            logger.info("IDEBridge initialized")
+        except Exception as e:
+            logger.warning(f"IDEBridge init failed: {e}")
+
+        # Data Layer — centralized SQLite connection pool
+        self._data_layer = None
+        try:
+            from .data_layer import FleetDataLayer
+            self._data_layer = FleetDataLayer()
+            logger.info("FleetDataLayer initialized")
+        except Exception as e:
+            logger.warning(f"FleetDataLayer init failed: {e}")
+
+        # Backup — fleet state snapshots (triggered on shutdown + HTTP)
+        self._backup = None
+        try:
+            from .backup import FleetBackup
+            self._backup = FleetBackup()
+            logger.info("FleetBackup initialized")
+        except Exception as e:
+            logger.warning(f"FleetBackup init failed: {e}")
+
+        # Benchmark — fleet performance measurement (on-demand via HTTP)
+        self._benchmark = None
+        try:
+            from .benchmark import FleetBenchmark
+            self._benchmark = FleetBenchmark()
+            logger.info("FleetBenchmark initialized")
+        except Exception as e:
+            logger.warning(f"FleetBenchmark init failed: {e}")
+
+        # EventBus adapter (publishes fleet.* events to IDE/3-surgeons EventBus)
+        self._eventbus = None
+        try:
+            from .eventbus import FleetEventBus
+            self._eventbus = FleetEventBus(node_id=self.node_id)
+            logger.info("FleetEventBus adapter initialized")
+        except Exception as e:
+            logger.warning(f"EventBus adapter init failed: {e} — IDE events disabled")
+
+        # EventBus WebSocket server (initialized in serve(), None until then)
+        self._event_bus_server = None
+        self._core_event_bus = None
+
+        # Task Orchestrator — unified lifecycle from idea to wisdom
+        self._task_orchestrator = None
+        try:
+            from .task_orchestrator import TaskOrchestrator
+            self._task_orchestrator = TaskOrchestrator(
+                daemon_port=self._http_port if hasattr(self, '_http_port') else 8855,
+                node_id=self.node_id,
+            )
+            logger.info("TaskOrchestrator initialized")
+        except Exception as e:
+            logger.warning(f"TaskOrchestrator init failed: {e}")
+
+        # Chief Synthesis — aggregates verdicts and produces merge decisions
+        self._chief_synthesis = None
+        try:
+            from .synthesis import ChiefSynthesis
+            self._chief_synthesis = ChiefSynthesis()
+            logger.info("ChiefSynthesis initialized")
+        except Exception as e:
+            logger.warning(f"ChiefSynthesis init failed: {e}")
+
     async def connect(self):
         """Connect to NATS server(s) with auto-reconnect and cluster failover.
 
@@ -1578,8 +1699,8 @@ class FleetNerveNATS:
                 daemon_port=self._http_port if hasattr(self, '_http_port') else 8855,
                 node_id=self.node_id,
             )
-            if hasattr(self, '_event_bus') and self._event_bus:
-                self._health_monitor.wire_eventbus(self._event_bus)
+            if self._eventbus:
+                self._health_monitor.wire_eventbus(self._eventbus)
             self._health_monitor.start_background()
             logger.info("Fleet health monitor started (interval=30s)")
         except Exception as e:
@@ -1591,13 +1712,71 @@ class FleetNerveNATS:
             from .evidence_ledger import EvidenceLedger
             self._memory_bridge = MemoryBridge(
                 evidence_ledger=EvidenceLedger(),
-                eventbus=self._event_bus if hasattr(self, '_event_bus') else None,
+                eventbus=self._eventbus,
             )
             asyncio.create_task(self._memory_promotion_loop())
             logger.info("Memory bridge started (promotion every ~100s)")
         except Exception as e:
             logger.warning("Memory bridge failed to start: %s", e)
             self._memory_bridge = None
+
+        # Start EventBus WebSocket server (port 8031) — bridges fleet/IDE events
+        try:
+            from .event_bus_server import EventBus as CoreEventBus, EventBusServer
+            self._core_event_bus = CoreEventBus()
+            self._event_bus_server = EventBusServer(self._core_event_bus)
+            await self._event_bus_server.start_background()
+            # Wire FleetEventBus adapter to use in-process bus (faster than HTTP POST)
+            if self._eventbus is not None:
+                self._eventbus.set_core_bus(self._core_event_bus)
+            logger.info("EventBus WebSocket server started on :8031")
+
+            # Wire DashboardEventConsumer to core bus for live state
+            if self._dashboard_events and self._core_event_bus:
+                try:
+                    self._dashboard_events.attach(self._core_event_bus)
+                    logger.info("DashboardEventConsumer attached to EventBus")
+                except Exception as e:
+                    logger.warning(f"DashboardEventConsumer attach failed: {e}")
+
+            # Wire IDEBridge as EventBus consumer for VS Code notifications
+            if self._ide_bridge and self._core_event_bus:
+                try:
+                    self._core_event_bus.on("fleet.*", lambda evt: self._ide_bridge.translate_event(
+                        evt.get("type", "unknown"), evt,
+                    ))
+                    logger.info("IDEBridge attached to EventBus")
+                except Exception as e:
+                    logger.warning(f"IDEBridge EventBus attach failed: {e}")
+
+        except Exception as e:
+            logger.warning(f"EventBus WebSocket server failed to start: {e} — IDE events via JSONL only")
+            self._core_event_bus = None
+            self._event_bus_server = None
+
+        # Wire HealthMonitor into TaskOrchestrator (health-aware task scheduling)
+        if self._task_orchestrator and hasattr(self, '_health_monitor'):
+            try:
+                self._task_orchestrator._health_monitor = self._health_monitor
+                logger.info("HealthMonitor wired into TaskOrchestrator")
+            except Exception as e:
+                logger.warning(f"HealthMonitor→TaskOrchestrator wiring failed: {e}")
+
+        # Wire EvidenceSync into TaskOrchestrator (evidence sharing after task completion)
+        if self._task_orchestrator and self._evidence_sync:
+            try:
+                self._task_orchestrator._evidence_sync = self._evidence_sync
+                logger.info("EvidenceSync wired into TaskOrchestrator")
+            except Exception as e:
+                logger.warning(f"EvidenceSync→TaskOrchestrator wiring failed: {e}")
+
+        # Wire ChiefSynthesis into TaskOrchestrator (verdict aggregation)
+        if self._task_orchestrator and self._chief_synthesis:
+            try:
+                self._task_orchestrator._chief_synthesis = self._chief_synthesis
+                logger.info("ChiefSynthesis wired into TaskOrchestrator")
+            except Exception as e:
+                logger.warning(f"ChiefSynthesis→TaskOrchestrator wiring failed: {e}")
 
         # Keep running
         try:
@@ -1606,6 +1785,19 @@ class FleetNerveNATS:
         except KeyboardInterrupt:
             pass
         finally:
+            # Shutdown hooks: backup state, close data layer, then NATS
+            if self._backup:
+                try:
+                    snapshot_path = self._backup.create_snapshot()
+                    logger.info(f"Shutdown backup created: {snapshot_path}")
+                except Exception as e:
+                    logger.warning(f"Shutdown backup failed: {e}")
+            if self._data_layer:
+                try:
+                    self._data_layer.close_all()
+                    logger.info("FleetDataLayer connections closed")
+                except Exception as e:
+                    logger.warning(f"FleetDataLayer close failed: {e}")
             await self.nc.close()
 
     async def _start_http_compat(self):

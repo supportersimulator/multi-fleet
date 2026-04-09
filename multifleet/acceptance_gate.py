@@ -217,20 +217,33 @@ class AcceptanceGate:
                         if f.blast_radius == "high":
                             blocking.append(f"Blocking probe: {f.title}")
 
-        # Check 2: Surgeon resolution — verify via adapter, never trust caller alone
+        # Check 2: Surgeon resolution — verify via adapter, NEVER trust caller alone.
+        # The validate_acceptance() path replaces the old pattern where callers
+        # could pass surgeon_resolved=True without any actual surgeon involvement.
         if surgeon_intensity in ("standard", "full"):
             if self._surgeon.is_available():
-                claim = f"Task acceptance check (intensity={surgeon_intensity})"
-                consensus = self._surgeon.check_consensus(claim)
-                surgeon_resolved = consensus.get("resolved", False)
-                surgeon_dissent_count = len(consensus.get("dissent", []))
+                validation = self._surgeon.validate_acceptance(
+                    task_id=f"keyword-eval-{int(time.time())}",
+                    result={
+                        "claim": f"Task acceptance check (intensity={surgeon_intensity})",
+                        "evidence": epistemic_packet or {},
+                    },
+                )
+                surgeon_resolved = validation.get("surgeon_resolved", False)
+                surgeon_dissent_count = validation.get("dissent_count", 0)
                 logger.info(
-                    "Surgeon adapter: resolved=%s confidence=%.2f dissents=%d source=%s",
-                    surgeon_resolved, consensus.get("confidence", 0.0),
-                    surgeon_dissent_count, consensus.get("source", "?"),
+                    "Surgeon validate_acceptance: resolved=%s confidence=%.2f "
+                    "dissents=%d source=%s consulted=%s",
+                    surgeon_resolved, validation.get("confidence", 0.0),
+                    surgeon_dissent_count, validation.get("source", "?"),
+                    validation.get("surgeons_consulted", []),
                 )
             else:
-                logger.warning("Surgeon adapter unavailable — using caller-provided state")
+                # Bridge unavailable: degrade but log warning (Zero Silent Failures)
+                logger.warning(
+                    "Surgeon adapter unavailable — caller-provided surgeon_resolved=%s "
+                    "accepted with DEGRADED confidence", surgeon_resolved,
+                )
             if not surgeon_resolved:
                 blocking.append(f"Surgeon review required ({surgeon_intensity}) but not resolved")
 

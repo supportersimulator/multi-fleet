@@ -53,6 +53,7 @@ class FleetEventBus:
         self._eventbus_available: Optional[bool] = None  # None = unknown
         self._last_availability_check: float = 0.0
         self._core_bus = None  # In-process EventBus (set by daemon when co-located)
+        self._admin_feed = None  # AdminFeed (set by daemon for admin panel)
         self._stats = {
             "emitted": 0,
             "eventbus_delivered": 0,
@@ -68,6 +69,14 @@ class FleetEventBus:
         """
         self._core_bus = core_bus
         logger.info("FleetEventBus: using in-process EventBus (direct emit)")
+
+    def set_admin_feed(self, admin_feed) -> None:
+        """Inject AdminFeed for admin panel event consumption.
+
+        Called by the daemon to wire fleet events into the admin feed.
+        """
+        self._admin_feed = admin_feed
+        logger.info("FleetEventBus: admin feed attached")
 
     # ── Core emit ──
 
@@ -118,6 +127,13 @@ class FleetEventBus:
 
         if not recorded:
             self._stats["errors"] += 1
+
+        # Record to admin feed (best-effort)
+        if self._admin_feed is not None:
+            try:
+                self._admin_feed.record_from_envelope(event)
+            except Exception:
+                pass  # Admin feed is non-critical
 
         # Broadcast important events to fleet
         should_broadcast = broadcast or event_type in _BROADCAST_EVENT_TYPES

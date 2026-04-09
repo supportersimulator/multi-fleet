@@ -65,6 +65,25 @@ class FleetRace:
         Returns:
             Race state dict with race_id, participants, status, timestamps.
         """
+        # Wire 5: Check superpowers workflow phase before dispatching
+        try:
+            from multifleet.superpowers_adapter import get_adapter
+            adapter = get_adapter()
+            can_dispatch, reason = adapter.can_dispatch_race()
+            if not can_dispatch:
+                logger.info("Race dispatch blocked: %s", reason)
+                adapter.queue_race({"task": task, "nodes": nodes,
+                                    "branch_prefix": branch_prefix,
+                                    "timeout_s": timeout_s})
+                return {
+                    "race_id": None,
+                    "status": "blocked_by_workflow",
+                    "reason": reason,
+                    "queued": True,
+                }
+        except ImportError:
+            pass  # Superpowers adapter not available — proceed normally
+
         race_id = str(uuid.uuid4())[:8]
         now = time.time()
 

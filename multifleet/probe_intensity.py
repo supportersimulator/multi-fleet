@@ -26,8 +26,7 @@ def determine_intensity(
 ) -> str:
     """Map probe results to surgeon intensity level.
 
-    Works with both code_scanner.ProbeResult and probe_engine.ProbeResult,
-    as well as plain dicts.
+    Works with probe_engine.ProbeResult objects as well as plain dicts.
 
     Args:
         probe_results: List of ProbeResult objects or dicts.
