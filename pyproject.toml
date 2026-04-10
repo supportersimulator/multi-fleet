@@ -55,6 +55,9 @@ Documentation = "https://contextdna.dev/multifleet/docs"
 [tool.hatch.build.targets.wheel]
 packages = ["multifleet"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"bin/fleet_nerve_mcp.py" = "multifleet/_mcp_server.py"
+
 [tool.hatch.build.targets.sdist]
 exclude = [
     ".multifleet/",
