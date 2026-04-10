@@ -54,3 +54,23 @@ Documentation = "https://contextdna.dev/multifleet/docs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["multifleet"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".multifleet/",
+    ".fleet-messages/",
+    "evidence.db",
+    "*.db",
+    ".venv*/",
+    "venv*/",
+    "__pycache__/",
+    "*.pyc",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "dist/",
+    "build/",
+    "*.egg-info",
+    ".git/",
+    ".DS_Store",
+]

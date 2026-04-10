@@ -5,11 +5,14 @@
 # <xbar.desc>Multi-fleet daemon status — nodes, channels, tasks</xbar.desc>
 # <xbar.dependencies>python3</xbar.dependencies>
 # <xbar.var>string(DAEMON_URL="http://127.0.0.1:8855"): Fleet daemon URL</xbar.var>
+# <xbar.var>string(REPO=""): Path to your multi-fleet repo (leave blank to auto-detect from MULTIFLEET_REPO env var)</xbar.var>
 import json
+import os
 from urllib.request import urlopen, Request
 
 DAEMON_URL = "http://127.0.0.1:8855"
-TIMEOUT, REPO = 4, "/Users/<user>/dev/er-simulator-superrepo"
+TIMEOUT = 4
+REPO = os.environ.get("MULTIFLEET_REPO") or os.path.expanduser("~/multi-fleet")
 
 def fetch_health():
     try:

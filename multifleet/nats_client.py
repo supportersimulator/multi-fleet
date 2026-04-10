@@ -576,7 +576,7 @@ class FleetNerveNATS:
                         # SSH repair attempt
                         peer = self._resolve_peer(reporter)
                         ip = peer.get("ip")
-                        user = peer.get("user", "<user>")
+                        user = peer.get("user") or os.environ.get("USER", "")
                         if ip:
                             asyncio.create_task(self._ssh_repair_peer(ip, user, action))
                     # else: between first notification and 2min -- silent wait
