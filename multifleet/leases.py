@@ -7,6 +7,7 @@ are reconciled against the chief's authoritative state.
 
 import json
 import logging
+import sqlite3
 import time
 import urllib.request
 import uuid
@@ -79,21 +80,27 @@ class LeaseManager:
                     fence_token INTEGER NOT NULL DEFAULT 0
                 )
             """)
-            # Migration: add fence_token if table already existed without it
-            try:
-                conn.execute("SELECT fence_token FROM leases LIMIT 1")
-            except Exception:
-                conn.execute("ALTER TABLE leases ADD COLUMN fence_token INTEGER NOT NULL DEFAULT 0")
+            # Migration: add fence_token if table already existed without it.
+            # Use PRAGMA + idempotent ALTER to avoid races with concurrent migrations.
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(leases)").fetchall()}
+            if "fence_token" not in existing_cols:
+                try:
+                    conn.execute("ALTER TABLE leases ADD COLUMN fence_token INTEGER NOT NULL DEFAULT 0")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
             # Migration: add provisional lease columns
             for col, typedef in [
                 ("provisional", "BOOLEAN NOT NULL DEFAULT 0"),
                 ("reconciled_at", "REAL DEFAULT NULL"),
                 ("partition_id", "TEXT DEFAULT NULL"),
             ]:
-                try:
-                    conn.execute(f"SELECT {col} FROM leases LIMIT 1")
-                except Exception:
-                    conn.execute(f"ALTER TABLE leases ADD COLUMN {col} {typedef}")
+                if col not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE leases ADD COLUMN {col} {typedef}")
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column" not in str(e).lower():
+                            raise
 
     def _expires_at(self, row) -> float:
         """Calculate expiry time from a lease row."""

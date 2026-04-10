@@ -25,6 +25,15 @@ def _mock_post(path, body, **kw):
     return {"sent": True}
 
 
+@pytest.fixture(autouse=True)
+def _block_superset_discovery():
+    """Block Superset primary discovery so tests use daemon /health fallback."""
+    mock_bridge = MagicMock()
+    mock_bridge.list_devices.side_effect = RuntimeError("Superset disabled in tests")
+    with patch("multifleet.superset_bridge.SupersetBridge", return_value=mock_bridge):
+        yield
+
+
 @pytest.fixture
 def race():
     """FleetRace with mocked HTTP to prevent real daemon calls."""

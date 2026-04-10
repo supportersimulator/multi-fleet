@@ -13,12 +13,9 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("fleet-nerve.professor-bridge")
 
-# Memory module path — use _paths if available, don't pollute sys.path
-try:
-    from ._paths import REPO_ROOT as _REPO_ROOT_PATH
-    _REPO_ROOT = str(_REPO_ROOT_PATH)
-except ImportError:
-    _REPO_ROOT = str(Path(__file__).parent.parent.parent)
+# Memory module path — use _paths module, don't pollute sys.path
+from ._paths import REPO_ROOT as _REPO_ROOT_PATH
+_REPO_ROOT = str(_REPO_ROOT_PATH)
 
 
 @dataclass
