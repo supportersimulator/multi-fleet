@@ -221,3 +221,113 @@ class TestSynthesisIntegration:
         cherry_picks = race["synthesis"].get("cherry_pick_from", [])
         if cherry_picks:
             assert any(cp["machine"] == "mac2" for cp in cherry_picks)
+
+
+class TestCherryPickAutoExecute:
+    """auto_execute_cherry_pick flag wires MergeAdjudicator into run_race."""
+
+    def test_auto_execute_off_by_default(self):
+        """No adjudication key in result unless flag is set."""
+        with patch("multifleet.race_orchestrator._daemon_post") as mp, \
+             patch("multifleet.race_orchestrator._daemon_get") as mg:
+            mp.return_value = {"sent": True}
+            mg.return_value = None
+            result = run_race("t", nodes=["mac1"], timeout_s=1, poll_interval_s=0.1)
+        assert "adjudication" not in result
+
+    def test_auto_execute_skips_non_cherry_pick_decisions(self):
+        """When synthesis decides 'merge', adjudication is NOT run."""
+        with patch("multifleet.race_orchestrator._daemon_post") as mp, \
+             patch("multifleet.race_orchestrator._daemon_get") as mg:
+            mp.return_value = {"sent": True}
+            mg.return_value = None
+            result = run_race(
+                "t", nodes=["mac1"],
+                timeout_s=1, poll_interval_s=0.1,
+                auto_execute_cherry_pick=True,
+                repo_path="/tmp",
+            )
+        # No verdicts collected -> synthesis_result may be None or
+        # decision=="reject"/"merge" — either way, no adjudication fires
+        adj = result.get("adjudication")
+        if adj is not None:
+            assert adj["status"] != "ok"  # could be "skipped" or "error"
+
+    def test_auto_execute_runs_adjudicator_on_cherry_pick(self, tmp_path):
+        """Force a cherry_pick decision into a real git repo and verify
+        adjudication runs end-to-end through run_race's wiring."""
+        import subprocess as sp
+        from unittest.mock import MagicMock
+
+        # Build a minimal git repo with a winner + one cherry source
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        def run(*a): sp.run(a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        run("git", "config", "commit.gpgsign", "false")
+        (repo / "f.txt").write_text("base\n")
+        run("git", "add", ".")
+        run("git", "commit", "-q", "-m", "base")
+        run("git", "checkout", "-q", "-b", "feat-a")
+        (repo / "a.txt").write_text("a\n")
+        run("git", "add", ".")
+        run("git", "commit", "-q", "-m", "add a")
+        a_commit = sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        run("git", "checkout", "-q", "main")
+        run("git", "checkout", "-q", "-b", "winner")
+
+        # Stub the chief to return a pre-baked cherry_pick synthesis
+        from multifleet.synthesis import SynthesisResult
+
+        fake_result = SynthesisResult(
+            task_id="t",
+            decision="cherry_pick",
+            winner_branch="winner",
+            confidence=0.9,
+            reasoning="test",
+            cherry_pick_from=[{"machine": "mac2", "commit": a_commit, "reason": "x"}],
+        )
+
+        with patch("multifleet.race_orchestrator._daemon_post") as mp, \
+             patch("multifleet.race_orchestrator._daemon_get") as mg, \
+             patch("multifleet.race_orchestrator.ChiefSynthesis") as MockChief:
+            mp.return_value = {"sent": True}
+            mg.return_value = None
+
+            # Configure the mocked chief instance
+            chief_instance = MagicMock()
+            chief_instance.synthesize.return_value = fake_result
+            chief_instance._evidence_ledger = None
+            MockChief.return_value = chief_instance
+
+            # Seed a verdict into the rebuttal session so synthesize() is reached
+            from multifleet.cross_rebuttal import RebuttalManager
+            with patch.object(RebuttalManager, "start_session") as mock_start:
+                sess = MagicMock()
+                sess.task_id = "t"
+                sess.verdicts = {"mac1": {"summary": "x", "confidence": 0.9}}
+                sess.critiques = {}
+                sess.phase = MagicMock(value="done")
+                mock_start.return_value = sess
+                with patch.object(RebuttalManager, "advance_session"):
+                    with patch.object(RebuttalManager, "handle_incoming_packet"):
+                        result = run_race(
+                            "t", nodes=["mac1"],
+                            timeout_s=1, poll_interval_s=0.1,
+                            auto_execute_cherry_pick=True,
+                            repo_path=str(repo),
+                        )
+
+        # Adjudication should have run and applied the cherry
+        adj = result.get("adjudication")
+        assert adj is not None, f"adjudication missing: keys={list(result.keys())}"
+        assert adj["status"] == "ok", f"expected ok, got {adj}"
+        assert len(adj["applied"]) == 1
+        assert adj["applied"][0]["commit"] == a_commit
+        # a.txt should now exist on the winner branch
+        assert (repo / "a.txt").is_file()

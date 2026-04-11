@@ -54,14 +54,28 @@ def run_race(
     timeout_s: int = 600,
     poll_interval_s: int = 10,
     deadline_minutes: int = 30,
+    auto_execute_cherry_pick: bool = False,
+    repo_path: Optional[str] = None,
 ) -> dict:
     """Run a complete race: dispatch → collect → debate → synthesize.
 
     This is the orchestrator that wires RebuttalManager and ChiefSynthesis
     into a single blocking pipeline.
 
+    Args:
+        prompt: Task description to dispatch to nodes.
+        nodes: List of node IDs participating (default: mac1/mac2/mac3).
+        timeout_s: Total deadline for the race.
+        poll_interval_s: Verdict poll cadence.
+        deadline_minutes: Rebuttal session auto-expire.
+        auto_execute_cherry_pick: When True and synthesis decides cherry_pick,
+            run MergeAdjudicator to actually apply the cherries via git. Off
+            by default since races may run in non-git contexts.
+        repo_path: Git repo to apply cherry-picks to. Defaults to CWD when
+            auto_execute_cherry_pick is True.
+
     Returns dict with: status, decision, winner, verdicts, critiques,
-    synthesis, elapsed_s, rebuttal_session
+    synthesis, elapsed_s, rebuttal_session, [adjudication]
     """
     if nodes is None:
         nodes = ["mac1", "mac2", "mac3"]
@@ -215,6 +229,28 @@ def run_race(
         result["dissent_preserved"] = synthesis_result.dissent_preserved
         result["followups"] = synthesis_result.followups
         result["synthesis"] = synthesis_result.to_chief_decision()
+
+        # Optional: execute cherry-picks via MergeAdjudicator
+        if auto_execute_cherry_pick and synthesis_result.decision == "cherry_pick":
+            try:
+                from multifleet.merge_adjudicator import MergeAdjudicator
+                import os as _os
+                adj = MergeAdjudicator(
+                    repo_path=repo_path or _os.getcwd(),
+                    evidence_ledger=chief._evidence_ledger,
+                )
+                adjudication = adj.execute(synthesis_result.to_chief_decision())
+                result["adjudication"] = adjudication.to_dict()
+                logger.info(
+                    "Adjudicator: %s — %d applied, %d conflicts, %d failed",
+                    adjudication.status,
+                    len(adjudication.applied),
+                    len(adjudication.conflicts),
+                    len(adjudication.failed),
+                )
+            except Exception as e:
+                logger.warning("MergeAdjudicator execution failed: %s", e)
+                result["adjudication"] = {"status": "error", "error": str(e)}
     else:
         result["decision"] = "needs_human"
         result["winner"] = None
