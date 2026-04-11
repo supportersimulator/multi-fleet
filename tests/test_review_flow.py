@@ -118,6 +118,117 @@ class TestReviewFlowOrchestrator:
         })
         assert flow.stats["critiques_received"] == 1
 
+    def test_full_e2e_cycle_auto_synthesis(self):
+        """End-to-end: task_brief -> verdicts -> critiques -> auto-synthesis -> acceptance.
+
+        Covers the full 4-phase cycle with auto-synthesis triggered when the
+        last critique arrives. The prior test_full_lifecycle deliberately
+        avoided this path; this test exercises it.
+        """
+        flow = self._make_flow()
+
+        # Phase 1: Dispatch task (task_brief)
+        session = flow.start_review(
+            task_id="e2e-full-cycle",
+            assigned_machines=["mac1", "mac2"],
+            task_summary="Fix auth token refresh under concurrent load",
+        )
+        assert session.phase.value == "local_surgery"
+
+        # Phase 2: Both machines submit verdicts
+        flow.submit_verdict("e2e-full-cycle", "mac1", {
+            "summary": "Refactored token cache with TTL-based eviction",
+            "branch": "mac1/fix-auth",
+            "confidence": 0.85,
+            "files_touched": ["src/auth.py"],
+            "strengths": ["Minimal change", "Preserves existing API"],
+        })
+        flow.submit_verdict("e2e-full-cycle", "mac2", {
+            "summary": "Replaced auth library with thread-safe alternative",
+            "branch": "mac2/fix-auth",
+            "confidence": 0.70,
+            "files_touched": ["src/auth.py", "requirements.txt"],
+            "strengths": ["Battle-tested lib"],
+        })
+        # After both verdicts, phase must have auto-advanced
+        status = flow.get_status("e2e-full-cycle")
+        assert status["verdicts"] == 2
+        assert status["phase"] == "under_review"
+
+        # Phase 3: Both machines submit critiques. The SECOND critique
+        # triggers auto-synthesis via `needs_synthesis` flag returned from
+        # RebuttalManager.handle_incoming_packet.
+        flow.submit_critique("e2e-full-cycle", "mac1", {
+            "concern": "New library adds dependency + licensing review",
+            "severity": "medium",
+            "target_machine": "mac2",
+        })
+        auto_result = flow.submit_critique("e2e-full-cycle", "mac2", {
+            "concern": "TTL cache may still leak under burst load",
+            "severity": "low",
+            "target_machine": "mac1",
+        })
+
+        # Phase 4: auto_result should contain the synthesized outcome
+        # (auto-synthesis returns ReviewFlowResult.to_dict())
+        assert isinstance(auto_result, dict), "auto-synthesis must return ReviewFlowResult.to_dict()"
+        assert auto_result["task_id"] == "e2e-full-cycle"
+        assert auto_result["phase"] == "resolved"
+        assert auto_result["synthesis"] is not None
+        assert auto_result["synthesis"]["decision"] in (
+            "merge", "cherry_pick", "needs_rebuttal", "reject"
+        )
+        assert auto_result["synthesis"]["confidence"] > 0
+        assert set(auto_result["machines_participated"]) == {"mac1", "mac2"}
+        assert auto_result["duration_s"] >= 0.0
+
+        # Stats counters advanced correctly across all phases
+        assert flow.stats["reviews_started"] == 1
+        assert flow.stats["verdicts_received"] == 2
+        assert flow.stats["critiques_received"] == 2
+        assert flow.stats["syntheses_run"] == 1
+        # Acceptance gate ran (accepted OR blocked, but NOT errored)
+        assert flow.stats["errors"] == 0
+
+        # get_status now reflects the resolved state
+        final = flow.get_status("e2e-full-cycle")
+        assert final["phase"] == "resolved"
+        assert final["synthesis"] is not None
+        assert final["duration_s"] >= 0.0
+
+    def test_full_e2e_cycle_3_machines(self):
+        """End-to-end with 3 machines — verifies the flow scales beyond 2 nodes."""
+        flow = self._make_flow()
+        flow.start_review(
+            task_id="e2e-3machine",
+            assigned_machines=["mac1", "mac2", "mac3"],
+            task_summary="Migrate session storage to Redis",
+        )
+
+        # All 3 verdicts
+        for i, (machine, conf) in enumerate([("mac1", 0.9), ("mac2", 0.75), ("mac3", 0.6)]):
+            flow.submit_verdict("e2e-3machine", machine, {
+                "summary": f"Approach {i+1} — Redis cluster with pipelining",
+                "branch": f"{machine}/redis-migration",
+                "confidence": conf,
+                "files_touched": ["src/session.py"],
+            })
+
+        assert flow.get_status("e2e-3machine")["phase"] == "under_review"
+
+        # First 2 critiques — no auto-synthesis yet
+        r1 = flow.submit_critique("e2e-3machine", "mac1", {"concern": "ok"})
+        r2 = flow.submit_critique("e2e-3machine", "mac2", {"concern": "ok"})
+        assert not isinstance(r1, dict) or r1.get("phase") != "resolved"
+        assert not isinstance(r2, dict) or r2.get("phase") != "resolved"
+
+        # Third critique triggers synthesis
+        r3 = flow.submit_critique("e2e-3machine", "mac3", {"concern": "ok"})
+        assert isinstance(r3, dict)
+        assert r3["phase"] == "resolved"
+        assert r3["synthesis"] is not None
+        assert set(r3["machines_participated"]) == {"mac1", "mac2", "mac3"}
+
     def test_manual_synthesis(self):
         flow = self._make_flow()
         flow.start_review(task_id="task-6", assigned_machines=["mac1"])
