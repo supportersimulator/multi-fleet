@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "chief_escalation",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Escalation to chief when local consensus fails or high-risk detected",
+  "payload_schema": {
+    "type": "object",
+    "required": ["id", "task_id", "from_node", "reason"],
+    "properties": {
+      "id": {"type": "string"},
+      "task_id": {"type": "string"},
+      "from_node": {"type": "string"},
+      "reason": {
+        "type": "string",
+        "enum": ["no_consensus", "high_risk", "vision_conflict", "repeated_failure", "dao_relevant"]
+      },
+      "surgeon_decision_id": {"type": "string"},
+      "brainstorm_id": {"type": "string"},
+      "evidence_refs": {"type": "array", "items": {"type": "string"}},
+      "probe_findings": {"type": "array", "items": {"type": "string"}},
+      "urgency": {
+        "type": "string",
+        "enum": ["low", "medium", "high", "critical"]
+      },
+      "created_at": {"type": "number"}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "critical"
+}

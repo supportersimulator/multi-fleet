@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "merge_candidate",
+  "version": 1,
+  "owner": "coordination",
+  "description": "Proposal to merge a branch into a target branch",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "branch": {"type": "string"},
+      "into": {"type": "string"},
+      "recommendation": {"type": "string"},
+      "test_results": {"type": "object"},
+      "files_touched": {"type": "integer", "minimum": 0}
+    },
+    "required": ["branch", "into", "recommendation"]
+  },
+  "ttl_s": 7200,
+  "priority": "normal"
+}

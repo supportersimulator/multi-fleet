@@ -1,0 +1,58 @@
+{
+  "fleetId": "cloud-fleet",
+  "description": "Nodes with no direct network connectivity. All communication via cloud chief relay (P0) and git push (P7). No NATS, no HTTP direct, no SSH.",
+  "nodes": {
+    "home-mac": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "alice",
+      "role": "worker"
+    },
+    "office-mac": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "bob",
+      "role": "worker"
+    },
+    "cloud-chief": {
+      "host": "chief.example.com",
+      "port": 8844,
+      "user": "deploy",
+      "role": "chief"
+    }
+  },
+  "transport": {
+    "primary": "chief-relay",
+    "fallback_order": ["git"],
+    "channel_priority_overrides": {
+      "P0": "chief-relay",
+      "P7": "git"
+    },
+    "disabled_channels": ["nats", "http", "ssh", "wol", "seed-file"]
+  },
+  "nats": {
+    "server": "",
+    "credentials_file": "",
+    "cluster_name": ""
+  },
+  "chief": {
+    "url": "https://chief.example.com:8844",
+    "api_key_env": "FLEET_CHIEF_API_KEY",
+    "poll_interval_s": 30
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": []
+  },
+  "heartbeat": {
+    "interval_s": 60,
+    "timeout_s": 180,
+    "missed_before_unreachable": 5
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}

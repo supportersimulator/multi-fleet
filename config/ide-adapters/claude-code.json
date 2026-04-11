@@ -1,0 +1,9 @@
+{
+  "ide": "Claude Code",
+  "transport": "mcp",
+  "mcp_server": "fleet-nerve",
+  "config_path": "~/.claude/plugins/multi-fleet/config.json",
+  "setup": "multi-fleet/scripts/install.sh --ide claude-code",
+  "features": ["mcp_native", "tool_discovery", "streaming", "skills", "agents"],
+  "notes": "Native MCP transport. Plugin auto-discovered via .claude-plugin/plugin.json."
+}

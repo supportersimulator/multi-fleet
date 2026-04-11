@@ -2,12 +2,53 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
             "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' session-start",
-            "async": false
+            "async": false,
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' prompt-submit",
+            "async": false,
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' teammate-idle",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' stop",
+            "async": true,
+            "timeout": 10000
           }
         ]
       }

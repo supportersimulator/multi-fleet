@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "repair",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Self-heal request/response for broken fleet channels",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "action": {"type": "string", "enum": ["restart_nats", "restart_daemon", "restart_tunnel", "full_restart"]},
+      "broken_channels": {"type": "array", "items": {"type": "string"}},
+      "level": {"type": "integer", "minimum": 1, "maximum": 4},
+      "result": {
+        "type": "object",
+        "properties": {
+          "success": {"type": "boolean"},
+          "details": {"type": "string"}
+        }
+      }
+    },
+    "required": ["action"]
+  },
+  "ttl_s": 600,
+  "priority": "high"
+}

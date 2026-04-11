@@ -1,0 +1,61 @@
+{
+  "fleetId": "home-office",
+  "description": "Mixed setup: 1 always-on desktop as chief + 2 laptops as workers. Desktop runs NATS server. Laptops may sleep/roam.",
+  "nodes": {
+    "desktop": {
+      "host": "YOUR_IP_HERE",
+      "port": 8855,
+      "user": "admin",
+      "role": "chief",
+      "mac_address": "AA:BB:CC:DD:EE:01",
+      "always_on": true
+    },
+    "laptop1": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "alice",
+      "role": "worker",
+      "mac_address": "AA:BB:CC:DD:EE:02",
+      "always_on": false
+    },
+    "laptop2": {
+      "host": "dynamic",
+      "port": 8855,
+      "user": "bob",
+      "role": "worker",
+      "mac_address": "AA:BB:CC:DD:EE:03",
+      "always_on": false
+    }
+  },
+  "transport": {
+    "primary": "nats",
+    "fallback_order": ["http", "wol", "git"],
+    "channel_priority_overrides": {
+      "P1": "nats",
+      "P2": "http",
+      "P3": "chief-relay",
+      "P6": "wol",
+      "P7": "git"
+    }
+  },
+  "nats": {
+    "server": "nats://YOUR_IP_HERE:4222",
+    "credentials_file": "",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": []
+  },
+  "heartbeat": {
+    "interval_s": 20,
+    "timeout_s": 60,
+    "missed_before_unreachable": 3
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}

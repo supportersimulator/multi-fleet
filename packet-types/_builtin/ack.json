@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "ack",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Delivery acknowledgment for fleet messages",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "ref_id": {"type": "string"},
+      "status": {"type": "string", "enum": ["delivered", "rejected", "expired"]},
+      "reason": {"type": "string"},
+      "channel": {"type": "string"}
+    },
+    "required": ["ref_id", "status"]
+  },
+  "ttl_s": 300,
+  "priority": "high"
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "critique",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Cross-machine critique of another machine's branch (Phase 3)",
+  "payload": {
+    "type": "object",
+    "required": ["task_id", "from_machine", "to_machine", "target_branch", "target_commit", "summary", "confidence", "blocking_concerns", "suggested_merge_action"],
+    "properties": {
+      "task_id": {"type": "string"},
+      "from_machine": {"type": "string"},
+      "to_machine": {"type": "string"},
+      "target_branch": {"type": "string"},
+      "target_commit": {"type": "string"},
+      "summary": {"type": "string"},
+      "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+      "blocking_concerns": {"type": "array", "items": {"type": "string"}},
+      "suggested_merge_action": {"type": "string", "enum": ["merge", "revise", "reject", "cherry_pick"]}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "high"
+}

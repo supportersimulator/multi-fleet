@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "local_verdict",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Machine submits local surgery verdict to chief (Phase 2 output)",
+  "payload": {
+    "type": "object",
+    "required": ["task_id", "machine_id", "branch", "summary", "confidence", "files_touched", "risks", "dissent", "questions_for_chief"],
+    "properties": {
+      "task_id": {"type": "string"},
+      "machine_id": {"type": "string"},
+      "branch": {"type": "string"},
+      "summary": {"type": "string"},
+      "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+      "files_touched": {"type": "array", "items": {"type": "string"}},
+      "risks": {"type": "array", "items": {"type": "string"}},
+      "dissent": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["surgeon", "claim", "severity"],
+          "properties": {
+            "surgeon": {"type": "string"},
+            "claim": {"type": "string"},
+            "severity": {"type": "string"}
+          }
+        }
+      },
+      "questions_for_chief": {"type": "array", "items": {"type": "string"}}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "normal"
+}

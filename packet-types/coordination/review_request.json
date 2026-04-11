@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "review_request",
+  "version": 1,
+  "owner": "coordination",
+  "description": "Request for another node to review work on a branch",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "branch": {"type": "string"},
+      "description": {"type": "string"},
+      "urgency": {"type": "string", "enum": ["low", "medium", "high"]},
+      "ttl_minutes": {"type": "integer", "minimum": 1},
+      "files": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["branch", "description"]
+  },
+  "ttl_s": 3600,
+  "priority": "normal"
+}

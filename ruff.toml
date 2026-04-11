@@ -1,0 +1,39 @@
+# Ruff configuration for multi-fleet plugin
+# https://docs.astral.sh/ruff/
+
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit (security)
+    "T20",  # flake8-print
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by line-length)
+    "S101",   # assert usage (needed in tests)
+    "S603",   # subprocess without shell=True (intentional in fleet ops)
+    "S607",   # partial path in subprocess (intentional)
+    "T201",   # print statements (used in CLI tools)
+    "B008",   # function call in default argument (common in MCP tools)
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",   # assert in tests is fine
+    "S105",   # hardcoded password (test fixtures)
+    "S106",   # hardcoded password (test fixtures)
+    "S108",   # /tmp usage (test temp files)
+]
+
+[lint.isort]
+known-first-party = ["tools"]

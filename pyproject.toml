@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "multifleet"
+version = "5.0.0"
+description = "Multi-machine fleet coordination for Claude Code sessions via NATS pub/sub"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Aaron Tjomsland" },
+]
+keywords = ["claude", "fleet", "nats", "mcp", "coordination"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "nats-py>=2.6.0",
+    "jsonschema>=4.0.0",
+    "websockets>=12.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+discord = [
+    "discord.py>=2.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+fleet = "multifleet.cli:main"
+fleet-nerve-mcp = "multifleet.mcp:main"
+fleet-nerve = "multifleet.nats_client:main"
+fleet-dashboard = "multifleet.web_dashboard:main"
+fleet-nats-cluster = "multifleet.nats_cluster:main"
+
+[project.urls]
+Homepage = "https://contextdna.dev/multifleet"
+Repository = "https://github.com/contextdna/multifleet"
+Documentation = "https://contextdna.dev/multifleet/docs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["multifleet"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"bin/fleet_nerve_mcp.py" = "multifleet/_mcp_server.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".multifleet/",
+    ".fleet-messages/",
+    "evidence.db",
+    "*.db",
+    ".venv*/",
+    "venv*/",
+    "__pycache__/",
+    "*.pyc",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "dist/",
+    "build/",
+    "*.egg-info",
+    ".git/",
+    ".DS_Store",
+]

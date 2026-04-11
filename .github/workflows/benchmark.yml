@@ -1,0 +1,31 @@
+name: Performance Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths: ['multi-fleet/multifleet/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install nats-py jsonschema
+      - run: |
+          cd multi-fleet
+          PYTHONPATH=. python -c "
+          from multifleet.benchmark import FleetBenchmark
+          b = FleetBenchmark()
+          results = b.run_all()
+          print(b.render_report())
+          # Fail if any benchmark exceeds threshold
+          for r in results:
+              if r.p95_ms > 100:
+                  print(f'REGRESSION: {r.name} p95={r.p95_ms}ms > 100ms threshold')
+                  exit(1)
+          "

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "brainstorm",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Structured option tree from Superpowers brainstorming phase",
+  "payload_schema": {
+    "type": "object",
+    "required": ["id", "task_id", "node_id", "options"],
+    "properties": {
+      "id": {"type": "string"},
+      "task_id": {"type": "string"},
+      "node_id": {"type": "string"},
+      "options": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["id", "title", "description"],
+          "properties": {
+            "id": {"type": "string"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "pros": {"type": "array", "items": {"type": "string"}},
+            "cons": {"type": "array", "items": {"type": "string"}},
+            "variants": {"type": "array", "items": {"type": "object"}},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        }
+      },
+      "recommended": {"type": "string"},
+      "created_at": {"type": "number"}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "high"
+}

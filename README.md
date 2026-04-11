@@ -1,120 +1,443 @@
 # Multi-Fleet
 
-Cross-machine AI collaboration for Claude Code. Real-time peer-to-peer messaging, session-aware task agents, and 7-priority fallback delivery across any number of machines.
+**Cross-machine AI collaboration for Claude Code, Cursor, VS Code, Codex, and Gemini.**
+
+Real-time peer-to-peer messaging with a 9-priority self-healing fallback chain, session-aware autonomous task agents, HMAC-signed communication, and fleet-wide productivity visibility. Messages always deliver -- even when NATS is down, HTTP is blocked, and SSH is your only path.
+
+Multi-Fleet is the first LLM-native fleet coordination system. Every node is independently capable. The fleet continuously self-heals toward ideal state. No central server required for basic operation.
+
+```
+    "Send this task to mac2"
+        |
+        v
+    +-----------+     P0 Cloud      +-----------+
+    |  mac1     | ---- P1 NATS ---->|  mac2     |
+    |  (chief)  | ---- P2 HTTP ---->|  (worker) |
+    |           | ---- P3 Relay --->|           |
+    |  Claude   | ---- P4 Seed --->|  Claude   |
+    |  Code     | ---- P5 SSH ---->|  Code     |
+    |           | ---- P6 WoL ---->|           |
+    |           | ---- P7 Git ---->|           |
+    |           | ---- P8 Text --->|           |
+    +-----------+                   +-----------+
+    First success wins.             Agent spawns with
+    Failed channels auto-repair.    session context.
+```
+
+---
+
+## What's New in v5.0.0
+
+- **NATS clustering** -- each node runs its own nats-server, clustered with all peers. Zero single point of failure. Auto-failover when any node goes down.
+- **Trip mode** -- one command locks fleet for remote operation: keepalive, API failover (OmniRoute), wake-on-LAN, power state management
+- **112 Python modules** across 5 architectural layers
+- **~2,000 tests** across 99 test files
+- **34 MCP tools** for complete fleet operation via protocol
+- **28 skills** covering transport, coordination, consensus, and invariance
+- **31 commands** for CLI-driven fleet operations
+- **Probe engine** -- 19 probes with signal scoring, evidence pipeline, and adaptive intensity
+- **Chief synthesis engine** -- pluggable analyzers that aggregate fleet-wide intelligence with confidence-weighted verdicts
+- **IDE bridge** -- status bar, activity bar, and notification integration for VS Code, Cursor, and others
+- **Fleet Liaison Agent** -- background comms handler that manages fleet communication without interrupting active sessions
+- **Cross-machine rebuttal** -- 7-phase state machine for structured multi-node critique and convergence
+- **100-node hierarchy** -- Chief/Captain/Worker roles for scalable fleet organization
+- **Invariance gates** -- hard gates on send, repair, and merge operations to enforce safety
+- **Productive waiting** -- sessions never idle; auto-discover and execute fleet backlog
+- **HTML dashboard** -- dark theme, auto-refresh, live fleet visualization
+- **Status aggregator + SSE event stream** -- real-time fleet state pushed to all consumers
+- **Evidence ledger** -- hash-chain integrity for tamper-evident decision audit trails
+- **Fleet doctor** -- 6 diagnostic checks for automated health verification
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, module map, and data flow.
+
+---
 
 ## Quick Start
 
-### 1. Configure your fleet
-
 ```bash
-cp .multifleet/config.template.json .multifleet/config.json
-```
+# Install
+pip install multifleet
 
-Edit `config.json` — add one entry per node:
+# Configure your fleet
+cp config/config.template.json .multifleet/config.json
+# Edit config.json — add one entry per machine
 
-```json
-{
-  "fleetId": "my-fleet",
-  "chief": {"nodeId": "node1", "host": "${CHIEF_IP}"},
-  "nodes": {
-    "node1": {"host": "${CHIEF_IP}", "role": "chief", "user": "alice"},
-    "node2": {"host": "${WORKER_1_IP}", "role": "worker", "user": "bob"},
-    "node3": {"host": "${WORKER_2_IP}", "role": "worker", "user": "charlie"}
-  }
-}
-```
+# Set your node identity and start
+export MULTIFLEET_NODE_ID=mac2
+fleet status              # Check fleet health
+fleet nats-cluster start  # Start clustered NATS server
+fleet-nerve               # Start fleet daemon
 
-### 2. Install on each machine
+# Send a message
+fleet send mac1 "Hello from the CLI"
 
-```bash
-# Set your node identity
-export MULTIFLEET_NODE_ID=node2
-
-# Start the daemon
-python3 tools/fleet_nerve_nats.py serve
-
-# Install the Claude Code plugin
-# Add to ~/.claude/settings.json:
-#   enabledPlugins: { "multi-fleet@multi-fleet-marketplace": true }
-#   extraKnownMarketplaces: { "multi-fleet-marketplace": { "source": { "source": "directory", "path": "<repo>/multi-fleet" }}}
-```
-
-### 3. Send a message
-
-```bash
-# Via CLI
-python3 tools/fleet_nerve_nats.py send node1 "Hello from node2"
-
-# Via HTTP (daemon must be running)
+# Or via HTTP
 curl -X POST http://127.0.0.1:8855/message \
   -H "Content-Type: application/json" \
-  -d '{"type":"context","to":"node1","payload":{"subject":"Hello","body":"From node2"}}'
-
-# Test the 7-priority fallback chain
-bash scripts/fleet-test-fallback.sh node1
+  -d '{"type":"context","to":"mac1","payload":{"body":"Hello from mac2"}}'
 ```
 
-## Architecture
+That's it. The plugin auto-discovers skills, commands, hooks, and agents from `plugin.json`. Self-healing starts immediately.
 
-```
-Chief Node                    Worker Nodes
-+-----------+                 +-----------+
-| NATS      |<--- P1 NATS -->| Daemon    |
-| Server    |<--- P2 HTTP -->| :8855     |
-| Ingest    |<--- P3 Chief ->|           |
-| :8844     |     P4 Seed    |           |
-+-----------+     P5 SSH     +-----------+
-                  P6 WoL
-                  P7 Git
-```
-
-Every message tries all 7 channels in priority order. First success wins.
-
-## Communication Protocol
-
-| Priority | Channel | Latency | Router-proof? |
-|----------|---------|---------|---------------|
-| P1 | NATS pub/sub | <100ms | With SSH tunnel |
-| P2 | HTTP direct | <1s | No |
-| P3 | Chief relay | 1-2s | No |
-| P4 | Seed file | Next prompt | Via SSH |
-| P5 | SSH direct | 2-5s | Yes |
-| P6 | Wake-on-LAN | 10-60s | LAN only |
-| P7 | Git push | Async | Yes (internet) |
-
-**Self-healing:** When a message succeeds on P3+, it means P1-P2 are broken. The system automatically sends a repair request via the working channel.
+---
 
 ## Features
 
-- **7-priority fallback** — messages always deliver, even on hostile networks
-- **VS Code detection** — knows if target has active session, idle, or closed
-- **Session historian** — task agents inherit context from target's active session
-- **Self-healing** — broken channels are automatically repaired via working ones
-- **Scales to 100+** — peers discovered dynamically from config + heartbeats
-- **No hardcoded values** — all from config.json or environment variables
-- **Open-source ready** — template config, no IP leaks, clean separation
+### Communication
 
-## Plugin Skills
+| Feature | Status | Description |
+|---------|--------|-------------|
+| P0-P8 fallback cascade | Stable | 9-priority delivery chain. Cloud, NATS, HTTP, Chief relay, seed file, SSH, WoL, Git push, direct text. First success wins |
+| Self-healing channels | Stable | When P3+ delivers, broken P1/P2 channels auto-repair. 4-level escalation: notify, guide, background agent, SSH remote |
+| HMAC message signing | Stable | HMAC-SHA256 on all NATS messages. Peer identity verification, replay prevention (5-min window), macOS Keychain storage |
+| ACK protocol with retry | Stable | SQLite WAL for zero message loss. Exponential backoff on failed deliveries. Cross-device WAL replication |
+| Message type routing | Stable | 7 message types (alert, task, reply, context, broadcast, sync, repair) with type-aware channel selection |
 
-| Skill | Description |
-|-------|-------------|
-| productivity-view | Live dashboard of fleet activity |
-| fleet-send | Send messages to peers |
-| fleet-status | Fleet health check |
-| fleet-task | Dispatch autonomous work |
-| fleet-wake | Wake sleeping machines |
-| using-multi-fleet | Architecture overview |
+### Task Dispatch
 
-## SSH Tunnels (for restricted networks)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Session-aware agents (send_smart) | Stable | Task agents inherit context from target's active session via session historian gold extraction |
+| Autonomous task execution | Stable | `claude -p` spawns on target with full context. Works without human interaction. Results return via Fleet Nerve |
+| Work coordination | Stable | Fleet-wide task tracking prevents duplicate work. Claim/release/status across all nodes |
+| Productive idle | Stable | Sessions idle >5min auto-pick up fleet backlog. Channel repair takes priority over plan items |
 
-If your router blocks non-SSH ports:
+### Discovery and Monitoring
 
-```bash
-# On each worker node
-bash scripts/fleet-tunnel.sh install
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Gossip heartbeat | Stable | UDP heartbeat every 10s with git branch/commit context. Negligible bandwidth at 100+ nodes (~38KB/min) |
+| mDNS zero-config discovery | Planned | `_fleet-nerve._tcp` service discovery. Currently: static config + heartbeat-based peer registry |
+| VS Code session detection | Stable | 3-method detection (PID files, JSONL mtime, process scan). Knows active vs idle vs closed |
+| Proactive watchdog | Stable | Continuous health monitoring with threshold alerts and automatic repair triggers |
+| Productivity dashboard | Stable | Live fleet-wide view of nodes, agents, tasks, and backlog in real-time |
+
+### Intelligence
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Probe engine | Stable | 19 probes with registry-based execution, trigger conditions, and category filtering |
+| Signal scoring | Stable | Probe findings scored by severity, recency, and relevance for prioritized injection |
+| Chief synthesis | Stable | Confidence-weighted verdict aggregation from multiple nodes with pluggable analyzers |
+| Evidence ledger | Stable | Hash-chain tamper-evident audit trail for all decisions and findings |
+| IDE bridge | Stable | Status bar, activity bar, notifications, and SSE streaming for IDE extensions |
+
+### Platform
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Cross-IDE support | Stable | Claude Code (native), Cursor, VS Code, Codex CLI, Gemini. Generated manifests from canonical source |
+| 28 skills | Stable | Full fleet operation coverage including invariance gates, chain orchestration, verdicts |
+| 31 commands | Stable | CLI-driven fleet operations |
+| 2 agents | Stable | Fleet-coordinator (orchestration) and fleet-worker (autonomous execution) |
+| 34 MCP tools | Stable | Full fleet operation via MCP protocol (fleet_send, fleet_task, fleet_status, etc.) |
+| Per-session seed files | Stable | Messages arrive as `/tmp/fleet-seed-*.md`, injected on next prompt via hook |
+
+### Testing
+
+| Metric | Value |
+|--------|-------|
+| Test files | 99 |
+| Test functions | ~2,000 |
+| Coverage areas | Transport, protocol, probes, synthesis, rebuttal, leases, liaison, dashboard, IDE bridge, evidence, security, invariance, chaos, stress, E2E pipeline, code scanner, hierarchy, metrics, ghost detection, theater, race orchestration |
+
+---
+
+## Architecture
+
+> Full architecture documentation: [ARCHITECTURE.md](ARCHITECTURE.md) -- 5-layer design, all 112 modules, data flow, and design decisions.
+
+Multi-Fleet sits at Layer 4 of the 5-layer stack:
+
+```
++------------------------------------------------------------------+
+|  Layer 5: ContextDNA Chief                                       |
+|  Authoritative memory, evidence synthesis, branch adjudication   |
++------------------------------------------------------------------+
+|  Layer 4: Multi-Fleet            <-- this plugin                 |
+|  Cross-machine coordination, Fleet Nerve, session awareness      |
++------------------------------------------------------------------+
+|  Layer 3: Superset                                               |
+|  Local parallel execution (worktrees, agents, concurrent spawn)  |
++------------------------------------------------------------------+
+|  Layer 2: 3-Surgeons                                             |
+|  Local truth protocol (3 LLMs cross-examine every decision)      |
++------------------------------------------------------------------+
+|  Layer 1: Superpowers                                            |
+|  Local captain (discipline, skills, workflow invariance)          |
++------------------------------------------------------------------+
 ```
 
-This creates persistent autossh tunnels through port 22. NATS, HTTP, everything flows through the tunnel. Survives reboots via LaunchAgent.
+### Fleet Nerve Daemon
+
+Every machine runs a lightweight daemon (port 8855) with 4 background threads:
+
+```
++-- Fleet Nerve Daemon (port 8855) ----------------------------+
+|                                                               |
+|  HTTP Server ---- /health, /message, /inbox, /peers, /stats  |
+|       |           /sessions/gold, /work, /wal/*, /doctor      |
+|       |                                                       |
+|  +-- Background Threads ----------------------------------+   |
+|  | 1. UDP Heartbeat Sender (10s) -- git-enriched packets  |   |
+|  | 2. UDP Heartbeat Listener   -- peer liveness tracking  |   |
+|  | 3. Idle Watcher (60s)       -- task suggestions + heal |   |
+|  | 4. Outbox Retry (60s)       -- exponential backoff     |   |
+|  +--------------------------------------------------------+   |
+|                                                               |
+|  SQLite Store -- messages, peers, outbox, WAL                 |
+|                                                               |
+|  Packet Registry -- 7 built-in types (ack, heartbeat,         |
+|    lease_request, lease_grant, lease_release, repair,          |
+|    sync_hold) with JSON Schema validation                     |
+|                                                               |
+|  Task State Machine -- durable SQLite-backed task lifecycle   |
+|    (pending->claimed->running->done/failed/cancelled)            |
++---------------------------------------------------------------+
+```
+
+### Channel State Machine
+
+Every (peer, channel) pair has exactly one state:
+
+```
+                 1 failure
+  HEALTHY ----------------------> DEGRADED
+     ^                               |
+     |                               | 2 more failures (3 total)
+     |                               v
+     |         repair succeeds      BROKEN
+     +--------------------------- HEALING <---- repair initiated
+```
+
+BROKEN channels are skipped in the cascade to save timeout budget. States auto-reset to HEALTHY after 15 minutes of no failures.
+
+### Probe Engine
+
+19 probes continuously scan fleet and codebase state, feeding the intelligence pipeline:
+
+- **Fleet probes**: `agent_readiness`, `fleet_health`, `blast_radius`, `branch_intent`, `dependency_drift`, `mirror_drift`, `worktree_contamination`, `worktree_divergence`, `repeated_failure`, `repeated_failure_cluster`, `security_surface`, `stale_context`, `task_diff_mismatch`, `invariant_coverage`, `hidden_dependency`, `injection_prioritizer`, `architectural_hotspots`, `distributed`
+- **Code scanner probes**: `blast_radius`, `hidden_dependency`, `injection_prioritizer`, `mirror_drift`, `security_surface`, `stale_context`
+
+Probes run on triggers (message received, session idle, task complete) and produce scored findings that feed into chief synthesis.
+
+### Chief Synthesis
+
+The `ChiefSynthesis` engine aggregates verdicts from multiple nodes into confidence-weighted decisions:
+
+1. Collect verdicts from participating nodes
+2. Run pluggable analyzers (confidence weighting, agreement detection)
+3. Compute final decision with confidence score
+4. Record in evidence ledger (hash-chain for tamper evidence)
+5. Log decision for audit trail
+
+### IDE Bridge
+
+The `IDEBridge` translates fleet events into IDE-consumable formats:
+
+- **Status bar**: compact fleet health (node count, active tasks, channel health)
+- **Activity bar**: detailed panels for nodes, tasks, messages, and probes
+- **Notifications**: alerts requiring user attention (escalation levels: silent, inject, notify, interrupt)
+- **SSE streaming**: real-time event push via `EventBus` server
+
+Works with Claude Code (native), VS Code, Cursor, Codex, and Gemini through generated manifests.
+
+### Self-Healing Flow
+
+```
+Message delivers on P3+ (lower priority channel)
+  --> Detects: P1/P2 are broken
+  --> L1: Log + dashboard alert (immediate)
+  --> L2: Send repair instructions via working channel (immediate)
+  --> Wait 120s, probe P1/P2
+  --> L3: Spawn repair agent on target via SSH (if still broken)
+  --> Wait 300s, probe P1/P2
+  --> L4: Surface commands to human (only after 15+ min failure)
+```
+
+Rate limit: 3 repair escalations per node per hour. Local-first principle: target fixes itself before remote intervention.
+
+---
+
+## Skills Reference
+
+| Skill | Type | Description |
+|-------|------|-------------|
+| `using-multi-fleet` | Bootstrap | Architecture overview, role guide, skill index |
+| `fleet-send` | Core | Send messages (context, task, alert, broadcast) with 9-priority fallback |
+| `fleet-task` | Core | Dispatch autonomous session-aware work to another machine |
+| `fleet-dispatch` | Core | Remote worker dispatch with priority routing and result tracking |
+| `fleet-status` | Core | Quick health check -- who's online, idle, working |
+| `fleet-check` | Core | Run full 7-channel communication test to a target node |
+| `fleet-repair` | Core | 4-level repair escalation for broken channels |
+| `fleet-wake` | Core | Wake sleeping machines via health check, SSH, or WoL |
+| `fleet-tunnel` | Core | SSH tunnel management for restricted networks |
+| `fleet-worker` | Core | tmux-isolated worker pool -- no interactive session disruption |
+| `fleet-watchdog` | Core | Continuous health monitoring with auto-repair triggers |
+| `fleet-idle` | Core | Productive idle -- automatic work discovery when nodes are idle |
+| `fleet-ack` | Core | Delivery confirmation protocol -- ACK tracking, retry, failure alerting |
+| `fleet-security` | Core | HMAC signing, replay prevention, peer validation, session gold sanitization |
+| `productivity-view` | Core | Live fleet-wide dashboard of nodes, agents, and backlog |
+| `fleet-chain` | Orchestration | Chain orchestration -- multi-step task dependencies with automatic sequencing |
+| `fleet-orchestrate` | Orchestration | Parallel scatter-gather, pipeline, fan-out/fan-in across fleet nodes |
+| `fleet-verdict` | Consensus | Structured verdict packets for cross-machine 3x3x3 consensus |
+| `fleet-rebuttal` | Consensus | 4-phase cross-machine critique cycle converging on chief decision |
+| `fleet-protocol` | Invariance | Self-healing communication invariant and background healing agents |
+| `fleet-config-gate` | Hard Gate | Verify safety and blast radius before changing fleet configuration |
+| `fleet-dispatch-gate` | Hard Gate | Verify target readiness and task safety before dispatching work |
+| `fleet-post-verification` | Hard Gate | Verify fleet health after completing work before claiming done |
+| `fleet-healer` | Invariance | Spawns background agents that auto-heal broken channels |
+| `fleet-events` | Core | EventBus pub/sub for fleet event streaming |
+| `fleet-liaison` | Core | Background communication handler with escalation levels |
+| `fleet-onboard` | Core | New node onboarding flow |
+| `fleet-race` | Orchestration | Parallel competing execution across nodes |
+
+---
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/fleet-send` | Send a message to a fleet peer |
+| `/fleet-status` | Show fleet health summary |
+| `/fleet-task` | Dispatch a task to a remote node |
+| `/fleet-check` | Run channel diagnostics to a target |
+| `/fleet-repair` | Trigger repair escalation |
+| `/fleet-wake` | Wake a sleeping machine |
+| `/fleet-tunnel` | Manage SSH tunnels |
+| `/fleet-watchdog` | Start/stop health monitoring |
+| `/fleet-worker` | Manage tmux worker sessions |
+| `/fleet-dashboard` | Full fleet productivity dashboard |
+
+---
+
+## Agents
+
+| Agent | Role |
+|-------|------|
+| `fleet-coordinator` | Orchestrates multi-node work: task decomposition, dispatch, result synthesis |
+| `fleet-worker` | Executes dispatched tasks autonomously with session context awareness |
+
+---
+
+## Hooks
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `SessionStart` | New/resumed session | Ingest pending fleet messages from inbox |
+| `UserPromptSubmit` | Every prompt | Relay fleet awareness into active session |
+| `TeammateIdle` | Async rewake | Pick up queued work when session goes idle |
+| `Stop` | Session end | Flush outbound message queue |
+
+---
+
+## IDE Support
+
+Multi-Fleet runs natively on 5 IDEs through generated manifests:
+
+| IDE | Config | Install |
+|-----|--------|---------|
+| **Claude Code** | `plugin.json` (native) | Auto-discovered |
+| **Cursor** | `.cursor-plugin/plugin.json` | Copy to `~/.cursor/mcp.json` |
+| **VS Code** | `.vscode/mcp.json.example` | Copy to `.vscode/mcp.json` |
+| **Codex CLI** | `codex-config.toml.example` | Copy to project root |
+| **Gemini** | `gemini-extension.json` | Reference as extension |
+
+Regenerate all manifests from canonical source: `python3 scripts/build_manifests.py`
+
+---
+
+## Communication Protocol
+
+### Channel Priority Table
+
+| Priority | Channel | Timeout | Requirements |
+|----------|---------|---------|--------------|
+| **P0** | Cloud (RemoteTrigger) | 5s | Cloud API credentials. Explicit invocation or all-fail fallback only |
+| **P1** | NATS pub/sub | 3s | NATS server reachable (port 4222) |
+| **P2** | HTTP direct | 5s | Target daemon running (port 8855) |
+| **P3** | Chief relay | 5s | Chief server running (port 8844) |
+| **P4** | Seed file via SSH | 10s | SSH credentials, target awake |
+| **P5** | SSH direct execution | 10s | SSH credentials |
+| **P6** | Wake-on-LAN | 60s | WoL enabled, MAC address, wired network |
+| **P7** | Git push | 30s | Git remote reachable |
+| **P8** | Direct text input | 2s | osascript, VS Code focused. Rate limited: 1/30s |
+
+### Message Types
+
+| Type | Channels | Behavior |
+|------|----------|----------|
+| `alert` | P1 only, 3x retry | Must confirm delivery. macOS notify on failure |
+| `task` | P1-P3 | Needs active session. Queues on chief if none |
+| `reply` | P1-P2 | Sender waiting. Fast channels only |
+| `context` | P1-P4 | Passive enrichment. Any channel works |
+| `broadcast` | P1 | Fire-and-forget to all peers |
+| `sync` | P1-P3 | Silent bookkeeping |
+| `repair` | P1-P5 | Uses whatever works. Critical for self-healing |
+
+### Security
+
+- **HMAC-SHA256** on all NATS messages with constant-time comparison
+- **Peer identity verification** -- unknown senders rejected
+- **Replay prevention** -- 5-minute timestamp window
+- **Key storage** -- macOS Keychain (`fleet_nerve_hmac_key`), env var override for CI
+- **Session gold sanitization** -- only safe metadata published (node_id, topic_keywords, idle_s)
+- **Log invariant** -- no message bodies, API keys, tokens, or SSH material in logs
+
+Full specification: [COMMS-PROTOCOL.md](COMMS-PROTOCOL.md)
+
+---
+
+## Scaling
+
+| Component | 3 nodes | 100+ nodes | Approach |
+|-----------|---------|------------|----------|
+| Broadcast | Loop POST (~15ms) | Parallel async HTTP (~50ms) | Pluggable transport |
+| Discovery | Static config | Dynamic | mDNS or chief registry |
+| Heartbeat | UDP to all (~negligible) | UDP to all (~38KB/min) | Still negligible at 100+ |
+| Chief relay | Single instance | Redis cluster | Or gossip protocol (SWIM) |
+| Message priority | 4-tier queue | Same | Alerts before heartbeats at any scale |
+
+---
+
+## What Makes This Different
+
+| Aspect | Multi-Fleet | Typical multi-agent frameworks |
+|--------|-------------|-------------------------------|
+| **Delivery guarantee** | 9-priority fallback chain. Messages deliver even on hostile networks | Single transport. If it fails, message is lost |
+| **Self-healing** | Broken channels auto-repair through 4-level escalation | Manual restart required |
+| **Session awareness** | Task agents inherit live session context from target machine | Agents start cold with no context |
+| **LLM-native** | Built for AI IDE sessions. Hooks, skills, seed files, prompt injection | Generic RPC/message queue adapted for AI |
+| **Zero-config discovery** | Heartbeat-based peer registry. Plug in a node, it appears | Manual service registration |
+| **Security** | HMAC signing, replay prevention, log sanitization, keychain storage | Often plaintext or basic auth |
+| **Idle productivity** | Idle sessions auto-pick up fleet backlog | Idle = wasted |
+| **Invariance gates** | Hard gates verify safety before config changes, dispatch, and completion | Ship and hope |
+
+---
+
+## File Layout
+
+```
+multi-fleet/
+  skills/              28 skill definitions
+  commands/            31 command definitions
+  agents/              2 agent definitions (coordinator, worker)
+  hooks/               4 lifecycle hooks (SessionStart, UserPromptSubmit, TeammateIdle, Stop)
+  multifleet/          112 modules across 5 layers (transport, protocol, intelligence,
+                         coordination, presentation) -- see ARCHITECTURE.md for full map
+  config/              Template config + IDE adapter manifests
+  scripts/             Build manifests, setup, utilities
+  tests/               ~2,000 tests across 99 files
+  bin/                 fleet-nerve-mcp entrypoint
+  package.json         Plugin metadata + MCP server definition
+  ARCHITECTURE.md      Full system architecture and module map
+  COMMS-PROTOCOL.md    Canonical communication specification
+  INSTALL.md           Per-IDE installation guide
+  CHANGELOG.md         Version history
+  LICENSE              MIT
+```
+
+---
 
 ## Requirements
 
@@ -122,3 +445,20 @@ This creates persistent autossh tunnels through port 22. NATS, HTTP, everything 
 - `nats-py` (`pip install nats-py`)
 - SSH key access between nodes
 - NATS server on chief node (`brew install nats-server` or `apt install nats-server`)
+
+---
+
+## Documentation
+
+| Document | Contents |
+|----------|----------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Full system architecture: 5-layer design, 112 modules, data flow, design decisions |
+| [INSTALL.md](INSTALL.md) | Per-IDE installation for Claude Code, Cursor, VS Code, Codex, Gemini |
+| [COMMS-PROTOCOL.md](COMMS-PROTOCOL.md) | Full communication specification: channels, state machine, repair, security, observability |
+| [CHANGELOG.md](CHANGELOG.md) | Version history and release notes |
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).

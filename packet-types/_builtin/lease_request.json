@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "lease_request",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Request to acquire a resource lease — prevents dual-work across fleet nodes",
+  "payload": {
+    "type": "object",
+    "properties": {
+      "resource_id": {"type": "string", "description": "Resource to lease (branch, file path, task ID)"},
+      "lease_type": {"type": "string", "enum": ["heartbeat", "short_task", "long_task", "exclusive"]},
+      "metadata": {"type": "object", "description": "Optional context about the lease purpose"}
+    },
+    "required": ["resource_id", "lease_type"]
+  },
+  "ttl_s": 60,
+  "priority": "high"
+}

@@ -3,22 +3,37 @@
   "description": "Marketplace for the Multi-Fleet cross-machine AI collaboration plugin",
   "owner": {
     "name": "Aaron Tjomsland",
-    "email": "aaron@ersimulator.com"
+    "email": "contextdna@users.noreply.github.com"
   },
   "plugins": [
     {
       "name": "multi-fleet",
       "description": "Cross-machine AI collaboration — real-time messaging, task agents, productivity visibility",
-      "version": "1.0.0",
+      "version": "3.0.0",
       "source": "./",
-      "author": { "name": "Aaron Tjomsland", "email": "aaron@ersimulator.com" },
+      "author": { "name": "Multi-Fleet Contributors", "email": "contextdna@users.noreply.github.com" },
       "skills": [
         "./skills/using-multi-fleet",
-        "./skills/productivity-view",
         "./skills/fleet-send",
         "./skills/fleet-status",
+        "./skills/fleet-task",
         "./skills/fleet-wake",
-        "./skills/fleet-task"
+        "./skills/fleet-repair",
+        "./skills/fleet-tunnel",
+        "./skills/fleet-watchdog",
+        "./skills/fleet-check",
+        "./skills/fleet-worker",
+        "./skills/fleet-config-gate",
+        "./skills/fleet-dispatch-gate",
+        "./skills/fleet-healer",
+        "./skills/fleet-post-verification",
+        "./skills/fleet-protocol",
+        "./skills/productivity-view",
+        "./skills/fleet-chain",
+        "./skills/fleet-dispatch",
+        "./skills/fleet-ack",
+        "./skills/fleet-idle",
+        "./skills/fleet-security"
       ]
     }
   ]

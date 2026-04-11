@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type_name": "task_brief",
+  "version": 1,
+  "owner": "_builtin",
+  "description": "Chief assigns work to fleet nodes",
+  "payload": {
+    "type": "object",
+    "required": ["task_id", "objective", "deadline_minutes"],
+    "properties": {
+      "task_id": {"type": "string"},
+      "objective": {"type": "string"},
+      "scope": {"type": "string"},
+      "deadline_minutes": {"type": "integer", "minimum": 1},
+      "constraints": {"type": "array", "items": {"type": "string"}},
+      "assigned_to": {"type": "array", "items": {"type": "string"}}
+    }
+  },
+  "ttl_s": 3600,
+  "priority": "high"
+}

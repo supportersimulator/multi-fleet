@@ -1,0 +1,48 @@
+{
+  "fleetId": "home-lan",
+  "description": "2 MacBooks on same LAN, one chief. Simplest fleet setup.",
+  "nodes": {
+    "mac1": {
+      "host": "YOUR_IP_HERE",
+      "port": 8855,
+      "user": "alice",
+      "role": "chief"
+    },
+    "mac2": {
+      "host": "YOUR_IP_HERE",
+      "port": 8855,
+      "user": "bob",
+      "role": "worker"
+    }
+  },
+  "transport": {
+    "primary": "nats",
+    "fallback_order": ["http", "ssh", "git"],
+    "channel_priority_overrides": {
+      "P1": "nats",
+      "P2": "http",
+      "P5": "ssh",
+      "P7": "git"
+    }
+  },
+  "nats": {
+    "server": "nats://YOUR_IP_HERE:4222",
+    "credentials_file": "",
+    "cluster_name": "fleet"
+  },
+  "ssh_tunnels": {
+    "enabled": false,
+    "targets": []
+  },
+  "heartbeat": {
+    "interval_s": 10,
+    "timeout_s": 30,
+    "missed_before_unreachable": 3
+  },
+  "daemon": {
+    "auto_start": true,
+    "log_dir": "",
+    "pid_dir": ""
+  },
+  "ide": "claude-code"
+}
