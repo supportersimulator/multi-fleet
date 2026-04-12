@@ -4,13 +4,19 @@ Bridges the 3-surgeon protocol into the fleet EventEnvelope system so
 that surgeon phase changes, consensus results, and cross-exam outcomes
 are visible to all fleet components (dashboard, overlay, Superset).
 
+Also broadcasts surgeon verdicts to the fleet via P7 git messages and
+the product bridge, so other nodes learn about cross-exam outcomes.
+
 "Live surgeon visibility: 3-Surgeons phase change -> event bus -> Superset overlay update"
 """
 
+import json
 import logging
 import os
 import time
-from typing import Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from multifleet.event_schema import (
     EventEnvelope, EventType, EventSource, create_event,
@@ -19,6 +25,100 @@ from multifleet.event_schema import (
 from multifleet.event_emitter import emit
 
 logger = logging.getLogger("fleet-nerve.adapter.surgeon-events")
+
+# Superrepo root for fleet messages (P7 channel)
+_SUPERREPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def broadcast_surgeon_verdict(verdict: Dict[str, Any], superrepo_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Broadcast a surgeon verdict to the fleet.
+
+    Three delivery paths (best-effort, first success wins):
+    1. Product bridge route (surgeons -> fleet)
+    2. P7 git channel (.fleet-messages/all/)
+    3. EventBus emission (surgeon.verdict.broadcast)
+
+    Args:
+        verdict: Dict with task_id, agreed, confidence, dissent_count,
+                 surgeons_consulted, node_id.
+        superrepo_root: Override path for testing (default: auto-detect).
+
+    Returns:
+        {bridge: bool, p7: bool, eventbus: bool} — which channels succeeded.
+    """
+    results: Dict[str, bool] = {"bridge": False, "p7": False, "eventbus": False}
+    node_id = verdict.get("node_id", os.environ.get("MULTIFLEET_NODE_ID", "unknown"))
+
+    # Channel 1: Product bridge
+    try:
+        from multifleet.product_bridge import get_bridge
+        bridge = get_bridge()
+        bridge.surgeons_to_fleet({
+            "task_id": verdict.get("task_id", "unknown"),
+            "verdict": "consensus" if verdict.get("agreed") else "dissent",
+            "confidence": verdict.get("confidence", 0.0),
+            "target_nodes": "all",
+            **verdict,
+        })
+        results["bridge"] = True
+    except Exception as e:
+        logger.debug("Bridge broadcast failed (non-fatal): %s", e)
+
+    # Channel 2: P7 git message
+    try:
+        root = superrepo_root or _SUPERREPO_ROOT
+        fleet_dir = root / ".fleet-messages" / "all"
+        fleet_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        task_slug = (verdict.get("task_id", "unknown") or "unknown")[:30]
+        # Sanitize for filename
+        task_slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in task_slug)
+        filename = f"{ts}-surgeon-verdict-{task_slug}.md"
+
+        status = "CONSENSUS" if verdict.get("agreed") else "DISSENT"
+        confidence = verdict.get("confidence", 0.0)
+        content = (
+            f"---\n"
+            f"from: {node_id}\n"
+            f"to: all\n"
+            f"subject: surgeon-verdict {status} ({confidence:.0%})\n"
+            f"timestamp: {datetime.now(timezone.utc).isoformat()}\n"
+            f"type: surgeon_verdict\n"
+            f"---\n\n"
+            f"# Surgeon Verdict: {status}\n\n"
+            f"- **Task**: {verdict.get('task_id', 'unknown')}\n"
+            f"- **Agreed**: {verdict.get('agreed', False)}\n"
+            f"- **Confidence**: {confidence:.1%}\n"
+            f"- **Dissent count**: {verdict.get('dissent_count', 0)}\n"
+            f"- **Surgeons consulted**: {', '.join(verdict.get('surgeons_consulted', []))}\n"
+            f"- **Source node**: {node_id}\n"
+        )
+        (fleet_dir / filename).write_text(content)
+        results["p7"] = True
+    except Exception as e:
+        logger.debug("P7 broadcast failed (non-fatal): %s", e)
+
+    # Channel 3: EventBus
+    try:
+        from multifleet.event_bus import IDEEventBus
+        bus = IDEEventBus.get()
+        bus.emit(
+            "surgeon.verdict.broadcast",
+            payload=verdict,
+            source="3-surgeons",
+        )
+        results["eventbus"] = True
+    except Exception as e:
+        logger.debug("EventBus broadcast failed (non-fatal): %s", e)
+
+    delivered = [ch for ch, ok in results.items() if ok]
+    if delivered:
+        logger.info("Surgeon verdict broadcast via: %s", ", ".join(delivered))
+    else:
+        logger.warning("Surgeon verdict broadcast: ALL channels failed")
+
+    return results
 
 
 class SurgeonEventsAdapter:
@@ -95,18 +195,19 @@ class SurgeonEventsAdapter:
         dissent_count: int = 0,
         surgeons_consulted: list[str] = None,
     ) -> EventEnvelope:
-        """Emit consensus reached/blocked event."""
+        """Emit consensus reached/blocked event and broadcast verdict to fleet."""
         et = EventType.SURGEON_CONSENSUS_REACHED if agreed else EventType.SURGEON_CONSENSUS_BLOCKED
+        payload = {
+            "agreed": agreed,
+            "confidence": round(confidence, 3),
+            "dissent_count": dissent_count,
+            "surgeons_consulted": surgeons_consulted or [],
+        }
         event = create_event(
             event_type=et,
             source=EventSource.THREE_SURGEONS,
             node_id=self._node_id,
-            payload={
-                "agreed": agreed,
-                "confidence": round(confidence, 3),
-                "dissent_count": dissent_count,
-                "surgeons_consulted": surgeons_consulted or [],
-            },
+            payload=payload,
             task_id=task_id,
         )
         try:
@@ -115,6 +216,22 @@ class SurgeonEventsAdapter:
         except Exception as e:
             self._stats["errors"] += 1
             logger.warning("Consensus event emit failed: %s", e)
+
+        # Broadcast verdict to fleet (best-effort, never blocks consensus)
+        verdict_data = {
+            "task_id": task_id,
+            "agreed": agreed,
+            "confidence": round(confidence, 3),
+            "dissent_count": dissent_count,
+            "surgeons_consulted": surgeons_consulted or [],
+            "node_id": self._node_id,
+        }
+        try:
+            broadcast_surgeon_verdict(verdict_data)
+            self._stats["broadcast_events"] = self._stats.get("broadcast_events", 0) + 1
+        except Exception as e:
+            self._stats["broadcast_errors"] = self._stats.get("broadcast_errors", 0) + 1
+            logger.warning("Verdict broadcast failed (non-fatal): %s", e)
 
         return event
 
