@@ -419,6 +419,40 @@ class ChannelHealthInvariant:
             "status": "pending",
         }
 
+        # INTERLOCK 3: Surgeon corrigibility check before L4 remote_fix
+        # L4 is the most invasive repair level — validate against surgeon
+        # corrigibility gate before auto-executing
+        if level >= 4:
+            try:
+                from .surgeon_adapter import SurgeonAdapter
+                adapter = SurgeonAdapter()
+                review = adapter.request_review(
+                    subject=f"L4 remote_fix repair on peer '{peer}' — corrigibility check",
+                    evidence=[
+                        f"peer: {peer}",
+                        f"score: {score}",
+                        f"broken channels: {broken}",
+                        f"escalation level: L{level}",
+                    ],
+                )
+                if review.get("status") == "ok":
+                    output = str(review.get("output", "")).lower()
+                    if "vision lock" in output or "block" in output or "deny" in output:
+                        result["status"] = "blocked_by_surgeon"
+                        result["surgeon_reason"] = "Surgeon corrigibility gate blocked L4 repair — escalate to chief"
+                        logger.warning(
+                            "L4 repair on %s blocked by surgeon corrigibility gate", peer
+                        )
+                        return result
+                    else:
+                        result["surgeon_approved"] = True
+                else:
+                    result["surgeon_review_status"] = review.get("status", "unknown")
+            except Exception as e:
+                # Graceful degradation: if surgeon unavailable, proceed with repair
+                logger.warning("Surgeon corrigibility check unavailable for L4 repair on %s: %s", peer, e)
+                result["surgeon_check_error"] = str(e)
+
         if health_monitor is not None:
             try:
                 repair_result = health_monitor.auto_repair(peer, issue)
