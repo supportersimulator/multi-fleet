@@ -64,6 +64,9 @@ _DEADLOCK_CAP = 0.15
 _STALENESS_WEIGHT = 0.10
 _STALENESS_CAP = 0.10
 
+# INTERLOCK 5: Surgeon availability contributes to stress score
+_SURGEON_UNAVAILABLE_PENALTY = 0.15
+
 
 def compute_stress_score(
     fallback_p3plus_count: int = 0,
@@ -71,6 +74,7 @@ def compute_stress_score(
     chief_sync_failures: int = 0,
     surgeon_deadlocks: int = 0,
     context_staleness: float = 0.0,
+    surgeon_available: bool = True,
 ) -> float:
     """Compute fleet stress score from observable degradation signals.
 
@@ -88,6 +92,10 @@ def compute_stress_score(
         context_staleness: How stale the local context is, normalized to 0-1.
             1.0 means context is critically outdated. This affects the quality
             of every decision the node makes.
+        surgeon_available: Whether the 3-surgeon protocol is reachable.
+            INTERLOCK 5: Surgeon availability IS infrastructure health.
+            When surgeon is unavailable, the fleet loses its corrigibility
+            layer — stress increases by 0.15.
 
     Returns:
         Float in [0.0, 1.0] representing fleet stress level.
@@ -98,6 +106,9 @@ def compute_stress_score(
     score += min(chief_sync_failures * _CHIEF_SYNC_WEIGHT, _CHIEF_SYNC_CAP)
     score += min(surgeon_deadlocks * _DEADLOCK_WEIGHT, _DEADLOCK_CAP)
     score += min(context_staleness * _STALENESS_WEIGHT, _STALENESS_CAP)
+    # INTERLOCK 5: Surgeon unavailability adds stress
+    if not surgeon_available:
+        score += _SURGEON_UNAVAILABLE_PENALTY
     return min(score, 1.0)
 
 

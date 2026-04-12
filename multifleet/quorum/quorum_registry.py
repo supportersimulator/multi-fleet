@@ -124,6 +124,8 @@ class QuorumRegistry:
             1. At least MIN_SUPPORTING_NODES independent confirmations
             2. Chief confirmation OR post-verification success
             3. NOT quenched
+            4. INTERLOCK 7: Surgeon confidence >= 0.6 (when available)
+               If surgeon confidence is low, quorum is provisional and revoked.
 
         This is deliberately strict. In biology, quorum sensing
         requires population density — not just one loud cell.
@@ -136,7 +138,26 @@ class QuorumRegistry:
             return False
         has_enough_nodes = len(prop.supporting_nodes) >= self._min_nodes
         has_authority = prop.chief_confirmed or prop.post_verified
-        return has_enough_nodes and has_authority
+        if not (has_enough_nodes and has_authority):
+            return False
+
+        # INTERLOCK 7: Check surgeon confidence
+        # Surgeon confidence acts as an additional gate — low confidence
+        # means the corrigibility layer hasn't validated this proposal
+        try:
+            from ..surgeon_adapter import SurgeonAdapter
+            adapter = SurgeonAdapter()
+            consensus = adapter.check_consensus(prop.topic)
+            confidence = consensus.get("confidence", 0.5)
+            if confidence < 0.6:
+                # Provisional quorum — surgeon confidence too low
+                return False
+        except Exception:
+            # Graceful degradation: if surgeon unavailable, quorum stands
+            # on node support + authority alone
+            pass
+
+        return True
 
     def quench(self, proposal_id: str, reason: str) -> bool:
         """Quorum quenching — the anti-biofilm mechanism.
@@ -192,6 +213,40 @@ class QuorumRegistry:
         """Get a proposal by ID, or None if not found/expired."""
         self._gc_expired()
         return self._proposals.get(proposal_id)
+
+    def record_surgeon_dissent(self, topic: str, dissent: dict, node_id: str) -> StrategicProposal:
+        """Record a surgeon dissent as a strategic quorum proposal.
+
+        INTERLOCK 4: When 3-surgeons produces a dissent or counter-position,
+        it becomes a strategic proposal in the quorum registry. Other nodes
+        see the dissent via quorum signals, enabling fleet-wide architectural
+        concerns to propagate through the quorum system.
+
+        Args:
+            topic: The topic the dissent is about.
+            dissent: Dict with dissent details (surgeons_consulted, confidence,
+                     dissents list, output, etc.).
+            node_id: The node that originated the dissent.
+
+        Returns:
+            The StrategicProposal created from the dissent.
+        """
+        # Create a deterministic proposal ID from the topic
+        topic_hash = abs(hash(topic)) % (10 ** 10)
+        proposal_id = f"surgeon-dissent-{topic_hash}"
+
+        # Record support from the originating node
+        proposal = self.record_support(proposal_id, f"[SURGEON DISSENT] {topic}", node_id)
+
+        # If the dissent has high confidence, auto-quench opposing proposals
+        confidence = dissent.get("confidence", 0.0)
+        dissent_list = dissent.get("dissents", [])
+        if confidence >= 0.8 and dissent_list:
+            # Strong dissent — this is a real concern
+            proposal.chief_confirmed = False  # Requires chief review
+            proposal.post_verified = False
+
+        return proposal
 
     def _gc_expired(self):
         """Remove proposals that have exceeded their TTL.

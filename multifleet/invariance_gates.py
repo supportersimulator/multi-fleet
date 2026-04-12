@@ -278,12 +278,60 @@ class FleetSendGate:
                     except Exception:
                         pass
                 if not has_quorum:
-                    checks.append(GateCheck(
-                        "strategic_corroboration", False,
-                        "Strategic signal lacks corroboration — requires quorum "
-                        "(2+ nodes + chief/post-verification) before fleet-wide authority",
-                        critical=True,
-                    ))
+                    # INTERLOCK 1: Surgeon cross-exam for strategic signals
+                    # Before failing, request surgeon cross-examination
+                    surgeon_approved = False
+                    try:
+                        from .surgeon_adapter import SurgeonAdapter
+                        adapter = SurgeonAdapter()
+                        cross_exam = adapter.request_cross_exam(
+                            topic=f"Strategic fleet signal: {packet.get('type', 'unknown')}",
+                            evidence={
+                                "packet_id": packet.get("id", ""),
+                                "signal_class": signal_class,
+                                "from_node": packet.get("from_node", packet.get("from", "")),
+                                "to_node": packet.get("to_node", packet.get("to", "")),
+                                "payload_summary": str(packet.get("payload", {}))[:200],
+                            },
+                        )
+                        if cross_exam.get("consensus") and cross_exam.get("confidence", 0) >= 0.6:
+                            surgeon_approved = True
+                            checks.append(GateCheck(
+                                "surgeon_cross_exam", True,
+                                f"Surgeon cross-exam approved strategic signal "
+                                f"(confidence={cross_exam.get('confidence', 0):.2f})",
+                                critical=False,
+                            ))
+                        else:
+                            checks.append(GateCheck(
+                                "surgeon_cross_exam", False,
+                                f"Surgeon cross-exam did not approve strategic signal "
+                                f"(consensus={cross_exam.get('consensus')}, "
+                                f"confidence={cross_exam.get('confidence', 0):.2f})",
+                                critical=True,
+                            ))
+                    except Exception as e:
+                        # Graceful degradation: surgeon unavailable doesn't block
+                        logger.warning("Surgeon cross-exam unavailable for strategic signal: %s", e)
+                        checks.append(GateCheck(
+                            "surgeon_cross_exam", True,
+                            f"Surgeon cross-exam unavailable (degraded): {e}",
+                            critical=False,
+                        ))
+
+                    if not surgeon_approved:
+                        checks.append(GateCheck(
+                            "strategic_corroboration", False,
+                            "Strategic signal lacks corroboration — requires quorum "
+                            "(2+ nodes + chief/post-verification) before fleet-wide authority",
+                            critical=True,
+                        ))
+                    else:
+                        checks.append(GateCheck(
+                            "strategic_corroboration", True,
+                            "Strategic signal approved via surgeon cross-exam",
+                            critical=True,
+                        ))
                 else:
                     checks.append(GateCheck(
                         "strategic_corroboration", True,
@@ -525,12 +573,66 @@ class FleetRepairGate:
         if stress_score >= 0.75:
             is_destructive = action in ("full_restart",)
             if is_destructive:
-                checks.append(GateCheck(
-                    "stress_repair_policy", False,
-                    f"Critical stress (score={stress_score:.2f}): destructive repair "
-                    f"'{action}' blocked — requires chief review first",
-                    critical=True,
-                ))
+                # INTERLOCK 2: Surgeon review for destructive repairs under critical stress
+                surgeon_approved = False
+                try:
+                    from .surgeon_adapter import SurgeonAdapter
+                    adapter = SurgeonAdapter()
+                    review = adapter.request_review(
+                        subject=f"Destructive repair '{action}' on '{target}' under critical stress "
+                                f"(score={stress_score:.2f})",
+                        evidence=[
+                            f"target: {target}",
+                            f"action: {action}",
+                            f"stress_score: {stress_score:.2f}",
+                            f"node_id: {node_id or 'unknown'}",
+                        ],
+                    )
+                    if review.get("status") == "ok":
+                        # Parse approval from review output
+                        output = str(review.get("output", "")).lower()
+                        if "approve" in output or "proceed" in output or "allow" in output:
+                            surgeon_approved = True
+                            checks.append(GateCheck(
+                                "surgeon_repair_review", True,
+                                f"Surgeon approved destructive repair '{action}'",
+                                critical=False,
+                            ))
+                        else:
+                            checks.append(GateCheck(
+                                "surgeon_repair_review", False,
+                                f"Surgeon did not approve destructive repair '{action}'",
+                                critical=True,
+                            ))
+                    else:
+                        checks.append(GateCheck(
+                            "surgeon_repair_review", False,
+                            f"Surgeon review returned status: {review.get('status')}",
+                            critical=True,
+                        ))
+                except Exception as e:
+                    # Graceful degradation: if surgeon unavailable, fall through to
+                    # the existing chief-review-required block
+                    logger.warning("Surgeon review unavailable for destructive repair: %s", e)
+                    checks.append(GateCheck(
+                        "surgeon_repair_review", True,
+                        f"Surgeon review unavailable (degraded): {e}",
+                        critical=False,
+                    ))
+
+                if not surgeon_approved:
+                    checks.append(GateCheck(
+                        "stress_repair_policy", False,
+                        f"Critical stress (score={stress_score:.2f}): destructive repair "
+                        f"'{action}' blocked — requires chief review first",
+                        critical=True,
+                    ))
+                else:
+                    checks.append(GateCheck(
+                        "stress_repair_policy", True,
+                        f"Critical stress: destructive repair '{action}' approved by surgeon",
+                        critical=False,
+                    ))
             else:
                 checks.append(GateCheck(
                     "stress_repair_policy", True,
@@ -729,7 +831,44 @@ class FleetMergeGate:
                 critical=False,
             ))
 
-        # 5. Branch up-to-date with main (no conflicts)
+        # 5. Surgeon state check (INTERLOCK 6: CardioGate → FleetMergeGate)
+        # Block merge if surgeon is still investigating or disagreement is high
+        try:
+            from .surgeon_adapter import SurgeonAdapter
+            adapter = SurgeonAdapter()
+            surgeon_state = adapter.get_state()
+            surgeon_phase = surgeon_state.get("phase", "idle")
+            disagreement = surgeon_state.get("disagreement_score", 0.0)
+
+            if surgeon_phase == "triage":
+                checks.append(GateCheck(
+                    "surgeon_state", False,
+                    "Surgeon still in triage phase — merge blocked until investigation completes",
+                    critical=True,
+                ))
+            elif disagreement > 0.3:
+                checks.append(GateCheck(
+                    "surgeon_state", False,
+                    f"Surgeon disagreement too high ({disagreement:.2f} > 0.3) — "
+                    f"resolve surgeon consensus before merging",
+                    critical=True,
+                ))
+            else:
+                checks.append(GateCheck(
+                    "surgeon_state", True,
+                    f"Surgeon state OK (phase={surgeon_phase}, disagreement={disagreement:.2f})",
+                    critical=True,
+                ))
+        except Exception as e:
+            # Graceful degradation: surgeon unavailable doesn't block merge
+            logger.warning("Surgeon state check unavailable for merge gate: %s", e)
+            checks.append(GateCheck(
+                "surgeon_state", True,
+                f"Surgeon state check unavailable (degraded): {e}",
+                critical=False,
+            ))
+
+        # 6. Branch up-to-date with main (no conflicts)
         from ._paths import get_git_root
         rpath = repo_path or str(get_git_root())
         try:
