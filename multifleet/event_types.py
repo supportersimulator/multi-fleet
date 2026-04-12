@@ -19,6 +19,9 @@ NAMESPACES: dict[str, str] = {
     "surgeon": "Python → TS: cross-exam, consensus events",
     "phase": "Python → TS: workflow phase transitions",
     "fleet": "Multi-Fleet: peer, message, lease, rebuttal events",
+    "probe": "Probe Engine: findings, scan completions, errors",
+    "panel": "IDE Panel: lifecycle events (register, activate, suspend, close)",
+    "quorum": "Quorum: distributed decision proposals, votes, outcomes",
     "breaker": "Reserved for Phase 4 circuit breaker",
 }
 
