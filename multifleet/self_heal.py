@@ -47,6 +47,18 @@ class SelfHealManager:
     # Non-chief nodes escalate L4 to chief via fleet message instead.
     L4_CHIEF_ONLY = os.environ.get("FLEET_REPAIR_L4_CHIEF_ONLY", "true").lower() in ("true", "1", "yes")
 
+    # ── Idle/vacation backoff constants ──
+    # After a failed repair cycle, backoff doubles each time up to this max.
+    IDLE_BACKOFF_INITIAL_S = 300       # 5 min (first retry after failed repair)
+    IDLE_BACKOFF_MAX_S = 3600          # 1 hour max between retries for idle nodes
+    IDLE_BACKOFF_MULTIPLIER = 2.0      # Exponential backoff factor
+    # After this many consecutive failed repairs, node is considered "extended idle"
+    EXTENDED_IDLE_THRESHOLD = 3        # 3 failed repairs = ~15min of trying
+    # Max unread messages per node before we stop sending new ones
+    MAX_UNREAD_MESSAGES_PER_NODE = 50
+    # Vacation file marker
+    VACATION_FILENAME = ".vacation"
+
     def __init__(self, nerve: FleetNerveNATS):
         self._nerve = nerve
         # Repair lock: target -> timestamp. Prevents concurrent repairs on same target.
@@ -54,6 +66,13 @@ class SelfHealManager:
         self._repair_lock_ttl = 300  # 5 min lock duration
         # Track online/offline state to only emit peer.offline on transition
         self._peer_online_state: dict[str, bool] = {}
+        # ── Idle node backoff tracking ──
+        # peer_id -> {failed_repairs: int, last_repair_attempt: float, backoff_s: float}
+        self._idle_backoff: dict[str, dict] = {}
+        # peer_id -> True if explicitly marked as on vacation
+        self._vacation_nodes: set[str] = set()
+        # Load vacation markers from disk on startup
+        self._load_vacation_markers()
 
     # ── Repair Lock (cascade prevention) ──
 
@@ -86,6 +105,182 @@ class SelfHealManager:
             return self._nerve.node_id == chief
         # Fallback: mac1 is always chief
         return self._nerve.node_id == "mac1"
+
+    # ── Idle Node Backoff & Vacation ──
+
+    def _load_vacation_markers(self):
+        """Load vacation markers from .fleet-messages/<node>/.vacation files."""
+        fleet_dir = REPO_ROOT / ".fleet-messages"
+        if not fleet_dir.exists():
+            return
+        for node_dir in fleet_dir.iterdir():
+            if node_dir.is_dir() and (node_dir / self.VACATION_FILENAME).exists():
+                self._vacation_nodes.add(node_dir.name)
+                logger.info(f"Loaded vacation marker for {node_dir.name}")
+
+    def mark_vacation(self, peer_id: str, on_vacation: bool = True):
+        """Mark/unmark a node as on vacation. Persists via marker file."""
+        fleet_dir = REPO_ROOT / ".fleet-messages" / peer_id
+        marker = fleet_dir / self.VACATION_FILENAME
+        if on_vacation:
+            self._vacation_nodes.add(peer_id)
+            fleet_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                f"Marked vacation at {datetime.now(timezone.utc).isoformat()}Z\n"
+                f"Marked by {self._nerve.node_id}\n"
+            )
+            logger.info(f"Marked {peer_id} as on vacation")
+        else:
+            self._vacation_nodes.discard(peer_id)
+            if marker.exists():
+                marker.unlink()
+            # Reset backoff state on return
+            self._idle_backoff.pop(peer_id, None)
+            logger.info(f"Unmarked {peer_id} vacation — backoff reset")
+
+    def is_on_vacation(self, peer_id: str) -> bool:
+        """Check if a node is marked as on vacation."""
+        return peer_id in self._vacation_nodes
+
+    def _record_failed_repair(self, peer_id: str):
+        """Record a failed repair attempt and increase backoff."""
+        state = self._idle_backoff.get(peer_id)
+        if state is None:
+            state = {
+                "failed_repairs": 0,
+                "last_repair_attempt": 0.0,
+                "backoff_s": self.IDLE_BACKOFF_INITIAL_S,
+            }
+            self._idle_backoff[peer_id] = state
+        state["failed_repairs"] += 1
+        state["last_repair_attempt"] = time.time()
+        # Exponential backoff: double each failure, cap at max
+        state["backoff_s"] = min(
+            state["backoff_s"] * self.IDLE_BACKOFF_MULTIPLIER,
+            self.IDLE_BACKOFF_MAX_S,
+        )
+        logger.info(
+            f"Idle backoff for {peer_id}: {state['failed_repairs']} failures, "
+            f"next retry in {int(state['backoff_s'])}s"
+        )
+
+    def _record_successful_repair(self, peer_id: str):
+        """Reset backoff state on successful repair/reconnection."""
+        if peer_id in self._idle_backoff:
+            del self._idle_backoff[peer_id]
+            logger.info(f"Backoff reset for {peer_id} — peer is back online")
+
+    def _should_skip_repair(self, peer_id: str) -> bool:
+        """Check if we should skip repair for this peer due to backoff or vacation.
+
+        Returns True if the peer is on vacation or if the backoff timer hasn't
+        elapsed since the last failed repair attempt.
+        """
+        # Vacation nodes: never send repairs
+        if self.is_on_vacation(peer_id):
+            return True
+
+        state = self._idle_backoff.get(peer_id)
+        if state is None:
+            return False
+
+        elapsed = time.time() - state["last_repair_attempt"]
+        if elapsed < state["backoff_s"]:
+            return True
+
+        return False
+
+    def _is_extended_idle(self, peer_id: str) -> bool:
+        """Check if a peer has been unresponsive long enough to be considered extended idle."""
+        state = self._idle_backoff.get(peer_id)
+        if state is None:
+            return False
+        return state["failed_repairs"] >= self.EXTENDED_IDLE_THRESHOLD
+
+    def _count_unread_messages(self, peer_id: str) -> int:
+        """Count unread .md messages in a peer's fleet-messages inbox."""
+        inbox = REPO_ROOT / ".fleet-messages" / peer_id
+        if not inbox.exists():
+            return 0
+        return sum(1 for f in inbox.iterdir()
+                   if f.is_file() and f.suffix == ".md")
+
+    def _should_suppress_message(self, peer_id: str) -> bool:
+        """Check if we should stop sending messages to this peer.
+
+        Returns True if:
+        - Peer is on vacation, OR
+        - Peer has >= MAX_UNREAD_MESSAGES_PER_NODE unread messages
+        """
+        if self.is_on_vacation(peer_id):
+            return True
+        if self._count_unread_messages(peer_id) >= self.MAX_UNREAD_MESSAGES_PER_NODE:
+            logger.info(
+                f"Message suppressed for {peer_id}: "
+                f">={self.MAX_UNREAD_MESSAGES_PER_NODE} unread messages"
+            )
+            return True
+        return False
+
+    @staticmethod
+    def process_messages_on_return(node_id: str, max_messages: int = 20) -> list[dict]:
+        """Process fleet messages for a returning node — newest first, batched.
+
+        Returns list of processed message summaries. Moves processed messages
+        to archive. Reads at most `max_messages` (newest first).
+        """
+        inbox = REPO_ROOT / ".fleet-messages" / node_id
+        archive = inbox / "archive"
+        if not inbox.exists():
+            return []
+
+        # Collect all .md message files, sorted newest first
+        messages = sorted(
+            [f for f in inbox.iterdir() if f.is_file() and f.suffix == ".md"],
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        if not messages:
+            return []
+
+        archive.mkdir(exist_ok=True)
+        processed = []
+        # Process newest first, up to max_messages
+        for msg_file in messages[:max_messages]:
+            try:
+                content = msg_file.read_text(errors="replace")
+                processed.append({
+                    "file": msg_file.name,
+                    "content": content[:500],  # truncate for summary
+                    "full_path": str(msg_file),
+                })
+                # Move to archive
+                msg_file.rename(archive / msg_file.name)
+            except Exception as e:
+                logger.warning(f"Error processing message {msg_file.name}: {e}")
+
+        # If there are remaining old messages beyond max_messages, archive them
+        # with a "skipped" marker to avoid re-processing
+        remaining = messages[max_messages:]
+        if remaining:
+            logger.info(
+                f"Archiving {len(remaining)} older messages for {node_id} "
+                f"(beyond batch limit of {max_messages})"
+            )
+            for old_msg in remaining:
+                try:
+                    old_msg.rename(archive / old_msg.name)
+                except Exception:
+                    pass
+
+        total = len(messages)
+        logger.info(
+            f"Return processing for {node_id}: "
+            f"{len(processed)} read, {len(remaining)} archived unread, "
+            f"{total} total"
+        )
+        return processed
 
     # ── Repair Actions ──
 
@@ -501,6 +696,10 @@ class SelfHealManager:
             if peer_id == self._nerve.node_id:
                 continue
 
+            # Never send idle-wake to vacation nodes or message-capped nodes
+            if self._should_suppress_message(peer_id):
+                continue
+
             peer_last_seen = now - hb_data.get("_received_at", 0)
             peer_sessions = hb_data.get("sessions", -1)
             peer_is_idle = (
@@ -511,9 +710,13 @@ class SelfHealManager:
             if not peer_is_idle:
                 continue
 
-            # Rate limit: max 1 idle-wake per peer per 30min
+            # Extended idle nodes: reduce wake frequency to 1 per 2 hours
+            extended_idle = self._is_extended_idle(peer_id)
+            effective_cooldown = 7200 if extended_idle else wake_cooldown  # 2hr vs 30min
+
+            # Rate limit idle-wake messages
             last_wake = self._idle_wake_sent.get(peer_id, 0)
-            if now - last_wake < wake_cooldown:
+            if now - last_wake < effective_cooldown:
                 continue
 
             idle_min = int(peer_last_seen / 60)
@@ -645,12 +848,25 @@ class SelfHealManager:
                     f"{len(suggestions)} suggestion group(s)")
 
     async def _watchdog_check_peers(self):
-        """Detect stale peers and trigger repair escalation."""
+        """Detect stale peers and trigger repair escalation.
+
+        Respects idle backoff: after repeated failed repairs, retry frequency
+        decreases exponentially (5min -> 10min -> 20min -> ... -> 1hr max).
+        Vacation nodes are never repaired.
+        """
         now = time.time()
         all_peers = set(self._nerve._peers_config.keys()) - {self._nerve.node_id}
         seen_peers = set(self._nerve._peers.keys())
 
         for peer_id in all_peers:
+            # Skip vacation nodes entirely — no repair, no probes
+            if self.is_on_vacation(peer_id):
+                continue
+
+            # Skip if backoff timer hasn't elapsed
+            if self._should_skip_repair(peer_id):
+                continue
+
             # Skip if repair already in progress
             repair = self._repair_in_progress.get(peer_id, {})
             if repair and now - repair.get("started_at", 0) < 300:  # 5min cooldown
@@ -670,12 +886,14 @@ class SelfHealManager:
                                 pass
                     self._repair_in_progress[peer_id] = {"started_at": now, "level": 1}
                     asyncio.create_task(
-                        self.repair_with_escalation(peer_id, ["P1_nats"], "restart_nats"))
+                        self._repair_with_backoff(peer_id, ["P1_nats"], "restart_nats"))
                 elif last_seen > 45:  # Warning threshold
                     logger.info(f"Watchdog: {peer_id} heartbeat slow ({int(last_seen)}s)")
                 else:
                     # Peer is healthy — mark as online (for transition tracking)
                     self._peer_online_state[peer_id] = True
+                    # Reset backoff if peer was previously idle
+                    self._record_successful_repair(peer_id)
             else:
                 # Never seen this peer -- they might not be online yet
                 # Only escalate if we've been running >5min (past startup window)
@@ -683,12 +901,26 @@ class SelfHealManager:
                     logger.warning(f"Watchdog: {peer_id} never seen -- attempting contact")
                     self._repair_in_progress[peer_id] = {"started_at": now, "level": 1}
                     asyncio.create_task(
-                        self.repair_with_escalation(peer_id, ["P1_nats", "P2_http"], "restart_nats"))
+                        self._repair_with_backoff(peer_id, ["P1_nats", "P2_http"], "restart_nats"))
+
+    async def _repair_with_backoff(self, target: str, broken_channels: list, action: str):
+        """Wrapper around repair_with_escalation that tracks backoff on failure."""
+        result = await self.repair_with_escalation(target, broken_channels, action)
+        if result and result.get("repaired"):
+            self._record_successful_repair(target)
+        else:
+            self._record_failed_repair(target)
 
     async def _watchdog_check_channel_health(self):
-        """Check channel health scores and trigger repair for degraded peers."""
+        """Check channel health scores and trigger repair for degraded peers.
+
+        Respects idle backoff and vacation markers — will not flood idle nodes.
+        """
         now = time.time()
         for peer_id, channels in self._nerve._channel_health.items():
+            # Skip vacation or backed-off nodes
+            if self.is_on_vacation(peer_id) or self._should_skip_repair(peer_id):
+                continue
             score, broken = self._get_peer_health_score(peer_id)
             if score >= HEAL_SCORE_THRESHOLD or not broken:
                 continue

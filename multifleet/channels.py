@@ -385,8 +385,19 @@ class CommunicationProtocol:
         - Prioritizes peers not probed in the last 5 minutes
         - Caps at SELF_HEAL_MAX_PROBES_PER_CYCLE (default 10) per cycle
         - Full fleet coverage every ~N/10 cycles (10 min at 100 nodes)
+        - Skips vacation nodes and backed-off idle nodes (flood prevention)
         """
         all_peers = set(self._nerve._peers_config.keys()) - {self._nerve.node_id}
+        if not all_peers:
+            return
+
+        # Filter out vacation/backed-off nodes to prevent flood
+        healer = getattr(self._nerve, '_healer', None)
+        if healer:
+            all_peers = {p for p in all_peers
+                         if not healer.is_on_vacation(p)
+                         and not healer._should_skip_repair(p)}
+
         if not all_peers:
             return
 
