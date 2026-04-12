@@ -85,6 +85,19 @@ class ChiefSynthesis:
         except ImportError:
             pass  # ContextDNA not available — use default scoring only
 
+        # Auto-register Quorum analyzer if available
+        self._quorum_registry = None
+        try:
+            from multifleet.quorum_analyzer import create_quorum_analyzer
+            from multifleet.quorum.quorum_registry import QuorumRegistry
+
+            self._quorum_registry = QuorumRegistry()
+            q_analyzer = create_quorum_analyzer(registry=self._quorum_registry)
+            self.register_analyzer(q_analyzer)
+            logger.info("Quorum analyzer registered")
+        except ImportError:
+            pass  # Quorum system not available
+
     def register_analyzer(self, fn: Callable):
         """Register a semantic analyzer. Called with (task_id, verdicts) -> SynthesisResult."""
         self._analyzers.append(fn)
@@ -107,6 +120,7 @@ class ChiefSynthesis:
                 confidence=0.0,
                 reasoning="No verdicts received",
             )
+            result = self._apply_quorum_feedback(result)
             self._log_decision(result)
             return result
 
@@ -182,6 +196,8 @@ class ChiefSynthesis:
                 best = self._apply_memory_influence(best, task_id, verdicts)
                 # Wisdom feedback loop — proven wisdom checks the decision
                 best = self._apply_wisdom_feedback(best)
+                # Quorum feedback loop — enrich with stress/quorum + create proposals
+                best = self._apply_quorum_feedback(best)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
                 self._record_evidence(best)
                 self._push_to_contextdna(best)
@@ -197,6 +213,8 @@ class ChiefSynthesis:
         result = self._apply_memory_influence(result, task_id, verdicts)
         # Wisdom feedback loop — proven wisdom checks the decision
         result = self._apply_wisdom_feedback(result)
+        # Quorum feedback loop — enrich with stress/quorum + create proposals
+        result = self._apply_quorum_feedback(result)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
         self._push_to_contextdna(result)
@@ -407,6 +425,33 @@ class ChiefSynthesis:
 
         except (ImportError, Exception) as e:
             logger.debug("Wisdom feedback unavailable: %s", e)
+
+        return result
+
+    def _apply_quorum_feedback(self, result: SynthesisResult) -> SynthesisResult:
+        """Post-synthesis quorum integration.
+
+        Two-way coupling:
+        1. Enrich result with stress/quorum context (quorum -> synthesis)
+        2. Record decision as quorum proposal (synthesis -> quorum)
+        """
+        if not self._quorum_registry:
+            return result
+        try:
+            from multifleet.quorum_analyzer import (
+                enrich_result_with_quorum,
+                apply_synthesis_to_quorum,
+            )
+
+            # Quorum -> Synthesis: stress gating + context enrichment
+            result = enrich_result_with_quorum(result, self._quorum_registry)
+
+            # Synthesis -> Quorum: decision becomes proposal
+            feedback = apply_synthesis_to_quorum(result, self._quorum_registry)
+            result.metadata["quorum_feedback"] = feedback
+
+        except (ImportError, Exception) as e:
+            logger.debug("Quorum feedback unavailable: %s", e)
 
         return result
 
