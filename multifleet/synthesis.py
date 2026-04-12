@@ -180,6 +180,8 @@ class ChiefSynthesis:
                     best.metadata["contextdna_evidence_count"] = len(contextdna_context)
                 # Resolve memory influence (the "holy shit" moment)
                 best = self._apply_memory_influence(best, task_id, verdicts)
+                # Wisdom feedback loop — proven wisdom checks the decision
+                best = self._apply_wisdom_feedback(best)
                 self._log_decision(best, duration_ms=_elapsed_ms(t0))
                 self._record_evidence(best)
                 self._push_to_contextdna(best)
@@ -193,6 +195,8 @@ class ChiefSynthesis:
             result.metadata["contextdna_evidence_count"] = len(contextdna_context)
         # Resolve memory influence (the "holy shit" moment)
         result = self._apply_memory_influence(result, task_id, verdicts)
+        # Wisdom feedback loop — proven wisdom checks the decision
+        result = self._apply_wisdom_feedback(result)
         self._log_decision(result, duration_ms=_elapsed_ms(t0))
         self._record_evidence(result)
         self._push_to_contextdna(result)
@@ -354,6 +358,52 @@ class ChiefSynthesis:
 
         except (ImportError, Exception) as e:
             logger.debug("Memory influence unavailable: %s", e)
+
+        return result
+
+    def _apply_wisdom_feedback(self, result: SynthesisResult) -> SynthesisResult:
+        """Post-synthesis wisdom check — does proven wisdom contradict this decision?
+
+        Reads promoted wisdom from evidence ledger + fleet-wisdom files.
+        Attaches warnings to metadata. Adjusts confidence downward if
+        contradictions are found.
+        """
+        try:
+            from multifleet.wisdom_consumer import WisdomConsumer
+            consumer = WisdomConsumer(evidence_ledger=self._evidence_ledger)
+            feedback = consumer.feed_synthesis(result.to_chief_decision())
+
+            result.metadata["wisdom_feedback"] = {
+                "warnings_count": len(feedback["warnings"]),
+                "supporting_count": len(feedback["supporting"]),
+                "wisdom_checked": feedback["wisdom_checked"],
+            }
+
+            if feedback["warnings"]:
+                # Each contradiction warning reduces confidence slightly
+                penalty = min(0.15, len(feedback["warnings"]) * 0.05)
+                old_conf = result.confidence
+                result.confidence = max(0.0, result.confidence - penalty)
+                result.metadata["wisdom_feedback"]["confidence_penalty"] = round(penalty, 3)
+
+                warning_msgs = [w["message"] for w in feedback["warnings"]]
+                result.reasoning = (
+                    f"**Wisdom warning ({len(warning_msgs)} contradiction(s))**: "
+                    f"{warning_msgs[0][:120]}... "
+                    f"Original: {result.reasoning}"
+                )
+                logger.warning(
+                    "Wisdom feedback: %d contradiction(s), confidence %.3f → %.3f",
+                    len(warning_msgs), old_conf, result.confidence,
+                )
+            elif feedback["supporting"]:
+                logger.info(
+                    "Wisdom feedback: %d supporting entries, no contradictions",
+                    len(feedback["supporting"]),
+                )
+
+        except (ImportError, Exception) as e:
+            logger.debug("Wisdom feedback unavailable: %s", e)
 
         return result
 
