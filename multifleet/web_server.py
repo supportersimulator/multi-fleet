@@ -46,6 +46,7 @@ _ide_bridge = None
 _professor_bridge = None
 _server_instance: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
+_ide_panel_server = None
 
 
 def _get_aggregator():
@@ -83,6 +84,21 @@ def _get_professor_bridge():
         except Exception as e:
             logger.warning("Could not init professor bridge: %s", e)
     return _professor_bridge
+
+
+def _get_ide_panel_server():
+    """Lazy-init IDE panel server."""
+    global _ide_panel_server
+    if _ide_panel_server is None:
+        try:
+            from multifleet.ide_panels import IDEPanelServer
+            _ide_panel_server = IDEPanelServer(
+                daemon_port=DAEMON_PORT,
+                professor_bridge=_get_professor_bridge(),
+            )
+        except Exception as e:
+            logger.warning("Could not init IDE panel server: %s", e)
+    return _ide_panel_server
 
 
 
@@ -151,6 +167,8 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_regression()
         elif path == "/api/regression":
             self._serve_json(self._get_regression())
+        elif path.startswith("/api/panels"):
+            self._serve_panels(path)
         elif path.startswith("/extension/"):
             self._serve_extension(path)
         elif path == "/health":
@@ -257,6 +275,40 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.warning("regression API failed: %s", e)
             return {"error": str(e)}
+
+    def _serve_panels(self, path: str):
+        """Route /api/panels/* to IDEPanelServer methods."""
+        panel_server = _get_ide_panel_server()
+        if panel_server is None:
+            self._serve_json({"error": "IDE panel server not available"})
+            return
+
+        # Parse query params
+        query_str = self.path.split("?", 1)[1] if "?" in self.path else ""
+        params = {}
+        for part in query_str.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                params[k] = v
+
+        sub = path[len("/api/panels"):].strip("/")
+
+        if sub == "" or sub == "all":
+            self._serve_json(panel_server.all_panels())
+        elif sub == "fleet-status":
+            self._serve_json(panel_server.fleet_status_panel())
+        elif sub == "evidence-timeline":
+            hours = float(params.get("hours", "24"))
+            self._serve_json(panel_server.evidence_timeline_panel(hours=hours))
+        elif sub == "synthesis-decisions":
+            limit = int(params.get("limit", "20"))
+            self._serve_json(panel_server.synthesis_decisions_panel(limit=limit))
+        elif sub == "probe-findings":
+            self._serve_json(panel_server.probe_findings_panel())
+        elif sub == "wisdom-feedback":
+            self._serve_json(panel_server.wisdom_feedback_panel())
+        else:
+            self.send_error(404, f"Unknown panel: {sub}")
 
     def _serve_extension(self, path: str):
         bridge = _get_ide_bridge()
