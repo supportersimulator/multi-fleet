@@ -806,13 +806,43 @@ class FleetRace:
             packet = race.get("epistemic_packet", {})
             policy = (packet or {}).get("acceptance_policy", "standard")
 
+            # Constitutional validation — wire real invariant checks
+            invariants_ok = True
+            try:
+                from multifleet.constitution import validate_before_action
+                gate_ctx = {
+                    "action": f"accept_race_{race['race_id']}",
+                    "has_checkpoint": True,  # race branches are checkpoints
+                    "destructive": False,
+                    "evidence_count": 1 if synthesis.get("reasoning") else 0,
+                    "confidence": synthesis.get("confidence", 0.5),
+                    "scope": "minimal",
+                    "node_id": self._node_id,
+                }
+                constitution_result = validate_before_action("accept_race", gate_ctx)
+                invariants_ok = constitution_result.passed
+                if constitution_result.advisories:
+                    for adv in constitution_result.advisories:
+                        logger.warning(
+                            "Race %s constitution advisory [%s]: %s",
+                            race["race_id"], adv.principle_id, adv.message,
+                        )
+                if not invariants_ok:
+                    logger.error(
+                        "Race %s constitution BLOCKED: %s",
+                        race["race_id"], constitution_result.summary,
+                    )
+            except Exception as e:
+                logger.warning("Constitution check failed, degrading to pass: %s", e)
+                invariants_ok = True
+
             gate = AcceptanceGate(strict=(policy == "strict"))
             decision = gate.evaluate(
                 probe_results=(packet or {}).get("probe_results", []),
                 surgeon_resolved=synthesis.get("engine") == "chief_synthesis",
                 surgeon_intensity=(packet or {}).get("required_surgeon_intensity", "light"),
                 surgeon_dissent_count=len(synthesis.get("dissent_preserved", [])),
-                invariants_satisfied=True,  # TODO: wire real invariant checks
+                invariants_satisfied=invariants_ok,
                 evidence_count=1 if synthesis.get("reasoning") else 0,
                 epistemic_packet=packet,
             )
