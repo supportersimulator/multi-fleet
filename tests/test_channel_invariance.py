@@ -184,7 +184,8 @@ class TestEventBusIntegration:
                 "mac1": {"score": "1/7", "broken": ["P1_nats", "P2_http", "P3_chief", "P4_seed", "P5_ssh", "P6_wol"]},
             },
         }
-        with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+        with patch.object(monitor, "_fetch_daemon_health", return_value=health), \
+             patch("multifleet.event_emitter.emit_typed", side_effect=ImportError("test")):
             result = monitor.check_fleet()
 
         # Check events were emitted
@@ -214,7 +215,8 @@ class TestEventBusIntegration:
                 "mac1": {"score": "6/7", "broken": ["P6_wol"]},
             },
         }
-        with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+        with patch.object(monitor, "_fetch_daemon_health", return_value=health), \
+             patch("multifleet.event_emitter.emit_typed", side_effect=ImportError("test")):
             monitor.check_fleet()
 
         emit_calls = monitor._eventbus.emit.call_args_list
