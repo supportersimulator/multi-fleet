@@ -94,9 +94,8 @@ class IDEBridge:
         if connect_fn is None:
             def connect_fn():
                 try:
-                    from multifleet.eventbus import FleetEventBus
-                    import os
-                    bus = FleetEventBus(node_id=os.environ.get("MULTIFLEET_NODE_ID", "unknown"))
+                    from multifleet.event_bus import IDEEventBus
+                    IDEEventBus.get()  # singleton init validates availability
                     self._connected = True
                     return True
                 except Exception:

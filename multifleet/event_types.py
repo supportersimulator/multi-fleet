@@ -48,7 +48,10 @@ def create_event(
     correlation_id: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> dict:
-    """Create a properly structured ContextDNA Event v1.
+    """Create a plain dict ContextDNA Event v1 — used by the in-process EventBus.
+
+    For typed EventEnvelope events (with signal_class, quorum sensing),
+    use event_schema.create_event() instead.
 
     Args:
         event_type: Dotted namespace event type (e.g. 'injection.completed').

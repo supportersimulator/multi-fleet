@@ -314,10 +314,10 @@ class FleetLiaison:
                 logger.debug("EventBus publish failed (non-fatal): %s", e)
             return
 
-        # Try lazy import of FleetEventBus
+        # Try lazy import of IDEEventBus
         try:
-            from multifleet.eventbus import FleetEventBus
-            self._event_bus = FleetEventBus(node_id=self.node_id)
+            from multifleet.event_bus import IDEEventBus
+            self._event_bus = IDEEventBus.get()
             self._event_bus.emit(
                 f"liaison.message.{event_type}",
                 {

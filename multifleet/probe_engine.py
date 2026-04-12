@@ -166,11 +166,8 @@ class ProbeRegistry:
         which filters to HIGH+ severity only, keeping the ledger signal-rich.
         """
         try:
-            from multifleet.eventbus import FleetEventBus
-            import os
-            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
-            bus = FleetEventBus(node_id=node_id)
-            bus.emit("probe.finding", result.to_dict())
+            from multifleet.event_bus import IDEEventBus
+            IDEEventBus.get().emit("probe.finding", result.to_dict(), source="probe-engine")
         except Exception:
             pass  # Best-effort — never fail probe execution for event emission
 

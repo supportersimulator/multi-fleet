@@ -10,6 +10,7 @@ import os
 import time
 import urllib.request
 import uuid
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -42,12 +43,21 @@ _BROADCAST_EVENT_TYPES = frozenset({
 class FleetEventBus:
     """Publishes fleet events to the 3-surgeons EventBus or JSONL fallback.
 
+    .. deprecated::
+        Use :class:`multifleet.event_bus.IDEEventBus` instead.
+        FleetEventBus will be removed in a future version.
+
     This is a producer only — it does not run a server or consume events.
     All methods are synchronous and safe to call from both sync and async code
     (no blocking I/O longer than the HTTP timeout).
     """
 
     def __init__(self, node_id: str, daemon_port: int = 8855):
+        warnings.warn(
+            "FleetEventBus is deprecated. Use event_bus.IDEEventBus instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._node_id = node_id
         self._daemon_port = daemon_port
         self._eventbus_available: Optional[bool] = None  # None = unknown

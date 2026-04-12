@@ -952,11 +952,10 @@ class FleetRace:
                 return
         except (ImportError, Exception):
             pass
-        # Fallback
+        # Fallback — use unified IDEEventBus
         try:
-            from multifleet.eventbus import FleetEventBus
-            bus = FleetEventBus(node_id=self._node_id, daemon_port=self._port)
-            bus.emit(event_type, payload)
+            from multifleet.event_bus import IDEEventBus
+            IDEEventBus.get().emit(f"fleet.{event_type}", payload, source=f"fleet-nerve:{self._node_id}")
         except Exception as e:
             logger.debug("EventBus emit failed (non-critical): %s", e)
 

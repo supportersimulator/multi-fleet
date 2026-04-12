@@ -300,15 +300,13 @@ class Supervisor:
 
         # Emit to EventBus (best-effort)
         try:
-            from multifleet.eventbus import FleetEventBus
-            import os
-            bus = FleetEventBus(node_id=os.environ.get("MULTIFLEET_NODE_ID", self._node_id))
-            bus.emit("supervisor.phase_transition", {
+            from multifleet.event_bus import IDEEventBus
+            IDEEventBus.get().emit("supervisor.phase_transition", {
                 "task_id": state.task_id,
                 "from": from_phase.value if from_phase else None,
                 "to": to_phase.value,
                 "iteration": state.iteration_count,
-            })
+            }, source=f"supervisor:{self._node_id}")
         except Exception:
             pass
 

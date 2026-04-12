@@ -1460,18 +1460,18 @@ def _get_evidence_ledger():
 
 
 def _get_eventbus():
-    """Get or create a FleetEventBus instance (lazy init)."""
+    """Get or create an IDEEventBus instance (lazy init via singleton)."""
     global _fleet_eventbus
     try:
         return _fleet_eventbus
     except NameError:
         pass
     try:
-        from multifleet.eventbus import FleetEventBus
-        _fleet_eventbus = FleetEventBus(node_id=NODE_ID, daemon_port=FLEET_NERVE_PORT)
+        from multifleet.event_bus import IDEEventBus
+        _fleet_eventbus = IDEEventBus.get()
         return _fleet_eventbus
     except Exception as e:
-        logger.warning(f"FleetEventBus init failed: {e}")
+        logger.warning(f"IDEEventBus init failed: {e}")
         return None
 
 
@@ -1488,7 +1488,7 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
             return {"error": "resource_id required for acquire"}
         result = mgr.acquire(resource_id, lease_type=lease_type)
         if result.get("acquired") and eventbus:
-            eventbus.lease_changed(resource_id, "acquired", NODE_ID)
+            eventbus.emit("fleet.lease.acquired", {"resource_id": resource_id, "holder": NODE_ID})
         # Record in evidence ledger
         evidence = _get_evidence_ledger()
         if evidence:
@@ -1501,7 +1501,7 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
             return {"error": "resource_id required for release"}
         result = mgr.release(resource_id)
         if result.get("released") and eventbus:
-            eventbus.lease_changed(resource_id, "released", NODE_ID)
+            eventbus.emit("fleet.lease.released", {"resource_id": resource_id, "holder": NODE_ID})
         return result
     elif action == "renew":
         if not resource_id:
@@ -1540,7 +1540,7 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
             eventbus.emit("rebuttal.proposed", {
                 "proposal_id": result["proposal_id"], "subject": subject,
                 "proposer": NODE_ID, "scope": scope,
-            }, broadcast=True)
+            })
         return result
     elif action == "review":
         if not proposal_id:
@@ -1555,7 +1555,7 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
                 eventbus.emit("rebuttal.resolved", {
                     "proposal_id": proposal_id, "resolution": "accepted",
                     "actor": NODE_ID,
-                }, broadcast=True)
+                })
             evidence = _get_evidence_ledger()
             if evidence:
                 evidence.record("rebuttal_resolved", NODE_ID,
@@ -1580,7 +1580,7 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
                 eventbus.emit("rebuttal.resolved", {
                     "proposal_id": proposal_id, "resolution": resolution,
                     "actor": NODE_ID,
-                }, broadcast=True)
+                })
             evidence = _get_evidence_ledger()
             if evidence:
                 evidence.record("rebuttal_resolved", NODE_ID,
@@ -1866,7 +1866,7 @@ def fleet_race(task: str, nodes: str = "", timeout: str = "600") -> dict:
             "task": task[:100],
             "participants": list(result.get("participants", {}).keys()),
             "status": result.get("status"),
-        }, broadcast=True)
+        })
 
     return result
 
@@ -1962,7 +1962,7 @@ def fleet_orchestrate(action: str = "run", task: str = "", criteria: str = "",
                 "status": result.get("status"),
                 "parallel": is_parallel,
                 "elapsed_s": result.get("elapsed_s", 0),
-            }, broadcast=True)
+            })
 
         return result
 

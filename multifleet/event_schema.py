@@ -178,7 +178,10 @@ def create_event(
     session_id: str = None,
     signal_class: str = None,
 ) -> EventEnvelope:
-    """Factory for creating properly typed events.
+    """Canonical factory for creating typed EventEnvelope events.
+
+    Returns an EventEnvelope (dataclass). For plain dict events used by
+    the in-process EventBus, see event_types.create_event().
 
     If signal_class is not provided, it is auto-classified using
     the quorum sensing signal classifier (Las/Rhl/PQS/IQS mapping).
