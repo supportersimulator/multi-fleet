@@ -25,6 +25,7 @@ from collections import defaultdict, deque
 from typing import Any, Callable, Optional
 
 from .event_bus_server import EventBus
+from .event_middleware import register_default_middleware
 from .event_types import validate_namespace
 
 logger = logging.getLogger("multifleet.event_bus")
@@ -37,9 +38,11 @@ NS_SURGEON = "surgeon"
 NS_PANEL = "panel"
 NS_EVIDENCE = "evidence"
 NS_QUORUM = "quorum"
+NS_SUPERPOWERS = "superpowers"
 
 ALL_NAMESPACES = frozenset({
     NS_FLEET, NS_PROBE, NS_SURGEON, NS_PANEL, NS_EVIDENCE, NS_QUORUM,
+    NS_SUPERPOWERS,
 })
 
 # Default ring sizes
@@ -82,6 +85,9 @@ class IDEEventBus:
 
         # Auto-capture events into namespace rings
         self._bus.on("*", self._capture_to_ns_ring)
+
+        # Register default advisory middleware (schema validation + rate limiting)
+        register_default_middleware(self)
 
     # ── Singleton ──
 
@@ -407,6 +413,25 @@ class IDEEventBus:
             "proposal_id": proposal_id, "decision": decision,
             "votes_for": votes_for, "votes_against": votes_against, **extra,
         }, source="quorum")
+
+    # ── superpowers.* ──
+
+    def superpowers_phase_changed(
+        self,
+        old_phase: str,
+        new_phase: str,
+        node_id: str,
+        timestamp: Optional[float] = None,
+        **extra,
+    ) -> Optional[dict]:
+        """Publish superpowers.phase.changed — workflow phase transition."""
+        return self.emit("superpowers.phase.changed", {
+            "old_phase": old_phase,
+            "new_phase": new_phase,
+            "node_id": node_id,
+            "timestamp": timestamp or time.time(),
+            **extra,
+        }, source="superpowers-adapter")
 
     # ══════════════════════════════════════════════════════════════
     # Integration hooks — attach external systems
