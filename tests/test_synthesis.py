@@ -21,8 +21,11 @@ def ledger(tmp_path):
 
 
 @pytest.fixture
-def engine(ledger):
-    return ChiefSynthesis(ledger_path=str(ledger))
+def engine(ledger, tmp_path):
+    e = ChiefSynthesis(ledger_path=str(ledger))
+    # Isolate from real wisdom files on disk so tests get deterministic scores
+    e._wisdom_path = str(tmp_path / "empty-wisdom")
+    return e
 
 
 def _verdict(confidence=0.8, risks=None, dissent=None, strengths=None,

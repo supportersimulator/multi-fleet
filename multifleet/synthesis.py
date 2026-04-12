@@ -370,7 +370,10 @@ class ChiefSynthesis:
         """
         try:
             from multifleet.wisdom_consumer import WisdomConsumer
-            consumer = WisdomConsumer(evidence_ledger=self._evidence_ledger)
+            consumer = WisdomConsumer(
+                evidence_ledger=self._evidence_ledger,
+                wisdom_path=getattr(self, '_wisdom_path', None),
+            )
             feedback = consumer.feed_synthesis(result.to_chief_decision())
 
             result.metadata["wisdom_feedback"] = {
