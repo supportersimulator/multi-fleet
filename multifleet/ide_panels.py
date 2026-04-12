@@ -76,13 +76,14 @@ class IDEPanelServer:
     def __init__(self, daemon_port: int = DAEMON_PORT,
                  evidence_ledger=None, probe_engine=None,
                  synthesis=None, wisdom_consumer=None,
-                 professor_bridge=None):
+                 professor_bridge=None, synaptic_bridge=None):
         self._daemon_port = daemon_port
         self._evidence_ledger = evidence_ledger
         self._probe_engine = probe_engine
         self._synthesis = synthesis
         self._wisdom_consumer = wisdom_consumer
         self._professor_bridge = professor_bridge
+        self._synaptic_bridge = synaptic_bridge
 
     # ── Lazy accessors ───────────────────────────────────────────────
 
@@ -136,6 +137,16 @@ class IDEPanelServer:
         except Exception as e:
             logger.debug("ProfessorBridge unavailable: %s", e)
         return self._professor_bridge
+
+    def _get_synaptic_bridge(self):
+        if self._synaptic_bridge is not None:
+            return self._synaptic_bridge
+        try:
+            from multifleet.synaptic_bridge import SynapticBridge
+            self._synaptic_bridge = SynapticBridge()
+        except Exception as e:
+            logger.debug("SynapticBridge unavailable: %s", e)
+        return self._synaptic_bridge
 
     # ── Panel: Fleet Status ──────────────────────────────────────────
 
@@ -400,6 +411,46 @@ class IDEPanelServer:
             ", ".join(parts) if parts else "No wisdom data",
         )
 
+    # ── Panel: Synaptic Consciousness ──────────────────────────────
+
+    def synaptic_panel(self) -> dict:
+        """Synaptic 8th Intelligence — active insights and fleet awareness.
+
+        Surfaces pattern detections, anomalies, drift warnings, and
+        coordination observations from the SynapticBridge.
+        """
+        bridge = self._get_synaptic_bridge()
+        if bridge is None:
+            return _panel_envelope(
+                "synaptic", "Synaptic Consciousness", [],
+                "Synaptic bridge unavailable",
+            )
+
+        insights = bridge.get_active_insights()
+        alert = bridge.should_alert_aaron()
+        stats = bridge.stats
+
+        alert_str = " — ALERT: Aaron's attention needed" if alert else ""
+        severity_counts: dict[str, int] = {}
+        for i in insights:
+            sev = i.get("severity", "info")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+        parts = []
+        for sev in ("critical", "warning", "info"):
+            count = severity_counts.get(sev, 0)
+            if count:
+                parts.append(f"{count} {sev}")
+
+        summary_text = ", ".join(parts) if parts else "No active insights"
+        summary_text += f" | {stats.get('total_events_processed', 0)} events processed"
+        summary_text += alert_str
+
+        return _panel_envelope(
+            "synaptic", "Synaptic Consciousness", insights,
+            summary_text,
+        )
+
     # ── All Panels ───────────────────────────────────────────────────
 
     def all_panels(self) -> dict:
@@ -411,6 +462,7 @@ class IDEPanelServer:
                 self.synthesis_decisions_panel(),
                 self.probe_findings_panel(),
                 self.wisdom_feedback_panel(),
+                self.synaptic_panel(),
             ],
             "generated_at": _now_iso(),
         }

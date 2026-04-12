@@ -2773,6 +2773,40 @@ class FleetNerveNATS:
                         self._json_response(400, {"error": str(e)})
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/orchestrate":
+                    try:
+                        orch = daemon._task_orchestrator
+                        if not orch:
+                            self._json_response(503, {"error": "TaskOrchestrator not available"})
+                            return
+                        action = body.get("action", "run")
+                        if action == "run":
+                            task_desc = body.get("task", "")
+                            if not task_desc:
+                                self._json_response(400, {"error": "missing 'task'"})
+                                return
+                            criteria_raw = body.get("criteria", "Complete")
+                            criteria = [c.strip() for c in criteria_raw.split(",") if c.strip()]
+                            parallel = body.get("parallel", "false") in (True, "true", "1")
+                            nodes_raw = body.get("nodes", "")
+                            nodes = [n.strip() for n in nodes_raw.split(",") if n.strip()] if nodes_raw else None
+                            result = orch.run_task(
+                                task_desc, done_criteria=criteria,
+                                parallel=parallel, nodes=nodes,
+                            )
+                            self._json_response(200, result)
+                        elif action == "status":
+                            task_id = body.get("task_id", "")
+                            if not task_id:
+                                self._json_response(400, {"error": "missing 'task_id'"})
+                                return
+                            self._json_response(200, orch.status(task_id))
+                        elif action == "list":
+                            self._json_response(200, {"tasks": orch.list_tasks()})
+                        else:
+                            self._json_response(400, {"error": f"Unknown action: {action}. Use: run, status, list"})
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()

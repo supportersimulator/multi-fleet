@@ -285,6 +285,19 @@ def submit_verdict(task_id: str, node: str, verdict: dict) -> dict:
 def force_complete(race_id: str = None) -> dict:
     """Force-complete a race with whatever verdicts are available."""
     logger.info("Force-completing race %s", race_id or "current")
+
+    # Run gains gate before completing — ensures fleet health is acceptable
+    try:
+        from multifleet.gains_gate import FleetGainsGate
+        gate = FleetGainsGate()
+        gate_result = gate.run(quick=True)
+        if not gate_result.passed:
+            return {"error": "Gains gate failed", "details": gate_result.to_dict()}
+    except ImportError:
+        logger.warning("gains_gate not available — skipping pre-complete check")
+    except Exception as e:
+        logger.warning("Gains gate check failed: %s — proceeding anyway", e)
+
     return {"action": "force_complete", "race_id": race_id, "status": "not_implemented_yet"}
 
 

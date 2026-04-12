@@ -2658,6 +2658,51 @@ def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
     return fleet_server_tool(action=action, port=port)
 
 
+_health_monitor = None
+
+
+def _run_daemon_bootstrap() -> None:
+    """Bootstrap all daemon services on MCP initialize.
+
+    Runs once when the MCP client connects. Starts background services
+    (health monitor, liaison) and pre-warms lazy singletons (fleet race).
+    All errors are logged but never block startup.
+    """
+    global _health_monitor
+
+    # 1. Startup migration
+    try:
+        _run_startup_migration()
+    except Exception as e:
+        logger.warning("Startup migration failed: %s", e)
+
+    # 2. Health monitor — continuous fleet observation + auto-repair
+    try:
+        from multifleet.health_monitor import FleetHealthMonitor
+        _health_monitor = FleetHealthMonitor(
+            daemon_port=FLEET_NERVE_PORT, node_id=NODE_ID
+        )
+        _health_monitor.start()
+        logger.info("Health monitor started (node=%s port=%d)", NODE_ID, FLEET_NERVE_PORT)
+    except Exception as e:
+        logger.warning("Health monitor init failed: %s", e)
+
+    # 3. Fleet race — pre-warm the lazy singleton
+    try:
+        _get_fleet_race()
+        logger.info("FleetRace pre-warmed")
+    except Exception as e:
+        logger.warning("FleetRace pre-warm failed: %s", e)
+
+    # 4. Liaison — background comms handler
+    try:
+        liaison = _get_liaison()
+        if liaison is not None:
+            logger.info("Liaison initialized for node=%s", NODE_ID)
+    except Exception as e:
+        logger.warning("Liaison init failed: %s", e)
+
+
 def _run_startup_migration() -> None:
     """Run fleet migration check on startup."""
     from multifleet.migration import FleetMigration
@@ -3287,6 +3332,7 @@ def handle_request(request: dict) -> dict:
     method = request.get("method", "")
 
     if method == "initialize":
+        _run_daemon_bootstrap()
         return {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
