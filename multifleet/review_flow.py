@@ -368,13 +368,13 @@ class ReviewFlowOrchestrator:
         try:
             from multifleet.event_emitter import emit_typed
             from multifleet.event_schema import EventType, EventSource
-            # Map to closest EventType
+            # Map to proper typed EventType values
             type_map = {
-                "review.started": EventType.FLEET_TASK_CREATED,
-                "review.verdict_received": EventType.RACE_NODE_FINISHED,
-                "review.completed": EventType.TASK_ACCEPTED,
+                "review.started": EventType.REVIEW_STARTED,
+                "review.verdict_received": EventType.REVIEW_VERDICT_RECEIVED,
+                "review.completed": EventType.REVIEW_COMPLETED,
             }
-            et = type_map.get(event_type, EventType.FLEET_TASK_CREATED)
+            et = type_map.get(event_type, EventType.REVIEW_STARTED)
             emit_typed(et, EventSource.MULTI_FLEET, payload=payload, task_id=task_id)
             if task_id in self._results:
                 self._results[task_id].events_emitted += 1

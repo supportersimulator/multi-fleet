@@ -562,8 +562,15 @@ def cmd_arbiter(args):
                 print(f"    Alt: {alt.get('node', '?')} — {alt.get('summary', '?')[:80]}")
 
 
-def cmd_probe(_args):
-    """Run probe scan and display findings."""
+def cmd_probe(args):
+    """Run probe scan and display findings, or manage schedules."""
+    action = getattr(args, "probe_action", None)
+
+    if action == "schedule":
+        _cmd_probe_schedule(args)
+        return
+
+    # Default: show probe findings
     data = _get("/scan/results", timeout=15)
     _check_error(data)
     results = data.get("results", [])
@@ -572,6 +579,51 @@ def cmd_probe(_args):
         return
     _header(f"Probe Findings ({len(results)} results)")
     _print_json(data)
+
+
+def _cmd_probe_schedule(args):
+    """Probe scheduler management — status, tick, cached results."""
+    sub_action = getattr(args, "schedule_action", "status")
+
+    try:
+        from multifleet.probes import create_engine
+        from multifleet.probe_scheduler import ProbeScheduler
+    except ImportError as exc:
+        _die(f"probe_scheduler not available: {exc}")
+        return
+
+    engine = create_engine()
+    scheduler = ProbeScheduler(engine)
+    scheduler.load_defaults()
+
+    if sub_action == "status":
+        s = scheduler.status()
+        _header("Probe Scheduler Status")
+        _print_json(s)
+
+    elif sub_action == "tick":
+        _header("Running scheduler tick")
+        results = scheduler.tick()
+        if not results:
+            _ok("No probes were due")
+        else:
+            _ok(f"Ran {len(results)} probe(s)")
+            for r in results:
+                sym = "+" if r.status == "ok" else "~" if r.status == "warning" else "!"
+                print(f"  [{sym}] {r.probe_id}: {r.status} ({r.duration_ms:.0f}ms)")
+
+    elif sub_action == "cached":
+        cached = scheduler.get_cached_results()
+        if not cached:
+            _warn("No cached results (run 'fleet probe schedule tick' first)")
+            return
+        _header(f"Cached Probe Results ({len(cached)})")
+        for pid, cr in cached.items():
+            stale_tag = " [STALE]" if cr.is_stale else ""
+            print(f"  {pid}: {cr.result.status} (age {cr.age_s:.0f}s, ttl {cr.ttl_s:.0f}s){stale_tag}")
+
+    else:
+        _die(f"Unknown schedule action: {sub_action}")
 
 
 def cmd_orchestrate(args):
@@ -867,8 +919,13 @@ def main():
     arb_p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     arb_p.add_argument("--verbose", "-v", action="store_true", help="Show detailed decision info")
 
-    # probe / scan
-    sub.add_parser("probe", help="Run probe scan and show findings")
+    # probe / scan (with schedule sub-command)
+    probe_p = sub.add_parser("probe", help="Run probe scan and show findings")
+    probe_sub = probe_p.add_subparsers(dest="probe_action")
+    sched_p = probe_sub.add_parser("schedule", help="Probe scheduler management")
+    sched_p.add_argument("schedule_action", nargs="?", default="status",
+                         choices=["status", "tick", "cached"],
+                         help="status=show schedules, tick=run due probes, cached=show cached results")
 
     # theater — 5-zone surgical theater dashboard
     theater_p = sub.add_parser("theater", help="Launch 5-zone surgical theater dashboard")

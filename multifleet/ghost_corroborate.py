@@ -299,8 +299,9 @@ class GhostCorroborate:
             from multifleet.event_emitter import emit_typed
             from multifleet.event_schema import EventSource
 
+            from multifleet.event_schema import EventType
             emit_typed(
-                event_type="ghost.corroborate.completed",
+                event_type=EventType.GHOST_CORROBORATE_COMPLETED,
                 source=EventSource.GHOST,
                 payload={
                     "strengthened": result.strengthened,

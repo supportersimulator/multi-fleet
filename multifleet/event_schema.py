@@ -79,6 +79,33 @@ class EventType(Enum):
     RACE_STARTED = "race.started"
     RACE_COMPLETED = "race.completed"
     RACE_NODE_FINISHED = "race.node.finished"
+    RACE_ARBITER_PENDING = "race.arbiter.pending"
+
+    # Health monitor events
+    HEALTH_TRANSITION = "health.transition"
+    HEALTH_ANOMALY = "health.anomaly"
+    HEALTH_REPAIR = "health.repair"
+    HEALTH_CHANNEL_BROKEN = "health.channel.broken"
+    HEALTH_CHANNEL_HEALING = "health.channel.healing"
+    HEALTH_CHANNEL_RESTORED = "health.channel.restored"
+
+    # Supervisor events
+    SUPERVISOR_TRANSITION = "supervisor.transition"
+
+    # Ghost extended events
+    GHOST_CORROBORATE_COMPLETED = "ghost.corroborate.completed"
+    GHOST_MIRROR_SCANNED = "ghost.mirror.scanned"
+    GHOST_MIRROR_DRIFT = "ghost.mirror.drift_detected"
+    GHOST_ANTICIPATE_COMPLETED = "ghost.anticipate.completed"
+
+    # Synthesis/merge events
+    SYNTHESIS_MERGE_DECISION = "synthesis.merge_decision"
+    SYNTHESIS_DECISION = "synthesis.decision"
+
+    # Review events
+    REVIEW_STARTED = "review.started"
+    REVIEW_VERDICT_RECEIVED = "review.verdict_received"
+    REVIEW_COMPLETED = "review.completed"
 
 
 @dataclass

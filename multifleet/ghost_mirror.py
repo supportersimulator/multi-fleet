@@ -151,8 +151,9 @@ class GhostMirror:
             from multifleet.event_emitter import emit_typed
             from multifleet.event_schema import EventSource
 
+            from multifleet.event_schema import EventType
             emit_typed(
-                event_type="ghost.mirror.scanned",
+                event_type=EventType.GHOST_MIRROR_SCANNED,
                 source=EventSource.GHOST,
                 payload={
                     "docs_checked": result.docs_checked,

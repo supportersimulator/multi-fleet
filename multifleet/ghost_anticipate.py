@@ -229,8 +229,9 @@ class GhostAnticipate:
             from multifleet.event_emitter import emit_typed
             from multifleet.event_schema import EventSource
 
+            from multifleet.event_schema import EventType
             emit_typed(
-                event_type="ghost.anticipate.completed",
+                event_type=EventType.GHOST_ANTICIPATE_COMPLETED,
                 source=EventSource.GHOST,
                 payload={
                     "predictions": len(result.predictions),

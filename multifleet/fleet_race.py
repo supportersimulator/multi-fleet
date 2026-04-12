@@ -890,8 +890,39 @@ class FleetRace:
         except Exception as e:
             logger.warning("Evidence recording failed: %s", e)
 
+    # Map ad-hoc string event types to typed EventType enum values
+    _FLEET_EVENT_MAP: dict = {}
+
+    @classmethod
+    def _get_event_type_map(cls):
+        if not cls._FLEET_EVENT_MAP:
+            from multifleet.event_schema import EventType as ET
+            cls._FLEET_EVENT_MAP = {
+                "fleet.arbiter.pending": ET.RACE_ARBITER_PENDING,
+                "race.started": ET.RACE_STARTED,
+                "race.completed": ET.RACE_COMPLETED,
+                "race.node.finished": ET.RACE_NODE_FINISHED,
+            }
+        return cls._FLEET_EVENT_MAP
+
     def _emit_event(self, event_type: str, payload: dict):
-        """Emit an event to the EventBus (best-effort, never blocks race logic)."""
+        """Emit an event to the EventBus (best-effort, never blocks race logic).
+
+        Prefers typed EventEmitter path; falls back to FleetEventBus for
+        unrecognized event types.
+        """
+        # Try typed emit
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventSource
+            type_map = self._get_event_type_map()
+            et = type_map.get(event_type)
+            if et is not None:
+                emit_typed(et, EventSource.MULTI_FLEET, payload=payload)
+                return
+        except (ImportError, Exception):
+            pass
+        # Fallback
         try:
             from multifleet.eventbus import FleetEventBus
             bus = FleetEventBus(node_id=self._node_id, daemon_port=self._port)

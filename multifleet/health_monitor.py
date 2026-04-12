@@ -409,8 +409,37 @@ class FleetHealthMonitor:
         # -1 is current (just added), -2 is previous
         return list(history)[-2].get("status")
 
+    # Map ad-hoc string event types to typed EventType enum values
+    _EVENT_TYPE_MAP: dict = {}  # populated lazily to avoid circular imports
+
+    @classmethod
+    def _get_event_type_map(cls):
+        if not cls._EVENT_TYPE_MAP:
+            from multifleet.event_schema import EventType as ET
+            cls._EVENT_TYPE_MAP = {
+                "health.transition": ET.HEALTH_TRANSITION,
+                "health.anomaly": ET.HEALTH_ANOMALY,
+                "health.repair": ET.HEALTH_REPAIR,
+                "channel.broken": ET.HEALTH_CHANNEL_BROKEN,
+                "channel.healing": ET.HEALTH_CHANNEL_HEALING,
+                "channel.restored": ET.HEALTH_CHANNEL_RESTORED,
+            }
+        return cls._EVENT_TYPE_MAP
+
     def _emit_event(self, event_type: str, payload: dict):
-        """Emit event via FleetEventBus if wired."""
+        """Emit event via typed EventEmitter (preferred) with FleetEventBus fallback."""
+        # Try typed emit first
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventSource
+            type_map = self._get_event_type_map()
+            et = type_map.get(event_type)
+            if et is not None:
+                emit_typed(et, EventSource.MULTI_FLEET, payload=payload)
+                return
+        except (ImportError, Exception):
+            pass
+        # Fallback to old EventBus path
         if self._eventbus:
             try:
                 self._eventbus.emit(event_type, payload)
