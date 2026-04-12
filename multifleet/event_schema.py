@@ -89,6 +89,9 @@ class EventType(Enum):
     HEALTH_CHANNEL_HEALING = "health.channel.healing"
     HEALTH_CHANNEL_RESTORED = "health.channel.restored"
 
+    # Superpowers events
+    SUPERPOWERS_PHASE_CHANGED = "superpowers.phase.changed"
+
     # Supervisor events
     SUPERVISOR_TRANSITION = "supervisor.transition"
 
@@ -257,6 +260,22 @@ def task_blocked_event(node_id: str, task_id: str, blocking_issues: list[str]) -
         node_id,
         payload={"blocking_issues": blocking_issues},
         task_id=task_id,
+    )
+
+
+def superpowers_phase_event(
+    node_id: str, old_phase: str, new_phase: str, timestamp: float = 0.0,
+) -> EventEnvelope:
+    """Create a superpowers.phase.changed event."""
+    return create_event(
+        EventType.SUPERPOWERS_PHASE_CHANGED,
+        EventSource.SUPERPOWERS,
+        node_id,
+        payload={
+            "old_phase": old_phase,
+            "new_phase": new_phase,
+            "timestamp": timestamp or time.time(),
+        },
     )
 
 

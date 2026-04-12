@@ -11,10 +11,21 @@ for internal fleet-side phase tracking.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.superpowers-adapter")
+
+# Node ID for event emission — defaults to hostname
+_NODE_ID: Optional[str] = None
+
+
+def _get_node_id() -> str:
+    global _NODE_ID
+    if _NODE_ID is None:
+        _NODE_ID = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+    return _NODE_ID
 
 
 class SuperpowersAdapter:
@@ -96,9 +107,25 @@ class SuperpowersAdapter:
     def on_phase_change(self, old_phase: str, new_phase: str) -> None:
         """React to workflow phase transitions.
 
+        Emits superpowers.phase.changed on the IDEEventBus.
         If entering an execution phase, flush any queued races.
         If entering a blocking phase, log the hold.
         """
+        # Emit phase change event (graceful degradation if bus unavailable)
+        try:
+            from .event_bus import IDEEventBus
+            bus = IDEEventBus.get()
+            bus.superpowers_phase_changed(
+                old_phase=old_phase,
+                new_phase=new_phase,
+                node_id=_get_node_id(),
+                timestamp=self._updated_at,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Could not emit superpowers.phase.changed: %s", exc,
+            )
+
         if new_phase in self.EXECUTION_PHASES and self._queued_races:
             count = len(self._queued_races)
             logger.info(

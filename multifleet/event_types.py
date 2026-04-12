@@ -22,6 +22,7 @@ NAMESPACES: dict[str, str] = {
     "probe": "Probe Engine: findings, scan completions, errors",
     "panel": "IDE Panel: lifecycle events (register, activate, suspend, close)",
     "quorum": "Quorum: distributed decision proposals, votes, outcomes",
+    "superpowers": "Superpowers: workflow phase transitions",
     "breaker": "Reserved for Phase 4 circuit breaker",
 }
 
