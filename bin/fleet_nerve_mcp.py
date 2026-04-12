@@ -2672,6 +2672,62 @@ def _run_shutdown_backup() -> None:
     backup.create_snapshot()
 
 
+def _fleet_stripe_tool(action: str, tier: str = "", node_count: int = 1,
+                       email: str = "", subscription_id: str = "",
+                       customer_id: str = "", event_type: str = "") -> dict:
+    """Stripe billing integration — checkout, verify, tier lookup, webhook test."""
+    from multifleet.stripe_integration import get_stripe, StripeError
+
+    si = get_stripe()
+
+    if action == "checkout":
+        if not tier:
+            return {"error": "tier required (pro, team, enterprise)"}
+        if not email:
+            return {"error": "email required for checkout"}
+        try:
+            return si.create_checkout_session(tier, node_count, email)
+        except StripeError as e:
+            return {"error": str(e), "code": e.code}
+
+    elif action == "verify":
+        if not subscription_id:
+            return {"error": "subscription_id required for verify"}
+        try:
+            result = si.verify_subscription(subscription_id)
+            # Also sync billing tier if subscription is valid
+            if result.get("active"):
+                billing = get_billing()
+                sync = billing.sync_from_stripe(subscription_id)
+                result["billing_synced"] = sync.get("tier_change") is not None
+            return result
+        except StripeError as e:
+            return {"error": str(e), "code": e.code}
+
+    elif action == "tier":
+        if not customer_id:
+            return {"error": "customer_id required for tier lookup"}
+        try:
+            tier_name = si.get_customer_tier(customer_id)
+            return {"customer_id": customer_id, "tier": tier_name}
+        except StripeError as e:
+            return {"error": str(e), "code": e.code}
+
+    elif action == "webhook_test":
+        if not event_type:
+            event_type = "checkout.session.completed"
+        # Simulate a webhook event for testing
+        return {
+            "test": True,
+            "event_type": event_type,
+            "handled_events": sorted(si.HANDLED_EVENTS),
+            "stripe_available": si.available,
+        }
+
+    else:
+        return {"error": f"unknown action: {action}, expected: checkout|verify|tier|webhook_test"}
+
+
 TOOLS = [
     {
         "name": "fleet_probe",
@@ -3198,6 +3254,28 @@ TOOLS = [
             "required": [],
         },
         "fn": _fleet_server_tool,
+    },
+    {
+        "name": "fleet_stripe",
+        "description": "Stripe billing integration — manage fleet subscriptions, checkout sessions, and tier verification.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["checkout", "verify", "tier", "webhook_test"],
+                    "description": "Action: checkout (create session), verify (check subscription), tier (get customer tier), webhook_test (simulate webhook)",
+                },
+                "tier": {"type": "string", "description": "Billing tier: pro, team, enterprise (for checkout)"},
+                "node_count": {"type": "integer", "description": "Number of nodes (for checkout)", "default": 1},
+                "email": {"type": "string", "description": "Customer email (for checkout)"},
+                "subscription_id": {"type": "string", "description": "Stripe subscription ID (for verify)"},
+                "customer_id": {"type": "string", "description": "Stripe customer ID (for tier)"},
+                "event_type": {"type": "string", "description": "Webhook event type to simulate (for webhook_test)"},
+            },
+            "required": ["action"],
+        },
+        "fn": _fleet_stripe_tool,
     },
 ]
 

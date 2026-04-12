@@ -218,6 +218,42 @@ class BillingManager:
         t = _min_tier_for_feature(feature)
         return t.value if t else None
 
+    def sync_from_stripe(self, subscription_id: str) -> dict:
+        """Query Stripe for subscription status and update local tier.
+
+        Returns the verification result dict. Graceful if Stripe is
+        unavailable — keeps current tier unchanged.
+        """
+        try:
+            from multifleet.stripe_integration import get_stripe
+        except ImportError:
+            return {"error": "stripe_integration not available"}
+
+        si = get_stripe()
+        if not si.available:
+            return {"error": "stripe not configured", "tier": self.tier.value}
+
+        result = si.verify_subscription(subscription_id)
+        if "error" in result:
+            return result
+
+        if result.get("active"):
+            tier_name = result.get("tier", "community")
+            try:
+                new_tier = BillingTier(tier_name)
+            except ValueError:
+                new_tier = BillingTier.COMMUNITY
+            if new_tier != self.tier:
+                change = self.upgrade_tier(new_tier)
+                result["tier_change"] = change
+        else:
+            # Subscription not active — downgrade to community
+            if self.tier != BillingTier.COMMUNITY:
+                change = self.upgrade_tier(BillingTier.COMMUNITY)
+                result["tier_change"] = change
+
+        return result
+
 
 # Module-level singleton (daemon initializes once)
 _billing: Optional[BillingManager] = None
