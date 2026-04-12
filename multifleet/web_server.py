@@ -47,6 +47,7 @@ _professor_bridge = None
 _server_instance: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
 _ide_panel_server = None
+_panel_bus_bridge = None
 
 
 def _get_aggregator():
@@ -99,6 +100,18 @@ def _get_ide_panel_server():
         except Exception as e:
             logger.warning("Could not init IDE panel server: %s", e)
     return _ide_panel_server
+
+
+def _get_panel_bus_bridge():
+    """Lazy-init panel bus bridge."""
+    global _panel_bus_bridge
+    if _panel_bus_bridge is None:
+        try:
+            from multifleet.panel_bus_bridge import PanelBusBridge
+            _panel_bus_bridge = PanelBusBridge.get()
+        except Exception as e:
+            logger.warning("Could not init panel bus bridge: %s", e)
+    return _panel_bus_bridge
 
 
 
@@ -307,8 +320,32 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_json(panel_server.probe_findings_panel())
         elif sub == "wisdom-feedback":
             self._serve_json(panel_server.wisdom_feedback_panel())
+        elif sub == "poll":
+            self._serve_panels_poll()
+        elif sub == "timestamps":
+            self._serve_panels_timestamps()
         else:
             self.send_error(404, f"Unknown panel: {sub}")
+
+    def _serve_panels_poll(self):
+        """Return all event-bus-driven panel caches with timestamps.
+
+        Clients poll this endpoint and compare timestamps to local state,
+        fetching only panels whose updated_at has changed.
+        """
+        bridge = _get_panel_bus_bridge()
+        if bridge is None:
+            self._serve_json({"error": "Panel bus bridge not available"})
+            return
+        self._serve_json(bridge.get_all_panels())
+
+    def _serve_panels_timestamps(self):
+        """Return just panel timestamps for cheap freshness checks."""
+        bridge = _get_panel_bus_bridge()
+        if bridge is None:
+            self._serve_json({"error": "Panel bus bridge not available"})
+            return
+        self._serve_json(bridge.get_timestamps())
 
     def _serve_extension(self, path: str):
         bridge = _get_ide_bridge()
