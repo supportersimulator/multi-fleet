@@ -117,6 +117,43 @@ class FleetSendGate:
         t0 = time.monotonic()
         checks: list[GateCheck] = []
 
+        # 0. Constitutional validation (CP-1..CP-7)
+        try:
+            from .constitution import validate_before_action
+            constitution_ctx = {
+                "action": f"fleet_send_{packet.get('type', 'unknown')}",
+                "has_checkpoint": False,
+                "destructive": False,
+                "scope": "minimal",
+                "confidence": 0.5,
+                "evidence_count": 1,
+            }
+            const_result = validate_before_action("fleet_send", constitution_ctx)
+            if const_result.hard_failures:
+                checks.append(GateCheck(
+                    "constitutional_gate", False,
+                    f"Constitution BLOCKED: {const_result.summary}",
+                    critical=True,
+                ))
+            else:
+                checks.append(GateCheck(
+                    "constitutional_gate", True,
+                    const_result.summary,
+                    critical=False,
+                ))
+            for adv in const_result.advisories:
+                logger.warning(
+                    "FleetSendGate constitution advisory [%s]: %s",
+                    adv.principle_id, adv.message,
+                )
+        except Exception as e:
+            logger.warning("Constitution check failed, degrading to pass: %s", e)
+            checks.append(GateCheck(
+                "constitutional_gate", True,
+                f"Constitution check unavailable (degraded): {e}",
+                critical=False,
+            ))
+
         # 1. Required envelope fields
         missing = [f for f in REQUIRED_ENVELOPE_FIELDS if not packet.get(f)]
         # Also accept "from"/"to" as aliases
@@ -440,6 +477,50 @@ class FleetRepairGate:
         t0 = time.monotonic()
         checks: list[GateCheck] = []
         now = time.time()
+
+        # Destructive repair actions that require checkpoints (CP-6)
+        _DESTRUCTIVE_REPAIRS = frozenset({
+            "full_restart", "restart_nats", "restart_daemon",
+            "restart_eventbus",
+        })
+
+        # 0. Constitutional validation (CP-1..CP-7, CP-6 especially for repairs)
+        try:
+            from .constitution import validate_before_action
+            is_destructive = action in _DESTRUCTIVE_REPAIRS
+            constitution_ctx = {
+                "action": f"fleet_repair_{action}_on_{target}",
+                "has_checkpoint": True,
+                "destructive": is_destructive,
+                "scope": "minimal",
+                "confidence": 0.5,
+                "evidence_count": 1 if channel_health else 0,
+            }
+            const_result = validate_before_action("fleet_repair", constitution_ctx)
+            if const_result.hard_failures:
+                checks.append(GateCheck(
+                    "constitutional_gate", False,
+                    f"Constitution BLOCKED: {const_result.summary}",
+                    critical=True,
+                ))
+            else:
+                checks.append(GateCheck(
+                    "constitutional_gate", True,
+                    const_result.summary,
+                    critical=False,
+                ))
+            for adv in const_result.advisories:
+                logger.warning(
+                    "FleetRepairGate constitution advisory [%s]: %s",
+                    adv.principle_id, adv.message,
+                )
+        except Exception as e:
+            logger.warning("Constitution check failed, degrading to pass: %s", e)
+            checks.append(GateCheck(
+                "constitutional_gate", True,
+                f"Constitution check unavailable (degraded): {e}",
+                critical=False,
+            ))
 
         # 1. Target actually unhealthy
         if channel_health is not None:
