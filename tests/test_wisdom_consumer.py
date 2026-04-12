@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from multifleet.wisdom_consumer import (
+    WisdomAccuracyTracker,
     WisdomConsumer,
     WisdomEntry,
     _detect_contradiction,
@@ -311,3 +312,140 @@ class TestSynthesisWisdomIntegration:
         fb = result.metadata["wisdom_feedback"]
         assert "warnings_count" in fb
         assert "wisdom_checked" in fb
+
+
+class TestWisdomAccuracyTracker:
+
+    def test_record_and_get_stats(self):
+        """Basic record/read cycle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            tracker.record_flag("e1")
+            tracker.record_flag("e1")
+            tracker.record_false_positive("e1")
+            stats = tracker.get_stats("e1")
+            assert stats == {"flagged": 2, "confirmed": 0, "false_positive": 1}
+
+    def test_false_positive_rate(self):
+        """FP rate = false_positive / (confirmed + false_positive)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            tracker.record_confirmed("e1")
+            tracker.record_false_positive("e1")
+            tracker.record_false_positive("e1")
+            assert abs(tracker.false_positive_rate("e1") - 2 / 3) < 0.01
+
+    def test_false_positive_rate_no_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            assert tracker.false_positive_rate("nonexistent") == 0.0
+
+    def test_get_unreliable_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            # e1: 3 FP, 1 confirmed = 75% FP rate
+            for _ in range(3):
+                tracker.record_false_positive("e1")
+            tracker.record_confirmed("e1")
+            # e2: 1 FP, 3 confirmed = 25% FP rate
+            tracker.record_false_positive("e2")
+            for _ in range(3):
+                tracker.record_confirmed("e2")
+
+            unreliable = tracker.get_unreliable_entries(threshold=0.5)
+            assert "e1" in unreliable
+            assert "e2" not in unreliable
+
+    def test_should_suppress(self):
+        """Suppressed when false_positive count > 3."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            for _ in range(3):
+                tracker.record_false_positive("e1")
+            assert not tracker.should_suppress("e1")  # exactly 3 => not suppressed
+            tracker.record_false_positive("e1")
+            assert tracker.should_suppress("e1")  # 4 => suppressed
+
+    def test_resolve_outcome_success(self):
+        """Successful decision marks all flagged entries as false positives."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            tracker.resolve_outcome(["e1", "e2"], decision_succeeded=True)
+            assert tracker.get_stats("e1")["false_positive"] == 1
+            assert tracker.get_stats("e2")["false_positive"] == 1
+
+    def test_resolve_outcome_failure(self):
+        """Failed decision marks all flagged entries as confirmed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            tracker.resolve_outcome(["e1"], decision_succeeded=False)
+            assert tracker.get_stats("e1")["confirmed"] == 1
+
+    def test_persistence_across_instances(self):
+        """Data persists to JSON sidecar and survives new instance."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker1 = WisdomAccuracyTracker(wisdom_path=tmp)
+            tracker1.record_flag("e1")
+            tracker1.record_false_positive("e1")
+
+            tracker2 = WisdomAccuracyTracker(wisdom_path=tmp)
+            stats = tracker2.get_stats("e1")
+            assert stats["flagged"] == 1
+            assert stats["false_positive"] == 1
+
+    def test_feed_synthesis_records_flags(self):
+        """feed_synthesis records flags in accuracy tracker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            wisdom = {
+                "entry_id": "w-flag-test",
+                "event_type": "consensus_reached",
+                "subject": "Auth refactor rejected — broke token flow",
+                "area": "auth",
+                "content": {"details": "Auth refactor failed tests, needs_rebuttal"},
+                "original_timestamp": time.time(),
+            }
+            Path(tmp, "flag_test.json").write_text(json.dumps(wisdom))
+
+            consumer = WisdomConsumer(
+                wisdom_path=tmp, accuracy_tracker=tracker
+            )
+            feedback = consumer.feed_synthesis({
+                "task_id": "auth-refactor",
+                "decision": "merge",
+                "reasoning": "Auth refactor ready to merge",
+                "confidence": 0.75,
+            })
+            assert len(feedback["warnings"]) > 0
+            assert "w-flag-test" in feedback["flagged_entry_ids"]
+            assert tracker.get_stats("w-flag-test")["flagged"] >= 1
+
+    def test_feed_synthesis_suppresses_unreliable(self):
+        """feed_synthesis skips entries that should_suppress returns True for."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = WisdomAccuracyTracker(wisdom_path=tmp)
+            # Make entry unreliable (>3 false positives)
+            for _ in range(5):
+                tracker.record_false_positive("w-suppressed")
+
+            wisdom = {
+                "entry_id": "w-suppressed",
+                "event_type": "consensus_reached",
+                "subject": "Auth refactor rejected — broke token flow",
+                "area": "auth",
+                "content": {"details": "Auth refactor failed tests, needs_rebuttal"},
+                "original_timestamp": time.time(),
+            }
+            Path(tmp, "suppressed_test.json").write_text(json.dumps(wisdom))
+
+            consumer = WisdomConsumer(
+                wisdom_path=tmp, accuracy_tracker=tracker
+            )
+            feedback = consumer.feed_synthesis({
+                "task_id": "auth-refactor",
+                "decision": "merge",
+                "reasoning": "Auth refactor ready to merge",
+                "confidence": 0.75,
+            })
+            # Should be suppressed — no warnings from this entry
+            assert len(feedback["warnings"]) == 0

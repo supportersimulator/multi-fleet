@@ -8,10 +8,13 @@ One click resolves it.
 
 import json
 import logging
+import os
+import tempfile
 import time
 import uuid
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Optional
 
 logger = logging.getLogger("fleet-nerve.arbiter")
@@ -40,11 +43,13 @@ class HumanArbiter:
         expire_stale() cleans up decisions older than max_age_s.
     """
 
-    def __init__(self, daemon_port: int = 8855, max_age_s: int = 3600):
+    def __init__(self, daemon_port: int = 8855, max_age_s: int = 3600, persist_path: str | None = None):
         self._port = daemon_port
         self._max_age_s = max_age_s
         self._pending: dict[str, PendingDecision] = {}
         self._decided: list[dict] = []
+        self._persist_path = Path(persist_path) if persist_path else Path.home() / ".fleet-nerve" / "arbiter-pending.json"
+        self._load_persisted()
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -83,6 +88,7 @@ class HumanArbiter:
             source_id=source_id,
         )
         self._pending[decision.id] = decision
+        self._save_persisted()
         self._emit_pending(decision)
         logger.info(
             "Arbiter: queued %s decision %s — %s",
@@ -122,6 +128,7 @@ class HumanArbiter:
         # Move from pending to decided
         self._decided.append(self._to_dict(decision))
         del self._pending[decision_id]
+        self._save_persisted()
 
         # Record in evidence ledger
         self._record_decision(decision)
@@ -165,7 +172,50 @@ class HumanArbiter:
             d.status = "expired"
             self._decided.append(self._to_dict(d))
             logger.info("Arbiter: expired stale decision %s", did)
+        if expired_ids:
+            self._save_persisted()
         return len(expired_ids)
+
+    # ── Persistence ────────────────────────────────────────────────
+
+    def _load_persisted(self):
+        """Load pending decisions from JSON file on startup."""
+        try:
+            if self._persist_path.exists():
+                data = json.loads(self._persist_path.read_text())
+                for item in data:
+                    d = PendingDecision(
+                        id=item["id"],
+                        decision_type=item["decision_type"],
+                        task_description=item["task_description"],
+                        recommendation=item["recommendation"],
+                        alternatives=item["alternatives"],
+                        dissent=item["dissent"],
+                        evidence_chain=item["evidence_chain"],
+                        source_id=item["source_id"],
+                        created_at=item.get("created_at", time.time()),
+                        status=item.get("status", "pending"),
+                        decision=item.get("decision", {}),
+                    )
+                    self._pending[d.id] = d
+                logger.info("Arbiter: restored %d pending decisions from %s", len(self._pending), self._persist_path)
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning("Arbiter: corrupt persist file %s — starting fresh: %s", self._persist_path, e)
+            self._pending = {}
+        except Exception as e:
+            logger.debug("Arbiter: no persisted state loaded: %s", e)
+
+    def _save_persisted(self):
+        """Atomically write pending decisions to JSON file."""
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            data = json.dumps([self._to_dict(d) for d in self._pending.values()], indent=2)
+            # Atomic write: write to .tmp then rename
+            tmp_path = self._persist_path.with_suffix(".tmp")
+            tmp_path.write_text(data)
+            tmp_path.rename(self._persist_path)
+        except Exception as e:
+            logger.warning("Arbiter: failed to persist state: %s", e)
 
     # ── Serialization ──────────────────────────────────────────────
 

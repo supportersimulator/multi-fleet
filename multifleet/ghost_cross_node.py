@@ -9,7 +9,9 @@ EVIDENCE, not conclusions.
 
 import json
 import logging
+import os
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -107,12 +109,18 @@ class CrossNodeSynthesizer:
     passing probes, and fewer surgeon objections get higher weight.
     """
 
-    def __init__(self, synthesis_dir: Optional[str] = None):
+    DEFAULT_TIMEOUT_S = 5
+    DEFAULT_DAEMON_PORT = 8855
+
+    def __init__(self, synthesis_dir: Optional[str] = None,
+                 peers: Optional[dict] = None, timeout_s: float = 0):
         self._dir = Path(
             synthesis_dir
             or str(Path.home() / ".fleet-nerve" / "ghost" / "synthesis")
         )
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._peers = peers or {}
+        self._timeout_s = timeout_s or self.DEFAULT_TIMEOUT_S
 
     def synthesize(self, task_id: str, node_evidence: list[NodeEvidence]) -> SynthesisResult:
         """Synthesize evidence from multiple nodes into a weighted consensus.
@@ -221,6 +229,184 @@ class CrossNodeSynthesizer:
             except Exception:
                 continue
         return results
+
+    # ── Remote Evidence Collection ────────────────────────────────────
+
+    def _resolve_peer_url(self, node_id: str) -> Optional[str]:
+        """Resolve a node_id to its daemon base URL using peers config."""
+        peer = self._peers.get(node_id)
+        if not peer:
+            return None
+        ip = peer.get("ip", "")
+        port = peer.get("port", self.DEFAULT_DAEMON_PORT)
+        if not ip:
+            return None
+        return f"http://{ip}:{port}"
+
+    def _fetch_evidence_from_node(
+        self, node_id: str, since: float = 0, task_id: str = ""
+    ) -> list[NodeEvidence]:
+        """Fetch evidence entries from a remote node's daemon HTTP API.
+
+        Hits GET /evidence?since=<ts>&limit=50 on the target daemon.
+        Converts raw ledger entries into NodeEvidence objects.
+        Returns empty list on timeout or unreachable node.
+        """
+        base_url = self._resolve_peer_url(node_id)
+        if not base_url:
+            logger.debug("No peer URL for %s, skipping", node_id)
+            return []
+
+        url = f"{base_url}/evidence?since={since}&limit=50"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            resp = urllib.request.urlopen(req, timeout=self._timeout_s)
+            data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            logger.debug("evidence_fetch failed for %s: %s", node_id, e)
+            return []
+
+        entries = data.get("entries", [])
+        return self._entries_to_node_evidence(node_id, entries, task_id)
+
+    @staticmethod
+    def _entries_to_node_evidence(
+        node_id: str, entries: list[dict], task_id: str = ""
+    ) -> list[NodeEvidence]:
+        """Convert raw evidence ledger entries to NodeEvidence objects.
+
+        Groups entries by task_id (from payload or subject). Each group
+        becomes one NodeEvidence with aggregated evidence refs and findings.
+        If task_id is specified, only entries matching that task are returned.
+        """
+        # Group by task
+        by_task: dict[str, list[dict]] = {}
+        for entry in entries:
+            payload = entry.get("payload", {})
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+
+            tid = (
+                payload.get("task_id")
+                or payload.get("race_id")
+                or entry.get("subject", "unknown")
+            )
+            if task_id and tid != task_id:
+                continue
+            by_task.setdefault(tid, []).append({**entry, "_payload": payload})
+
+        results = []
+        for tid, group in by_task.items():
+            # Aggregate across entries for this task
+            evidence_refs = []
+            probe_findings = []
+            surgeon_objections = []
+            decisions = []
+            confidences = []
+
+            for e in group:
+                p = e["_payload"]
+                # Collect evidence refs
+                evidence_refs.append(e.get("entry_id", ""))
+                # Extract decision/confidence from payload
+                if "decision" in p:
+                    decisions.append(p["decision"])
+                if "confidence" in p:
+                    confidences.append(float(p["confidence"]))
+                # Probe findings
+                if e.get("event_type", "").startswith("scan_"):
+                    sev = p.get("severity", "medium")
+                    title = p.get("title", e.get("subject", ""))
+                    probe_findings.append(f"{sev}: {title}")
+                # Surgeon objections
+                for obj in p.get("objections", []):
+                    surgeon_objections.append(str(obj))
+
+            decision = decisions[-1] if decisions else "observed"
+            confidence = (
+                sum(confidences) / len(confidences) if confidences else 0.5
+            )
+
+            results.append(NodeEvidence(
+                node_id=node_id,
+                task_id=tid,
+                decision=decision,
+                confidence=confidence,
+                evidence_refs=evidence_refs,
+                active_invariants=[],
+                probe_findings=probe_findings,
+                surgeon_objections=surgeon_objections,
+                timestamp=group[-1].get("timestamp", ""),
+            ))
+
+        return results
+
+    def collect_remote_evidence(
+        self, node_ids: list[str], since: float = 0, task_id: str = ""
+    ) -> list[NodeEvidence]:
+        """Collect evidence from multiple remote nodes.
+
+        Requests evidence from each node's daemon via GET /evidence?since=<ts>.
+        Nodes that are offline or unreachable are skipped gracefully.
+
+        Args:
+            node_ids: List of node IDs to query.
+            since: Only fetch evidence newer than this unix timestamp.
+            task_id: Optional filter — only return evidence for this task.
+
+        Returns:
+            Combined list of NodeEvidence from all reachable nodes.
+        """
+        all_evidence: list[NodeEvidence] = []
+        for nid in node_ids:
+            try:
+                evidence = self._fetch_evidence_from_node(nid, since, task_id)
+                all_evidence.extend(evidence)
+                if evidence:
+                    logger.info(
+                        "Collected %d evidence items from %s",
+                        len(evidence), nid,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "collect_remote_evidence error for %s: %s", nid, e
+                )
+        return all_evidence
+
+    def synthesize_cross_node(
+        self,
+        task_id: str,
+        node_ids: Optional[list[str]] = None,
+        since: float = 0,
+        local_evidence: Optional[list[NodeEvidence]] = None,
+    ) -> SynthesisResult:
+        """End-to-end cross-node synthesis: collect remote + merge local + synthesize.
+
+        1. Collects evidence from remote nodes via their daemon HTTP APIs.
+        2. Merges with any local_evidence provided by the caller.
+        3. Runs the weighted evidence synthesis algorithm.
+
+        Args:
+            task_id: Task/topic to synthesize evidence for.
+            node_ids: Remote nodes to query. Defaults to all known peers.
+            since: Only use evidence newer than this timestamp.
+            local_evidence: Optional local NodeEvidence to include.
+
+        Returns:
+            SynthesisResult with weighted consensus from all nodes.
+        """
+        targets = node_ids or list(self._peers.keys())
+        remote = self.collect_remote_evidence(targets, since=since, task_id=task_id)
+
+        combined = list(local_evidence or []) + remote
+        if not combined:
+            logger.info("synthesize_cross_node: no evidence for %s", task_id)
+            return SynthesisResult(task_id=task_id, synthesis_method="no_evidence")
+
+        return self.synthesize(task_id, combined)
 
     def _save(self, result: SynthesisResult) -> None:
         try:

@@ -72,6 +72,106 @@ class WisdomEntry:
         return hits >= min_hits
 
 
+class WisdomAccuracyTracker:
+    """Tracks false-positive rates for wisdom contradiction flags.
+
+    When wisdom flags a synthesis decision as contradictory but the decision
+    turns out correct, that's a false positive. Entries with high false-positive
+    rates get suppressed to stop noisy wisdom from degrading confidence.
+
+    Storage: JSON sidecar at ~/.context-dna/fleet-wisdom/.accuracy.json
+    Schema: {entry_id: {flagged: N, confirmed: N, false_positive: N}}
+    """
+
+    def __init__(self, wisdom_path: Optional[str] = None):
+        base = wisdom_path or str(Path.home() / ".context-dna" / "fleet-wisdom")
+        self._path = Path(base) / ".accuracy.json"
+        self._data: Optional[dict[str, dict]] = None
+
+    def _load(self) -> dict[str, dict]:
+        if self._data is not None:
+            return self._data
+        if self._path.exists():
+            try:
+                self._data = json.loads(self._path.read_text())
+            except (json.JSONDecodeError, OSError):
+                self._data = {}
+        else:
+            self._data = {}
+        return self._data
+
+    def _save(self):
+        data = self._load()
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(data, indent=2))
+        except OSError as e:
+            logger.warning("Failed to save accuracy tracker: %s", e)
+
+    def _ensure_entry(self, entry_id: str) -> dict:
+        data = self._load()
+        if entry_id not in data:
+            data[entry_id] = {"flagged": 0, "confirmed": 0, "false_positive": 0}
+        return data[entry_id]
+
+    def record_flag(self, entry_id: str):
+        """Record that a wisdom entry was flagged as contradicting a decision."""
+        rec = self._ensure_entry(entry_id)
+        rec["flagged"] += 1
+        self._save()
+
+    def record_confirmed(self, entry_id: str):
+        """Record that the contradiction was real (decision failed)."""
+        rec = self._ensure_entry(entry_id)
+        rec["confirmed"] += 1
+        self._save()
+
+    def record_false_positive(self, entry_id: str):
+        """Record that the contradiction was wrong (decision succeeded)."""
+        rec = self._ensure_entry(entry_id)
+        rec["false_positive"] += 1
+        self._save()
+
+    def resolve_outcome(self, entry_ids: list[str], decision_succeeded: bool):
+        """Resolve outcome for a batch of flagged entries after decision result is known."""
+        for eid in entry_ids:
+            if decision_succeeded:
+                self.record_false_positive(eid)
+            else:
+                self.record_confirmed(eid)
+
+    def get_stats(self, entry_id: str) -> dict:
+        """Return {flagged, confirmed, false_positive} for an entry."""
+        data = self._load()
+        return dict(data.get(entry_id, {"flagged": 0, "confirmed": 0, "false_positive": 0}))
+
+    def false_positive_rate(self, entry_id: str) -> float:
+        """Return false positive rate (0.0-1.0). Returns 0.0 if no data."""
+        stats = self.get_stats(entry_id)
+        total = stats["confirmed"] + stats["false_positive"]
+        if total == 0:
+            return 0.0
+        return stats["false_positive"] / total
+
+    def get_unreliable_entries(self, threshold: float = 0.5) -> list[str]:
+        """Return entry IDs with false positive rate above threshold."""
+        data = self._load()
+        unreliable = []
+        for entry_id, stats in data.items():
+            total = stats.get("confirmed", 0) + stats.get("false_positive", 0)
+            if total == 0:
+                continue
+            fpr = stats.get("false_positive", 0) / total
+            if fpr > threshold:
+                unreliable.append(entry_id)
+        return unreliable
+
+    def should_suppress(self, entry_id: str) -> bool:
+        """Return True if entry has been a false positive >3 times."""
+        stats = self.get_stats(entry_id)
+        return stats["false_positive"] > 3
+
+
 class WisdomConsumer:
     """Reads promoted wisdom and feeds it into synthesis decisions.
 
@@ -84,11 +184,13 @@ class WisdomConsumer:
         self,
         evidence_ledger=None,
         wisdom_path: Optional[str] = None,
+        accuracy_tracker: Optional[WisdomAccuracyTracker] = None,
     ):
         self._ledger = evidence_ledger
         self._wisdom_path = wisdom_path or str(
             Path.home() / ".context-dna" / "fleet-wisdom"
         )
+        self._accuracy = accuracy_tracker or WisdomAccuracyTracker(self._wisdom_path)
         self._cache: Optional[list[WisdomEntry]] = None
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 60.0  # seconds
@@ -249,8 +351,17 @@ class WisdomConsumer:
 
         warnings: list[dict] = []
         supporting: list[dict] = []
+        flagged_entry_ids: list[str] = []
 
         for entry in relevant:
+            # Skip entries that have proven unreliable
+            if entry.entry_id and self._accuracy.should_suppress(entry.entry_id):
+                logger.debug(
+                    "Suppressing unreliable wisdom entry %s (>3 false positives)",
+                    entry.entry_id,
+                )
+                continue
+
             contradiction = _detect_contradiction(decision, entry)
             if contradiction:
                 warnings.append({
@@ -258,6 +369,10 @@ class WisdomConsumer:
                     "message": contradiction,
                     "wisdom_entry": entry.to_dict(),
                 })
+                # Track the flag for later outcome resolution
+                if entry.entry_id:
+                    self._accuracy.record_flag(entry.entry_id)
+                    flagged_entry_ids.append(entry.entry_id)
             else:
                 supporting.append(entry.to_dict())
 
@@ -271,6 +386,7 @@ class WisdomConsumer:
             "warnings": warnings,
             "supporting": supporting[:10],
             "wisdom_checked": len(relevant),
+            "flagged_entry_ids": flagged_entry_ids,
         }
 
     def invalidate_cache(self):

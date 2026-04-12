@@ -228,12 +228,25 @@ class ChiefSynthesis:
                 expected_outcome=f"confidence={result.confidence:.3f}",
                 related_patterns=[],
             )
+            success = result.confidence >= 0.5
             tracker.record_outcome(
                 outcome_id=outcome_id,
-                success=result.confidence >= 0.5,
+                success=success,
                 actual_outcome=result.reasoning[:200],
                 verification_method="synthesis_confidence",
             )
+            # Resolve wisdom accuracy — flagged entries that contradicted a
+            # successful decision are false positives
+            flagged_ids = result.metadata.get("wisdom_feedback", {}).get(
+                "flagged_entry_ids", []
+            )
+            if flagged_ids:
+                try:
+                    from multifleet.wisdom_consumer import WisdomAccuracyTracker
+                    accuracy = WisdomAccuracyTracker()
+                    accuracy.resolve_outcome(flagged_ids, decision_succeeded=success)
+                except Exception:
+                    pass
         except Exception:
             pass
         return result
@@ -398,6 +411,7 @@ class ChiefSynthesis:
                 "warnings_count": len(feedback["warnings"]),
                 "supporting_count": len(feedback["supporting"]),
                 "wisdom_checked": feedback["wisdom_checked"],
+                "flagged_entry_ids": feedback.get("flagged_entry_ids", []),
             }
 
             if feedback["warnings"]:

@@ -1,5 +1,6 @@
 """Tests for the Human Arbiter — decision queueing, resolution, and execution."""
 
+import tempfile
 import time
 from unittest.mock import patch
 
@@ -9,8 +10,9 @@ from multifleet.arbiter import HumanArbiter, PendingDecision
 
 
 def _make_arbiter() -> HumanArbiter:
-    """Create arbiter with daemon calls disabled."""
-    return HumanArbiter(daemon_port=19999)
+    """Create arbiter with daemon calls disabled and no persist file."""
+    # Use a non-existent temp path to avoid loading real persisted state
+    return HumanArbiter(daemon_port=19999, persist_path=tempfile.mktemp(suffix=".json"))
 
 
 def _queue_sample(arbiter: HumanArbiter, **overrides) -> PendingDecision:
@@ -166,7 +168,7 @@ class TestRequestInfo:
 
 class TestExpireStale:
     def test_expire_stale_removes_old_decisions(self):
-        arbiter = HumanArbiter(daemon_port=19999, max_age_s=1)
+        arbiter = HumanArbiter(daemon_port=19999, max_age_s=1, persist_path=tempfile.mktemp(suffix=".json"))
         decision = _queue_sample(arbiter)
         # Backdate the decision
         decision.created_at = time.time() - 10
