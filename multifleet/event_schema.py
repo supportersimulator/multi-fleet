@@ -101,6 +101,10 @@ class EventEnvelope:
     worktree_id: Optional[str] = None
     repo_id: Optional[str] = None
 
+    # Quorum sensing: semantic signal classification (Las/Rhl/PQS/IQS-inspired)
+    # See multifleet.quorum.signal_class for the four classes.
+    signal_class: Optional[str] = None  # "strategic", "tactical", "state", "stress"
+
     # The actual data
     payload: Any = field(default_factory=dict)
 
@@ -122,6 +126,8 @@ class EventEnvelope:
             d["worktree_id"] = self.worktree_id
         if self.repo_id:
             d["repo_id"] = self.repo_id
+        if self.signal_class:
+            d["signal_class"] = self.signal_class
         return d
 
     def to_json(self) -> str:
@@ -143,15 +149,29 @@ def create_event(
     payload: dict = None,
     task_id: str = None,
     session_id: str = None,
+    signal_class: str = None,
 ) -> EventEnvelope:
-    """Factory for creating properly typed events."""
+    """Factory for creating properly typed events.
+
+    If signal_class is not provided, it is auto-classified using
+    the quorum sensing signal classifier (Las/Rhl/PQS/IQS mapping).
+    """
+    evt_payload = payload or {}
+    # Auto-classify signal class if not explicitly provided
+    if signal_class is None:
+        try:
+            from .quorum.signal_class import classify_message
+            signal_class = classify_message(event_type.value, evt_payload).value
+        except Exception:
+            signal_class = "tactical"  # Safe default: Rhl-like execution flow
     return EventEnvelope(
         type=event_type.value,
         source=source.value,
         node_id=node_id,
-        payload=payload or {},
+        payload=evt_payload,
         task_id=task_id,
         session_id=session_id,
+        signal_class=signal_class,
     )
 
 

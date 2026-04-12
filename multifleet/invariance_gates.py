@@ -95,9 +95,16 @@ def _record_audit(gate_name: str, result: "GateResult"):
 
 
 class FleetSendGate:
-    """Validates a packet before sending."""
+    """Validates a packet before sending.
 
-    def check(self, packet: dict, registry=None, rate_limiter=None) -> GateResult:
+    Quorum sensing integration (P. aeruginosa-inspired):
+    - Strategic (Las-like) messages require corroboration metadata
+    - Under critical stress (IQS-like), irreversible tactical actions are blocked
+    - Stress signals always pass (they ARE the environmental override)
+    """
+
+    def check(self, packet: dict, registry=None, rate_limiter=None,
+              stress_score: float = 0.0, quorum_registry=None) -> GateResult:
         """Run pre-send checks.
 
         1. Packet has required envelope fields (from_node, to_node, type, id)
@@ -105,6 +112,7 @@ class FleetSendGate:
         3. Rate limit not exceeded for this message type
         4. HMAC key available for signing
         5. Target node is known (in config or discovered)
+        6. Quorum sensing: strategic corroboration + stress policy
         """
         t0 = time.monotonic()
         checks: list[GateCheck] = []
@@ -244,6 +252,106 @@ class FleetSendGate:
                 critical=False,
             ))
 
+        # 6. Quorum sensing checks (Las/Rhl/PQS/IQS-inspired)
+        signal_class = packet.get("signal_class")
+        if signal_class is None:
+            # Auto-classify if not present
+            try:
+                from .quorum.signal_class import classify_message
+                signal_class = classify_message(
+                    msg_type, packet.get("payload", {})
+                ).value
+            except Exception:
+                signal_class = "tactical"
+
+        # 6a. Strategic messages require corroboration (Las-like: quorum threshold)
+        if signal_class == "strategic":
+            meta = packet.get("meta", {})
+            corroboration = meta.get("corroboration_count", 0)
+            if corroboration < 1:
+                # Check quorum registry if provided
+                proposal_id = packet.get("id", "")
+                has_quorum = False
+                if quorum_registry is not None:
+                    try:
+                        has_quorum = quorum_registry.has_quorum(proposal_id)
+                    except Exception:
+                        pass
+                if not has_quorum:
+                    checks.append(GateCheck(
+                        "strategic_corroboration", False,
+                        "Strategic signal lacks corroboration — requires quorum "
+                        "(2+ nodes + chief/post-verification) before fleet-wide authority",
+                        critical=True,
+                    ))
+                else:
+                    checks.append(GateCheck(
+                        "strategic_corroboration", True,
+                        "Strategic signal has quorum in registry",
+                        critical=True,
+                    ))
+            else:
+                checks.append(GateCheck(
+                    "strategic_corroboration", True,
+                    f"Strategic signal has {corroboration} corroboration(s)",
+                    critical=True,
+                ))
+        else:
+            checks.append(GateCheck(
+                "strategic_corroboration", True,
+                f"Signal class '{signal_class}' does not require corroboration",
+                critical=False,
+            ))
+
+        # 6b. Stress policy enforcement (IQS-like: hierarchy shift under pressure)
+        if stress_score > 0.0:
+            try:
+                from .quorum.stress_score import apply_stress_policy, get_stress_level
+                policy = apply_stress_policy(stress_score)
+                level = get_stress_level(stress_score)
+
+                if signal_class == "tactical" and not policy["allow_irreversible_actions"]:
+                    is_irreversible = packet.get("meta", {}).get("irreversible", False)
+                    if is_irreversible:
+                        checks.append(GateCheck(
+                            "stress_policy", False,
+                            f"Stress level '{level}' (score={stress_score:.2f}): "
+                            f"irreversible tactical actions blocked",
+                            critical=True,
+                        ))
+                    else:
+                        checks.append(GateCheck(
+                            "stress_policy", True,
+                            f"Stress level '{level}': tactical action is reversible (allowed)",
+                            critical=False,
+                        ))
+                elif signal_class == "stress":
+                    # Stress signals always pass — they ARE the override
+                    checks.append(GateCheck(
+                        "stress_policy", True,
+                        "Stress signal: IQS-like override passes immediately",
+                        critical=False,
+                    ))
+                else:
+                    checks.append(GateCheck(
+                        "stress_policy", True,
+                        f"Stress level '{level}' (score={stress_score:.2f}): "
+                        f"signal class '{signal_class}' allowed",
+                        critical=False,
+                    ))
+            except Exception:
+                checks.append(GateCheck(
+                    "stress_policy", True,
+                    "Stress policy check error (skipped)",
+                    critical=False,
+                ))
+        else:
+            checks.append(GateCheck(
+                "stress_policy", True,
+                "No stress (normal operations)",
+                critical=False,
+            ))
+
         # Build result
         critical_failures = [c for c in checks if not c.passed and c.critical]
         passed = len(critical_failures) == 0
@@ -270,7 +378,8 @@ class FleetRepairGate:
 
     def check(self, target: str, action: str,
               channel_health: dict = None,
-              node_id: str = None) -> GateResult:
+              node_id: str = None,
+              stress_score: float = 0.0) -> GateResult:
         """Run pre-repair checks.
 
         1. Target node is actually unhealthy (not stale diagnostic)
@@ -278,6 +387,7 @@ class FleetRepairGate:
         3. Repair action is valid (in allowlist)
         4. L4 SSH repairs only from chief node
         5. Cooldown period respected (5min per target)
+        6. Stress policy: under critical stress, prefer DAO guidance for repairs
         """
         t0 = time.monotonic()
         checks: list[GateCheck] = []
@@ -408,6 +518,37 @@ class FleetRepairGate:
                 "cooldown", True,
                 f"No prior repairs recorded for '{target}'",
                 critical=True,
+            ))
+
+        # 6. Stress policy for repairs (IQS-like: under critical stress,
+        #    only allow non-destructive repairs unless chief approves)
+        if stress_score >= 0.75:
+            is_destructive = action in ("full_restart",)
+            if is_destructive:
+                checks.append(GateCheck(
+                    "stress_repair_policy", False,
+                    f"Critical stress (score={stress_score:.2f}): destructive repair "
+                    f"'{action}' blocked — requires chief review first",
+                    critical=True,
+                ))
+            else:
+                checks.append(GateCheck(
+                    "stress_repair_policy", True,
+                    f"Critical stress: non-destructive repair '{action}' allowed",
+                    critical=False,
+                ))
+        elif stress_score >= 0.50:
+            checks.append(GateCheck(
+                "stress_repair_policy", True,
+                f"Degraded stress (score={stress_score:.2f}): repair allowed "
+                f"with DAO guidance preferred",
+                critical=False,
+            ))
+        else:
+            checks.append(GateCheck(
+                "stress_repair_policy", True,
+                f"Stress level OK (score={stress_score:.2f})",
+                critical=False,
             ))
 
         # Build result
