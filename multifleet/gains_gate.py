@@ -378,7 +378,11 @@ class FleetGainsGate:
                                latency_ms=latency, critical=False)
 
     def _check_invariance_rules(self) -> CheckResult:
-        """Run 7 GhostScan invariance rules (non-critical, advisory)."""
+        """Run 7 GhostScan invariance rules.
+
+        When a supervisor is active, INV-001 and INV-004 are promoted from
+        advisory to hard-gate (critical blocking failures).
+        """
         t0 = time.monotonic()
         try:
             from .invariance_rules import InvarianceEngine
@@ -388,15 +392,31 @@ class FleetGainsGate:
             health = self._get_health()
             if health:
                 state["transport_channel"] = health.get("transport", "")
-            results = engine.check_all(state)
+
+            # Detect supervisor — if importable and phase is set, it's active
+            supervisor_active = bool(state.get("supervisor_phase"))
+            if not supervisor_active:
+                try:
+                    from .supervisor import Supervisor  # noqa: F401
+                    supervisor_active = True
+                except ImportError:
+                    pass
+
+            results = engine.check_all(state, hard_gate=supervisor_active)
             violations = [r for r in results if not r.passed]
+            hard_violations = [r for r in violations if r.hard_gate]
             latency = (time.monotonic() - t0) * 1000
             if violations:
                 names = ", ".join(r.rule_id for r in violations)
+                # Critical if any hard-gated rule failed
+                is_critical = len(hard_violations) > 0
+                msg = f"{len(violations)} invariance violation(s): {names}"
+                if hard_violations:
+                    hg_names = ", ".join(r.rule_id for r in hard_violations)
+                    msg += f" [hard-gate: {hg_names}]"
                 return CheckResult(
-                    "invariance_rules", False,
-                    f"{len(violations)} invariance violation(s): {names}",
-                    latency_ms=latency, critical=False,
+                    "invariance_rules", False, msg,
+                    latency_ms=latency, critical=is_critical,
                 )
             return CheckResult(
                 "invariance_rules", True,

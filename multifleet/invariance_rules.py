@@ -29,6 +29,7 @@ class InvarianceResult:
     passed: bool
     violation: str = ""
     severity: str = "warning"  # warning, error, critical
+    hard_gate: bool = False  # True = blocking failure, not advisory
 
     def to_dict(self) -> dict:
         return {
@@ -36,6 +37,7 @@ class InvarianceResult:
             "passed": self.passed,
             "violation": self.violation,
             "severity": self.severity,
+            "hard_gate": self.hard_gate,
         }
 
 
@@ -66,6 +68,9 @@ class InvarianceEngine:
       actual_chief_sync_age_s: float — real chief sync age
     """
 
+    # Rules promoted from advisory to blocking when hard_gate=True
+    HARD_GATE_RULES = frozenset({"INV-001", "INV-004"})
+
     def __init__(self):
         self._rules = [
             ("INV-001", "no_execution_without_brainstorm", self._rule_001),
@@ -77,8 +82,15 @@ class InvarianceEngine:
             ("INV-007", "overlay_reflects_state", self._rule_007),
         ]
 
-    def check_all(self, state: dict) -> list[InvarianceResult]:
-        """Run all 7 invariance checks against current state."""
+    def check_all(self, state: dict, hard_gate: bool = False) -> list[InvarianceResult]:
+        """Run all 7 invariance checks against current state.
+
+        Args:
+            state: Protocol state dict (see class docstring for keys).
+            hard_gate: When True, INV-001 and INV-004 failures are marked as
+                hard-gate blocking (critical + hard_gate=True) instead of
+                advisory. Other rules are unaffected.
+        """
         results = []
         for rule_id, name, fn in self._rules:
             try:
@@ -90,21 +102,36 @@ class InvarianceEngine:
                     violation=f"Rule check error: {e}",
                     severity="error",
                 )
+            # Promote to hard-gate when enabled and rule supports it
+            if hard_gate and not result.passed and rule_id in self.HARD_GATE_RULES:
+                result.hard_gate = True
+                result.severity = "critical"
             results.append(result)
         return results
 
-    def check_one(self, rule_id: str, state: dict) -> InvarianceResult:
-        """Run a specific invariance check by rule ID."""
+    def check_one(self, rule_id: str, state: dict, hard_gate: bool = False) -> InvarianceResult:
+        """Run a specific invariance check by rule ID.
+
+        Args:
+            rule_id: Rule identifier (e.g. "INV-001").
+            state: Protocol state dict.
+            hard_gate: When True and rule_id is in HARD_GATE_RULES, a failure
+                is marked as hard-gate blocking.
+        """
         for rid, name, fn in self._rules:
             if rid == rule_id:
                 try:
-                    return fn(state)
+                    result = fn(state)
                 except Exception as e:
                     return InvarianceResult(
                         rule_id=rule_id, passed=False,
                         violation=f"Rule check error: {e}",
                         severity="error",
                     )
+                if hard_gate and not result.passed and rid in self.HARD_GATE_RULES:
+                    result.hard_gate = True
+                    result.severity = "critical"
+                return result
         return InvarianceResult(
             rule_id=rule_id, passed=False,
             violation=f"Unknown rule: {rule_id}",
