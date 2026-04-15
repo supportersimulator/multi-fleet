@@ -225,13 +225,25 @@ class TestP4SeedDeliveryPath:
     """Python-side P4 seed file creation (via FleetNerveNATS._send_p4_seed).
 
     Note: local delivery tests are in test_fleet_send.py. Here we only test
-    the remote rejection path to avoid duplicating fixture-dependent tests.
+    the remote path to avoid duplicating fixture-dependent tests.
     """
 
     @pytest.mark.asyncio
     @pytest.mark.unit
-    async def test_remote_seed_not_delivered(self, mock_nerve):
-        """P4 cannot deliver to a remote node (returns delivered=False)."""
+    async def test_remote_seed_via_nats(self, mock_nerve):
+        """P4 delivers to remote node via NATS seed_write when connected."""
+        result = await mock_nerve._send_p4_seed("mac2", {
+            "from": "mac1",
+            "payload": {"subject": "x", "body": "y"},
+        })
+        assert result["delivered"] is True
+        assert result["method"] == "seed_via_nats"
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_remote_seed_falls_back_without_nats(self, mock_nerve):
+        """P4 falls through when NATS is disconnected."""
+        mock_nerve.nc.is_connected = False
         result = await mock_nerve._send_p4_seed("mac2", {
             "from": "mac1",
             "payload": {"subject": "x", "body": "y"},

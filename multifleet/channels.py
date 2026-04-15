@@ -255,8 +255,11 @@ class CommunicationProtocol:
                         "elapsed_ms": elapsed_ms, **result,
                     }
                 if result.get("wol_sent"):
-                    self.channel_state.record_failure(target, name, "wol_only")
-                    errors.append(f"{name}: WoL sent, not delivered")
+                    # WoL is fire-and-forget — sending the packet IS success.
+                    # Do NOT record_failure here — it poisons channel state and
+                    # causes P6 to be skipped as "known broken" on future attempts.
+                    logger.info(f"[{name}] WoL packet sent to {target} ({elapsed_ms}ms)")
+                    errors.append(f"{name}: WoL sent (fire-and-forget)")
                     continue
                 # Not delivered -- record failure
                 reason = result.get("error", "delivered=false")

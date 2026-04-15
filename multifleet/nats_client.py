@@ -593,6 +593,12 @@ class FleetNerveNATS:
                 ok = payload.get("success", True)
                 res = payload.get("result", body)
                 self._advance_chain(cid, ok, res)
+            elif priority == "seed_write":
+                # Remote P4: another node asks us to write a seed file locally
+                seed_path = self._resolve_seed_path(data)
+                seed_text = f"# Fleet: {subject}\nFrom: {sender}\n\n{body}\n"
+                Path(seed_path).write_text(seed_text)
+                logger.info(f"P4 seed_write from {sender} -> {seed_path}")
             elif priority == "alert":
                 self._inject_alert(data)
             elif priority == "task":
@@ -1101,10 +1107,10 @@ class FleetNerveNATS:
         return {"delivered": False}
 
     async def _send_p4_seed(self, target: str, message: dict) -> dict:
-        """P4: Seed file -- local (session-aware) or via SSH.
+        """P4: Seed file -- local (session-aware) or via NATS/SSH.
 
         Local: resolves to per-session seed file when sessions are detected.
-        Remote: falls through to P5 SSH logic.
+        Remote: tries NATS seed_write request first, then falls through to SSH.
         """
         payload = message.get("payload", {})
         text = f"# Fleet: {payload.get('subject','')}\nFrom: {message.get('from','?')}\n\n{payload.get('body','')}\n"
@@ -1112,7 +1118,24 @@ class FleetNerveNATS:
             seed_path = self._resolve_seed_path(message)
             Path(seed_path).write_text(text)
             return {"delivered": True, "seedPath": seed_path}
-        # Remote via SSH (falls through to P5 logic)
+        # Remote: try NATS-based seed write (works even when SSH is down)
+        if self.nc and self.nc.is_connected:
+            try:
+                seed_msg = {
+                    "id": str(uuid.uuid4()),
+                    "type": "seed_write",
+                    "from": self.node_id,
+                    "to": target,
+                    "payload": payload,
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                }
+                nats_subject = f"fleet.{target}.message"
+                await self.nc.publish(nats_subject, json.dumps(seed_msg).encode())
+                logger.info(f"P4 seed via NATS to {target}")
+                return {"delivered": True, "method": "seed_via_nats"}
+            except Exception as e:
+                logger.debug(f"P4 NATS seed failed: {e}")
+        # Fallback: SSH-based seed (handled by P5 cascade)
         return {"delivered": False}
 
     async def _send_p5_ssh(self, target: str, message: dict) -> dict:

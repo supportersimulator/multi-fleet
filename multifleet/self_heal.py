@@ -311,7 +311,28 @@ class SelfHealManager:
             logger.warning(f"SSH repair error: {action} on {ip}: {type(e).__name__}")
 
     async def _repair_restart_nats(self, heal: dict):
-        """Reconnect to NATS server without killing the daemon."""
+        """Reconnect to NATS server without killing the daemon.
+
+        Guards against unnecessary restarts: if NATS is already connected
+        and we have recent heartbeats from ANY peer, the connection is healthy.
+        Restarting would cause a brief outage that triggers more repair requests
+        (cascade loop).
+        """
+        # Guard: skip restart if NATS is already connected and healthy
+        if self._nerve.nc and self._nerve.nc.is_connected:
+            now = time.time()
+            recent_peers = [
+                pid for pid, pdata in self._nerve._peers.items()
+                if now - pdata.get("_received_at", 0) < 60
+            ]
+            if recent_peers:
+                reporter = heal.get("reporter", "unknown")
+                logger.info(
+                    f"Repair: NATS already connected with {len(recent_peers)} "
+                    f"recent peer(s) — skipping restart (requested by {reporter})"
+                )
+                return
+
         logger.info("Repair: reconnecting to NATS...")
         if self._nerve.nc:
             try:
