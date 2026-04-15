@@ -282,13 +282,15 @@ class TestProbeToEventBus:
             triggers=["manual"],
         )
 
-        # Mock EventBus to capture emitted events
+        # Mock IDEEventBus to capture emitted events
         emitted_events = []
-        mock_bus = MagicMock(spec=FleetEventBus)
-        mock_bus.emit = MagicMock(side_effect=lambda *a, **kw: emitted_events.append(a))
+        mock_bus = MagicMock()
+        mock_bus.emit = MagicMock(side_effect=lambda *a, **kw: emitted_events.append((a, kw)))
 
-        # Patch the EventBus import inside _emit_probe_finding (local import)
-        with patch.dict("sys.modules", {"multifleet.eventbus": MagicMock(FleetEventBus=MagicMock(return_value=mock_bus))}):
+        # Patch the IDEEventBus.get() inside _emit_probe_finding (local import)
+        mock_ide_bus_mod = MagicMock()
+        mock_ide_bus_mod.IDEEventBus.get.return_value = mock_bus
+        with patch.dict("sys.modules", {"multifleet.event_bus": mock_ide_bus_mod}):
             results = registry.run_all({})
 
         # Verify probe returned findings

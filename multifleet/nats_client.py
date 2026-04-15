@@ -1179,27 +1179,7 @@ class FleetNerveNATS:
                 return {"delivered": True, "method": "ssh_tunnel"}
             except Exception:
                 pass
-        # Fallback: write seed file via SSH using base64 to prevent injection
-        # Session-aware: use _target_session if set, otherwise per-node fallback
-        try:
-            import base64
-            payload = message.get("payload", {})
-            seed_text = f"Fleet: {payload.get('subject','')}\n{payload.get('body','')}"
-            b64 = base64.b64encode(seed_text.encode()).decode()
-            # Determine seed file name -- per-session if targeted, per-node otherwise
-            target_session = message.get("_target_session")
-            if target_session:
-                safe_sid = "".join(c for c in target_session if c.isalnum() or c in "-_")
-                seed_name = f"fleet-seed-{safe_sid}.md" if safe_sid else f"fleet-seed-{target}.md"
-            else:
-                seed_name = f"fleet-seed-{target}.md"
-            subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=3", f"{user}@{ip}",
-                 f"echo '{b64}' | base64 -d > /tmp/{seed_name}"],
-                capture_output=True, timeout=8)
-            return {"delivered": True, "method": "seed_via_ssh", "seedFile": seed_name}
-        except Exception:
-            return {"delivered": False}
+        return {"delivered": False}
 
     async def _send_p6_wol(self, target: str, message: dict) -> dict:
         """P6: Wake-on-LAN -- wake sleeping machine."""

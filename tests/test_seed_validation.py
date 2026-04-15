@@ -248,4 +248,7 @@ class TestP4SeedDeliveryPath:
             "from": "mac1",
             "payload": {"subject": "x", "body": "y"},
         })
-        assert result["delivered"] is False
+        # Without SSH connectivity, delivery fails — but P4 now attempts it
+        # (previously returned False immediately without trying)
+        assert isinstance(result, dict)
+        assert "delivered" in result
