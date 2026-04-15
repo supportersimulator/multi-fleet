@@ -460,6 +460,27 @@ def create_contextdna_analyzer():
         except Exception:
             pass
 
+        # Build structured analysis summary for downstream consumers
+        memory_hits = sum(a.get("match_count", 0) for a in adjustments.values())
+        professor_warnings = []
+        relevant_context = []
+        for entry in memory_reasons_detail:
+            if entry.get("source") == "professor":
+                wisdom_text = entry.get("wisdom", "")
+                if wisdom_text:
+                    professor_warnings.append(wisdom_text)
+            elif entry.get("prior_failures"):
+                professor_warnings.extend(entry["prior_failures"])
+            if entry.get("arch_decisions"):
+                relevant_context.extend(entry["arch_decisions"])
+            if entry.get("source", "").startswith("general_query"):
+                relevant_context.append(
+                    f"{entry.get('machine', '?')}: {entry.get('memory_matches', 0)} matches, "
+                    f"delta={entry.get('delta', 0):.2f}"
+                )
+            if entry.get("source") == "strategic_analyst":
+                relevant_context.extend(entry.get("findings", []))
+
         return SynthesisResult(
             task_id=task_id,
             decision=decision,
@@ -469,7 +490,12 @@ def create_contextdna_analyzer():
             cherry_pick_from=cherry_picks,
             followups=winner_verdict.get("followups", []),
             dissent_preserved=all_dissent,
-            metadata={"memory_reasons": memory_reasons_detail},
+            metadata={
+                "memory_reasons": memory_reasons_detail,
+                "memory_hits": memory_hits,
+                "professor_warnings": professor_warnings,
+                "relevant_context": relevant_context,
+            },
         )
 
     return analyzer
