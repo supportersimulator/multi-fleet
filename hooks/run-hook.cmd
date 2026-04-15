@@ -510,11 +510,20 @@ maybe_spawn_repair_agent() {
     rm -f "$REPAIR_PID_FILE"
   fi
 
-  emit "[FLEET] Spawning repair agent for broken channels: ${FLEET_CHANNELS_BROKEN}"
-  claude -p "Fleet channel repair: broken channels [${FLEET_CHANNELS_BROKEN}] on node ${NODE_ID}. Diagnose and fix. Check NATS server status, daemon config at ${FLEET_CONFIG}, network connectivity. Restart services as needed. Report to fleet when fixed." </dev/null &>/dev/null &
-  local repair_pid=$!
-  echo "$repair_pid" > "$REPAIR_PID_FILE"
-  emit "[FLEET] Repair agent spawned (PID ${repair_pid})"
+  # DISABLED: claude -p repair agent burns Anthropic weekly context limit.
+  # Instead: log broken channels + write seed file for next human session.
+  # See: 2026-04-15 context-limit audit.
+  emit "[FLEET] Broken channels detected: ${FLEET_CHANNELS_BROKEN} — logged for next session (claude -p DISABLED)"
+  echo "---
+from: ${NODE_ID}
+to: all
+subject: broken channels detected — ${FLEET_CHANNELS_BROKEN}
+timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+Broken channels on ${NODE_ID}: ${FLEET_CHANNELS_BROKEN}
+Auto-repair disabled to protect Anthropic context limit.
+Fix manually or wait for next interactive session.
+" > "${REPO_ROOT}/.fleet-messages/all/$(date +%Y%m%d-%H%M%S)-${NODE_ID}-broken-channels.md"
 }
 
 check_fleet_inbox_deep() {

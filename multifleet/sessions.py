@@ -393,17 +393,12 @@ class SessionManager:
         except Exception as e:
             logger.debug(f"Session-driver unavailable ({e}), falling back to claude -p")
 
-        # Fallback: raw claude -p
-        claude = self._find_claude()
-        if claude:
-            log_path = f"/tmp/fleet-task-{task_id}.log"
-            subprocess.Popen(
-                [claude, "-p", prompt, "--output-format", "json", "--max-turns", "20"],
-                stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
-            )
-            logger.info(f"Spawned task agent {task_id} (claude -p fallback)")
-        else:
-            self._inject_context(data)  # fallback to seed file
+        # DISABLED: claude -p fallback burns Anthropic weekly context limit.
+        # 103 fleet-task logs found = massive token waste. Use P7 git channel instead.
+        # See: 2026-04-15 context-limit audit.
+        logger.warning(f"Task {task_id} from {sender}: session-driver unavailable, "
+                       f"falling back to P7 seed file (claude -p DISABLED to protect context limit)")
+        self._inject_context(data)  # P7 seed file — zero Anthropic tokens
 
     # ── Utilities ──
 
