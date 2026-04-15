@@ -12,6 +12,9 @@ from .coordinator_agent import CoordinatorAgent
 from .coordinator_evidence import EvidencePipeline
 from .coordinator_health import HealthChecker, LocalHealthSnapshot, ServiceHealth
 from .coordinator_surgeon_proxy import SurgeonProxy, SurgicalOutcome, SurgeonAvailability
+from .chief_orchestrator import ChiefOrchestrator, SurgicalPhase, SurgicalProtocolResult
+from .workspace_roles import WorkspaceRegistry, WorkspaceRole, ApproachStrategy
+from .surgeon_lan_relay import SurgeonLANRelay, SurgeonPacket
 
 __all__ = [
     "CoordinatorAgent",
@@ -22,4 +25,12 @@ __all__ = [
     "SurgeonProxy",
     "SurgicalOutcome",
     "SurgeonAvailability",
+    "ChiefOrchestrator",
+    "SurgicalPhase",
+    "SurgicalProtocolResult",
+    "WorkspaceRegistry",
+    "WorkspaceRole",
+    "ApproachStrategy",
+    "SurgeonLANRelay",
+    "SurgeonPacket",
 ]
