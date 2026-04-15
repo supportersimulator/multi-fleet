@@ -88,6 +88,7 @@ class EventType(Enum):
     HEALTH_CHANNEL_BROKEN = "health.channel.broken"
     HEALTH_CHANNEL_HEALING = "health.channel.healing"
     HEALTH_CHANNEL_RESTORED = "health.channel.restored"
+    HEALTH_PARTITION_HEALED = "health.partition.healed"
 
     # Superpowers events
     SUPERPOWERS_PHASE_CHANGED = "superpowers.phase.changed"

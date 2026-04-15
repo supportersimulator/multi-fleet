@@ -52,6 +52,9 @@ class FleetHealthMonitor:
         self._channel_invariant = ChannelHealthInvariant()
         # Track previous channel state per peer for transition detection
         self._prev_channel_state: dict[str, str] = {}  # peer -> "healthy"|"broken"
+        # Track previous peer reachability for partition heal detection
+        self._prev_peer_status: dict[str, str] = {}  # peer -> "offline"|"degraded"|"healthy"
+        self._lease_manager = None  # set via wire_lease_manager()
 
     # -- Wiring --
 
@@ -62,6 +65,10 @@ class FleetHealthMonitor:
     def wire_ledger(self, ledger) -> None:
         """Inject EvidenceLedger for tamper-evident recording."""
         self._ledger = ledger
+
+    def wire_lease_manager(self, lease_manager) -> None:
+        """Inject LeaseManager for automatic partition-heal reconciliation."""
+        self._lease_manager = lease_manager
 
     # -- Core check --
 
@@ -137,6 +144,12 @@ class FleetHealthMonitor:
                 new_alerts.append(alert)
                 self._alerts.append(alert)
                 self._emit_event("health.transition", alert)
+
+            # Detect partition heal: peer was offline, now reachable
+            prev_peer = self._prev_peer_status.get(peer_id)
+            if prev_peer == "offline" and status in ("healthy", "degraded"):
+                self._handle_partition_heal(peer_id, ts, new_alerts)
+            self._prev_peer_status[peer_id] = status
 
         # Channel health invariance check — auto-repair broken channels
         if channel_health:
@@ -423,8 +436,52 @@ class FleetHealthMonitor:
                 "channel.broken": ET.HEALTH_CHANNEL_BROKEN,
                 "channel.healing": ET.HEALTH_CHANNEL_HEALING,
                 "channel.restored": ET.HEALTH_CHANNEL_RESTORED,
+                "health.partition.healed": ET.HEALTH_PARTITION_HEALED,
             }
         return cls._EVENT_TYPE_MAP
+
+    def _handle_partition_heal(self, peer_id: str, ts: float, alerts: list):
+        """Trigger lease reconciliation when a previously-offline peer becomes reachable.
+
+        Collects provisional leases for the healed peer and calls
+        LeaseManager.reconcile(). Emits fleet.partition.healed event.
+        Reconciliation failures are logged but never crash the monitor.
+        """
+        if not self._lease_manager:
+            logger.debug("Partition heal detected for %s but no LeaseManager wired", peer_id)
+            return
+
+        heal_event = {
+            "peer": peer_id,
+            "timestamp": ts,
+            "provisional_count": 0,
+            "verdicts": [],
+        }
+
+        try:
+            provisionals = self._lease_manager.list_provisional(node_id=peer_id)
+            heal_event["provisional_count"] = len(provisionals)
+
+            if provisionals:
+                verdicts = self._lease_manager.reconcile(provisionals)
+                heal_event["verdicts"] = verdicts
+                logger.info(
+                    "Partition heal: reconciled %d provisional leases for %s",
+                    len(provisionals), peer_id,
+                )
+            else:
+                logger.info("Partition heal: no provisional leases for %s", peer_id)
+        except Exception as exc:
+            logger.error("Partition heal reconciliation failed for %s: %s", peer_id, exc)
+            heal_event["error"] = str(exc)
+
+        alerts.append({
+            "type": "partition_healed",
+            "peer": peer_id,
+            "provisional_count": heal_event["provisional_count"],
+            "timestamp": ts,
+        })
+        self._emit_event("health.partition.healed", heal_event)
 
     def _emit_event(self, event_type: str, payload: dict):
         """Emit event via typed EventEmitter (preferred) with FleetEventBus fallback."""

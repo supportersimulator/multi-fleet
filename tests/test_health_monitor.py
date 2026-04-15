@@ -116,3 +116,117 @@ class TestContinuousLoop:
             monitor.run_continuous(max_checks=2)
         assert monitor._checks_run == 2
         assert not monitor._running
+
+
+class TestPartitionHealReconciliation:
+    """Tests for automatic lease reconciliation on partition heal."""
+
+    def test_partition_heal_triggers_reconcile(self, monitor):
+        """When a peer transitions from offline to healthy, reconcile() is called."""
+        mock_lm = MagicMock()
+        mock_lm.list_provisional.return_value = [
+            {"resource_id": "task-1", "node_id": "mac1", "fence_token": 1,
+             "partition_id": "part-abc", "lease_type": "short_task"},
+        ]
+        mock_lm.reconcile.return_value = [
+            {"resource_id": "task-1", "verdict": "accepted", "node_id": "mac1"},
+        ]
+        monitor.wire_lease_manager(mock_lm)
+
+        # Seed peer as offline
+        monitor._prev_peer_status["mac1"] = "offline"
+
+        # Health response shows mac1 now reachable
+        health = {**MOCK_HEALTH}
+        health["peers"] = {"mac1": {"lastSeen": 5, "sessions": 1}}
+        health["channel_health"] = {"mac1": {"score": "6/7", "broken": ["P6_wol"]}}
+
+        with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+            result = monitor.check_fleet()
+
+        mock_lm.list_provisional.assert_called_once_with(node_id="mac1")
+        mock_lm.reconcile.assert_called_once()
+        heal_alerts = [a for a in result["alerts"] if a["type"] == "partition_healed"]
+        assert len(heal_alerts) == 1
+        assert heal_alerts[0]["peer"] == "mac1"
+        assert heal_alerts[0]["provisional_count"] == 1
+
+    def test_reconcile_failure_does_not_crash(self, monitor):
+        """Reconciliation errors are caught — health monitoring continues."""
+        mock_lm = MagicMock()
+        mock_lm.list_provisional.side_effect = RuntimeError("DB locked")
+        monitor.wire_lease_manager(mock_lm)
+
+        monitor._prev_peer_status["mac1"] = "offline"
+
+        health = {**MOCK_HEALTH}
+        health["peers"] = {"mac1": {"lastSeen": 5, "sessions": 1}}
+        health["channel_health"] = {"mac1": {"score": "6/7", "broken": ["P6_wol"]}}
+
+        with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+            result = monitor.check_fleet()
+
+        # Should not raise — check completed
+        assert result["status"] == "ok"
+        heal_alerts = [a for a in result["alerts"] if a["type"] == "partition_healed"]
+        assert len(heal_alerts) == 1
+
+    def test_partition_heal_emits_event(self, monitor):
+        """health.partition.healed event is emitted on partition heal."""
+        mock_lm = MagicMock()
+        mock_lm.list_provisional.return_value = []
+        monitor.wire_lease_manager(mock_lm)
+
+        monitor._prev_peer_status["mac1"] = "offline"
+
+        health = {**MOCK_HEALTH}
+        health["peers"] = {"mac1": {"lastSeen": 5, "sessions": 1}}
+        health["channel_health"] = {"mac1": {"score": "6/7", "broken": ["P6_wol"]}}
+
+        emitted_events = []
+        original_emit = monitor._emit_event
+
+        def capture_emit(event_type, payload):
+            emitted_events.append((event_type, payload))
+            original_emit(event_type, payload)
+
+        with patch.object(monitor, "_emit_event", side_effect=capture_emit):
+            with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+                monitor.check_fleet()
+
+        partition_events = [e for e in emitted_events if e[0] == "health.partition.healed"]
+        assert len(partition_events) == 1
+        assert partition_events[0][1]["peer"] == "mac1"
+
+    def test_no_reconcile_without_lease_manager(self, monitor):
+        """Without a wired LeaseManager, partition heal is detected but no reconcile."""
+        monitor._prev_peer_status["mac1"] = "offline"
+
+        health = {**MOCK_HEALTH}
+        health["peers"] = {"mac1": {"lastSeen": 5, "sessions": 1}}
+        health["channel_health"] = {"mac1": {"score": "6/7", "broken": ["P6_wol"]}}
+
+        with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+            result = monitor.check_fleet()
+
+        # No crash, no partition_healed alert (no lease manager to trigger it)
+        heal_alerts = [a for a in result["alerts"] if a["type"] == "partition_healed"]
+        assert len(heal_alerts) == 0
+
+    def test_no_reconcile_when_peer_stays_healthy(self, monitor):
+        """No reconciliation triggered when peer was already healthy."""
+        mock_lm = MagicMock()
+        monitor.wire_lease_manager(mock_lm)
+
+        # Peer was already healthy
+        monitor._prev_peer_status["mac1"] = "healthy"
+
+        health = {**MOCK_HEALTH}
+        health["peers"] = {"mac1": {"lastSeen": 5, "sessions": 1}}
+        health["channel_health"] = {"mac1": {"score": "6/7", "broken": ["P6_wol"]}}
+
+        with patch.object(monitor, "_fetch_daemon_health", return_value=health):
+            monitor.check_fleet()
+
+        mock_lm.list_provisional.assert_not_called()
+        mock_lm.reconcile.assert_not_called()
