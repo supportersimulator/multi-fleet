@@ -181,6 +181,34 @@ class AcceptanceGate:
             blocking_issues=blocking,
         )
         decision.checks = checks  # Mac2 expects this attribute
+
+        # Emit gate event (best-effort)
+        try:
+            from multifleet.event_bus import IDEEventBus
+            bus = IDEEventBus.get()
+            bus.emit("gate.acceptance.checked", {
+                "gate": "AcceptanceGate",
+                "passed": accepted,
+                "checks_run": len(checks),
+                "failures": blocking,
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            import os
+            ledger = EvidenceLedger()
+            ledger.record(
+                "gate_activation",
+                os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "AcceptanceGate",
+                {"passed": accepted, "task_id": task_id,
+                 "checks_run": len(checks), "failures": blocking},
+            )
+        except Exception:
+            pass
+
         return decision
 
     def _evaluate_keyword(
@@ -313,6 +341,32 @@ class AcceptanceGate:
                 "blocking_count": len(decision.blocking_issues),
             })
         except (ImportError, Exception):
+            pass
+
+        # Gate-level event + ledger (best-effort)
+        try:
+            from multifleet.event_bus import IDEEventBus
+            bus = IDEEventBus.get()
+            bus.emit("gate.acceptance.checked", {
+                "gate": "AcceptanceGate",
+                "passed": accepted,
+                "checks_run": 5,
+                "failures": blocking,
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            import os
+            ledger = EvidenceLedger()
+            ledger.record(
+                "gate_activation",
+                os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "AcceptanceGate",
+                {"passed": accepted, "checks_run": 5, "failures": blocking},
+            )
+        except Exception:
             pass
 
         logger.info("acceptance_gate %s", decision.summary())

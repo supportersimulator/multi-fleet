@@ -40,10 +40,11 @@ NS_EVIDENCE = "evidence"
 NS_QUORUM = "quorum"
 NS_SUPERPOWERS = "superpowers"
 NS_SYNAPTIC = "synaptic"
+NS_GATE = "gate"
 
 ALL_NAMESPACES = frozenset({
     NS_FLEET, NS_PROBE, NS_SURGEON, NS_PANEL, NS_EVIDENCE, NS_QUORUM,
-    NS_SUPERPOWERS, NS_SYNAPTIC,
+    NS_SUPERPOWERS, NS_SYNAPTIC, NS_GATE,
 })
 
 # Default ring sizes

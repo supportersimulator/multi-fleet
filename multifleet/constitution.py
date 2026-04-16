@@ -441,7 +441,43 @@ class ConstitutionalGate:
         passed = len(hard_failures) == 0
         duration_ms = (time.monotonic() - t0) * 1000
 
-        return GateResult(passed=passed, checks=checks, duration_ms=duration_ms)
+        result = GateResult(passed=passed, checks=checks, duration_ms=duration_ms)
+
+        # Emit gate event (best-effort)
+        try:
+            from .event_bus import IDEEventBus
+            bus = IDEEventBus.get()
+            bus.emit("gate.constitutional.checked", {
+                "gate": "ConstitutionalGate",
+                "action": action,
+                "passed": passed,
+                "checks_run": len(checks),
+                "failures": [c.principle_id for c in hard_failures],
+                "advisories": [c.principle_id for c in self._advisories(checks)],
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+        try:
+            from .evidence_ledger import EvidenceLedger
+            import os
+            ledger = EvidenceLedger()
+            ledger.record(
+                "gate_activation",
+                os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                "ConstitutionalGate",
+                {"passed": passed, "action": action,
+                 "checks_run": len(checks),
+                 "failures": [c.principle_id for c in hard_failures]},
+            )
+        except Exception:
+            pass
+
+        return result
+
+    @staticmethod
+    def _advisories(checks: list) -> list:
+        return [c for c in checks if not c.passed and c.severity == "advisory"]
 
 
 # ---------------------------------------------------------------------------
