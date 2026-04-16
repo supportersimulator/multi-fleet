@@ -16,12 +16,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from .db_registry import ConnectionStyle, KNOWN_DATABASES
+
 logger = logging.getLogger("fleet-nerve.data")
 
-# Known database names and their default filenames
+# Databases managed by FleetDataLayer (DATA_LAYER connection style only).
+# Other ~/.fleet-nerve DBs exist but are managed by their own modules.
 DB_NAMES = {
-    "messages": "messages.db",
-    "evidence": "evidence.db",
+    db.name: db.filename
+    for db in KNOWN_DATABASES
+    if db.connection_style == ConnectionStyle.DATA_LAYER
 }
 
 
