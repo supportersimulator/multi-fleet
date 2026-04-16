@@ -543,30 +543,11 @@ class FleetNerveNATS:
                             self._repair_cooldowns[cooldown_key] = now
                             asyncio.create_task(handler(heal))
 
-                        # Spawn 1 repair agent per broken channel immediately
-                        claude_bin = self._find_claude()
-                        if claude_bin:
-                            for ch in broken:
-                                if ch not in self._repair_agents_spawned:
-                                    pid_file = f"/tmp/fleet-repair-{ch}.pid"
-                                    if os.path.exists(pid_file):
-                                        try:
-                                            old_pid = int(open(pid_file).read().strip())
-                                            os.kill(old_pid, 0)  # check alive
-                                            continue  # agent already running
-                                        except (OSError, ValueError):
-                                            pass  # stale pid
-                                    prompt = (f"Fleet channel {ch} is broken on {self.node_id}. "
-                                              f"Diagnose and fix. Check daemon, NATS, SSH tunnel, config. "
-                                              f"Report result to fleet when fixed.")
-                                    proc = subprocess.Popen(
-                                        [claude_bin, "-p", prompt],
-                                        stdout=open(f"/tmp/fleet-repair-{ch}.log", "w"),
-                                        stderr=subprocess.STDOUT)
-                                    self._repair_agents_spawned[ch] = proc.pid
-                                    with open(pid_file, "w") as f:
-                                        f.write(str(proc.pid))
-                                    logger.info(f"Spawned repair agent for {ch} (pid {proc.pid})")
+                        # SECURITY: claude -p spawning DISABLED (commit 1fb2a95c).
+                        # Fleet-sourced data must NEVER be passed to `claude -p` as it
+                        # enables prompt injection from any node on the NATS bus.
+                        # Repair actions are handled by SAFE_ACTIONS dict above.
+                        pass
 
                     elif now - first_seen > 120:
                         # 2 min passed, peer hasn't fixed it -- escalate to L3 (SSH fix)

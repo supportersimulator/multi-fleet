@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -284,8 +285,44 @@ class SelfHealManager:
 
     # ── Repair Actions ──
 
+    # Strict patterns: IP must be IPv4, user must be alphanumeric/underscore/hyphen
+    _IP_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+    _USER_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+    # Shell metacharacters that could enable command injection
+    _SHELL_DANGEROUS = re.compile(r"[;|&$`\"'\\()\n\r\x00]")
+
+    @staticmethod
+    def _validate_repair_target(ip: str, user: str) -> bool:
+        """Validate ip/user from fleet messages before use in SSH commands.
+
+        Returns True if both values are safe. Rejects any shell metacharacters,
+        malformed IPs, or usernames with special characters.
+        """
+        if not ip or not user:
+            return False
+        if SelfHealManager._SHELL_DANGEROUS.search(ip) or SelfHealManager._SHELL_DANGEROUS.search(user):
+            logger.warning(f"SSH repair: rejected dangerous chars in ip={ip!r} user={user!r}")
+            return False
+        if not SelfHealManager._IP_RE.match(ip):
+            logger.warning(f"SSH repair: invalid IP format: {ip!r}")
+            return False
+        # Validate each octet is 0-255
+        try:
+            if not all(0 <= int(o) <= 255 for o in ip.split(".")):
+                logger.warning(f"SSH repair: IP octet out of range: {ip!r}")
+                return False
+        except ValueError:
+            return False
+        if not SelfHealManager._USER_RE.match(user):
+            logger.warning(f"SSH repair: invalid username format: {user!r}")
+            return False
+        return True
+
     async def _ssh_repair_peer(self, ip: str, user: str, action: str):
         """L3 escalation: SSH into peer and fix their broken channel after 2min timeout."""
+        if not self._validate_repair_target(ip, user):
+            logger.warning(f"SSH repair: blocked — invalid target ip={ip!r} user={user!r}")
+            return
         import subprocess as _sp
         REPAIR_COMMANDS = {
             "restart_nats": "pkill -f fleet_nerve_nats; sleep 2; cd ${MULTIFLEET_REPO_ROOT:-~/dev/multi-fleet} && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
