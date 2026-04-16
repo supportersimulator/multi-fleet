@@ -12,10 +12,12 @@ Usage:
 
 import json
 import logging
+import sqlite3
 import time
 import uuid
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.race")
@@ -28,6 +30,80 @@ except ImportError:
     _theater = None
 
 
+class _RaceStore:
+    """SQLite persistence for race state. WAL mode, ~/.multifleet/races.db."""
+
+    def __init__(self, db_path: str | None = None):
+        self._db_path = db_path or str(Path.home() / ".multifleet" / "races.db")
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self):
+        with self._conn() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS races (
+                    id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+
+    def save(self, race: dict):
+        """Upsert race state to DB."""
+        race_id = race.get("race_id", "")
+        state = race.get("status", "unknown")
+        data = json.dumps(race, default=str)
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO races (id, state, data, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       state = excluded.state,
+                       data = excluded.data,
+                       updated_at = excluded.updated_at""",
+                (race_id, state, data, now, now),
+            )
+
+    def load_active(self) -> dict[str, dict]:
+        """Load all non-terminal races from DB. Returns {race_id: race_dict}."""
+        terminal = ("done", "failed", "timed_out")
+        races: dict[str, dict] = {}
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, data FROM races WHERE state NOT IN (?, ?, ?)",
+                terminal,
+            ).fetchall()
+            for row in rows:
+                try:
+                    race = json.loads(row["data"])
+                    races[row["id"]] = race
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning("Corrupt race row %s: %s", row["id"], e)
+        return races
+
+    def load_all(self) -> dict[str, dict]:
+        """Load all races from DB."""
+        races: dict[str, dict] = {}
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id, data FROM races").fetchall()
+            for row in rows:
+                try:
+                    race = json.loads(row["data"])
+                    races[row["id"]] = race
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning("Corrupt race row %s: %s", row["id"], e)
+        return races
+
+
 class FleetRace:
     """Orchestrates competitive branch racing across fleet nodes.
 
@@ -35,14 +111,35 @@ class FleetRace:
         start() -> dispatched to all nodes -> racing -> first_complete ->
         cross_review -> synthesis -> done
 
-    All state is in-memory (_races dict). Evidence is persisted to the
-    EvidenceLedger via the daemon's /evidence endpoint.
+    State is kept in-memory (_races dict) as hot cache, with SQLite
+    persistence via _RaceStore. On init, active races are recovered
+    from DB so daemon restarts don't lose race state.
     """
 
-    def __init__(self, daemon_port: int = 8855, node_id: str = "unknown"):
+    def __init__(self, daemon_port: int = 8855, node_id: str = "unknown",
+                 db_path: str | None = None):
         self._port = daemon_port
         self._node_id = node_id
+        self._store = _RaceStore(db_path=db_path)
         self._races: dict[str, dict] = {}  # race_id -> race state
+        self.recover_races()
+
+    def recover_races(self) -> int:
+        """Load active races from SQLite into memory. Returns count recovered."""
+        recovered = self._store.load_active()
+        self._races.update(recovered)
+        if recovered:
+            logger.info("Recovered %d active race(s) from DB: %s",
+                        len(recovered), list(recovered.keys()))
+        return len(recovered)
+
+    def _persist_race(self, race: dict):
+        """Write race state to SQLite (best-effort, never blocks race logic)."""
+        try:
+            self._store.save(race)
+        except Exception as e:
+            logger.warning("Race persist failed for %s: %s",
+                           race.get("race_id", "?"), e)
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -133,6 +230,7 @@ class FleetRace:
             race["status"] = "failed"
             race["error"] = "no nodes available"
             self._races[race_id] = race
+            self._persist_race(race)
             return race
 
         # Theatrical: show race banner
@@ -185,6 +283,7 @@ class FleetRace:
         if dispatched == 0:
             race["error"] = "no nodes accepted dispatch"
         self._races[race_id] = race
+        self._persist_race(race)
 
         # Theatrical: show initial scoreboard
         if _theater:
@@ -267,6 +366,7 @@ class FleetRace:
             race["status"] = "synthesizing"
             self._run_synthesis(race)
 
+        self._persist_race(race)
         return race
 
     def status(self, race_id: str) -> dict:
@@ -282,6 +382,7 @@ class FleetRace:
             for p in race["participants"].values():
                 if p["status"] == "dispatched":
                     p["status"] = "timed_out"
+            self._persist_race(race)
 
         return race
 
@@ -626,6 +727,7 @@ class FleetRace:
         if not completed:
             race["status"] = "done"
             race["synthesis"] = {"recommendation": "No completions to synthesize."}
+            self._persist_race(race)
             return
 
         if len(completed) == 1:
@@ -647,6 +749,7 @@ class FleetRace:
             })
             # Wire 2: push race evidence to ContextDNA
             self._push_to_contextdna(race["race_id"], race.get("synthesis"))
+            self._persist_race(race)
             return
 
         # Multiple completions — build verdict dict for ChiefSynthesis
@@ -771,6 +874,8 @@ class FleetRace:
                 _theater.race_scoreboard(race)
             except Exception:
                 pass
+
+        self._persist_race(race)
 
         logger.info(
             "Race %s completed: winner=%s completions=%d",
