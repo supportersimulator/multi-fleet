@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .nats_client import FleetNerveNATS
 
 from .channels import ALL_CHANNELS, HEAL_SCORE_THRESHOLD
+from .memory_feedback import get_feedback as _get_memory_feedback
 
 logger = logging.getLogger("fleet_nats")
 
@@ -966,8 +967,31 @@ class SelfHealManager:
         result = await self.repair_with_escalation(target, broken_channels, action)
         if result and result.get("repaired"):
             self._record_successful_repair(target)
+            # Feed repair outcome into memory learning pipeline
+            try:
+                fb = _get_memory_feedback()
+                for ch in broken_channels:
+                    fb.record_repair(
+                        channel=ch, action=action, success=True,
+                        details=f"Repaired at L{result.get('level', '?')}",
+                        target=target, level=result.get("level", 0),
+                    )
+            except Exception:
+                pass  # never block fleet ops
         else:
             self._record_failed_repair(target)
+            # Feed failure into memory learning pipeline
+            try:
+                fb = _get_memory_feedback()
+                reason = result.get("reason", "unknown") if result else "no_result"
+                for ch in broken_channels:
+                    fb.record_repair(
+                        channel=ch, action=action, success=False,
+                        details=f"Failed: {reason}",
+                        target=target, level=result.get("level", 0) if result else 0,
+                    )
+            except Exception:
+                pass  # never block fleet ops
 
     async def _watchdog_check_channel_health(self):
         """Check channel health scores and trigger repair for degraded peers.

@@ -145,6 +145,16 @@ class FleetHealthMonitor:
                 self._alerts.append(alert)
                 self._emit_event("health.transition", alert)
 
+                # Feed transition into memory learning pipeline
+                try:
+                    from multifleet.memory_feedback import get_feedback
+                    get_feedback().record_health_transition(
+                        node=peer_id, old_status=prev,
+                        new_status=status, broken_channels=broken,
+                    )
+                except Exception:
+                    pass  # never block health monitor
+
             # Detect partition heal: peer was offline, now reachable
             prev_peer = self._prev_peer_status.get(peer_id)
             if prev_peer == "offline" and status in ("healthy", "degraded"):
