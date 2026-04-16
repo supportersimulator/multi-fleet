@@ -130,7 +130,8 @@ class TestRouting:
         assert "superpowers->3-surgeons" in routes
         assert "superpowers->multi-fleet" in routes
         assert "3-surgeons->superpowers" in routes
-        assert len(routes) == 10
+        assert "multi-fleet->admin-panel" in routes
+        assert len(routes) == 11
 
 
 # ── 4. Fleet <-> Surgeons Bridge ─────────────────────────────────────────
@@ -502,8 +503,8 @@ class TestCrossProductWiring:
         assert workflow_result["action"] == "proceed"
         assert workflow_result["new_phase"] == "executing-plans"
 
-    def test_all_ten_routes_registered(self, bridge):
-        """All 10 routes are registered and have handlers."""
+    def test_all_eleven_routes_registered(self, bridge):
+        """All 11 routes are registered and have handlers."""
         routes = bridge.list_routes()
         expected = [
             "multi-fleet->3-surgeons",
@@ -516,7 +517,8 @@ class TestCrossProductWiring:
             "superpowers->3-surgeons",
             "superpowers->multi-fleet",
             "3-surgeons->superpowers",
+            "multi-fleet->admin-panel",
         ]
         for route in expected:
             assert route in routes, f"Missing route: {route}"
-        assert len(routes) == 10
+        assert len(routes) == 11

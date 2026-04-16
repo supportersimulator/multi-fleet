@@ -228,6 +228,9 @@ class FleetHealthMonitor:
 
         self._checks_run += 1
 
+        # Push fleet health to admin panel via product bridge (MF→AP)
+        self._route_health_to_admin(nodes, new_alerts, ts)
+
         return {
             "status": "ok",
             "nodes": nodes,
@@ -235,6 +238,27 @@ class FleetHealthMonitor:
             "checks_run": self._checks_run,
             "timestamp": ts,
         }
+
+    def _route_health_to_admin(self, nodes: dict, alerts: list, ts: float) -> None:
+        """Push fleet health summary to admin panel via ProductBridge (MF→AP).
+
+        Best-effort, never blocks the health check loop.
+        """
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            bridge.route("multi-fleet", "admin-panel", {
+                "event_type": "fleet.health.check",
+                "node_id": self._node_id,
+                "data": {
+                    "nodes": {nid: info for nid, info in nodes.items()},
+                    "alert_count": len(alerts),
+                    "checks_run": self._checks_run,
+                    "timestamp": ts,
+                },
+            })
+        except Exception as e:
+            logger.debug("health->admin route (non-blocking): %s", e)
 
     def detect_anomalies(self, nodes: dict) -> list:
         """Detect anomalies from current and historical health data.

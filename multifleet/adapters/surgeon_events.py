@@ -255,6 +255,14 @@ class SurgeonEventsAdapter:
             self._stats["broadcast_errors"] = self._stats.get("broadcast_errors", 0) + 1
             logger.warning("Verdict broadcast failed (non-fatal): %s", e)
 
+        # Route verdict to superpowers for workflow phase changes (3S→SP)
+        try:
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            bridge.route("3-surgeons", "superpowers", verdict_data)
+        except Exception as e:
+            logger.debug("surgeon->superpowers route (non-fatal): %s", e)
+
         return event
 
     def poll_and_emit(self) -> Optional[EventEnvelope]:

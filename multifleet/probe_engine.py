@@ -569,6 +569,9 @@ class ProbeEngine:
         # Record HIGH+ findings to evidence ledger (probe → evidence pipeline)
         self._record_high_findings(results)
 
+        # Route HIGH+ findings to superpowers for workflow adjustment (MF→SP)
+        self._route_findings_to_superpowers(results)
+
         return results
 
     def scan_category(
@@ -787,6 +790,43 @@ class ProbeEngine:
             })
         except Exception as e:
             logger.debug("probe->contextdna bridge (non-blocking): %s", e)
+
+    def _route_findings_to_superpowers(self, results: list[ProbeResult]) -> None:
+        """Route HIGH/CRITICAL probe findings to superpowers via ProductBridge (MF→SP).
+
+        When probes detect high-severity issues, superpowers needs to know so it
+        can gate workflows, trigger reviews, or hold dispatch. Only fires when
+        there are actual HIGH+ findings with non-empty finding lists.
+        """
+        try:
+            high_findings = [
+                r for r in results
+                if r.severity in ("high", "critical") and r.findings
+            ]
+            if not high_findings:
+                return
+
+            from multifleet.product_bridge import get_bridge
+            bridge = get_bridge()
+            probe_data = {
+                "findings": [
+                    {
+                        "title": f.title,
+                        "blast_radius": f.blast_radius,
+                        "evidence": f.evidence[:3],
+                    }
+                    for r in high_findings
+                    for f in r.findings[:5]
+                ],
+            }
+            result = bridge.route("multi-fleet", "superpowers", probe_data)
+            logger.debug(
+                "probe->superpowers: risk=%s adjustments=%d",
+                result.get("risk_level", "?"),
+                len(result.get("workflow_adjustments", [])),
+            )
+        except Exception as e:
+            logger.debug("probe->superpowers route (non-blocking): %s", e)
 
     def pull_contextdna_evidence(self, query: str) -> list[dict]:
         """Pull relevant evidence from Context DNA for probe enrichment.

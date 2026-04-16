@@ -300,6 +300,14 @@ class ProductBridge:
         """
         return self.route("superpowers", "multi-fleet", {"phase": phase, "source": source})
 
+    def fleet_to_admin(self, health_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Multi-fleet pushes health/status data to admin panel feed.
+
+        Input: {event_type?, node_id?, data: {...}, nodes?, alerts?}
+        Output: {recorded, event_id, event_type}
+        """
+        return self.route("multi-fleet", "admin-panel", health_data)
+
     def surgeon_verdict_to_workflow(self, verdict: Dict[str, Any]) -> Dict[str, Any]:
         """Surgeon verdict informs superpowers workflow progression.
 
@@ -322,6 +330,7 @@ class ProductBridge:
         self._routes["superpowers->3-surgeons"] = self._handle_superpowers_to_surgeons
         self._routes["superpowers->multi-fleet"] = self._handle_superpowers_to_fleet
         self._routes["3-surgeons->superpowers"] = self._handle_surgeons_to_superpowers
+        self._routes["multi-fleet->admin-panel"] = self._handle_fleet_to_admin
 
     def _handle_fleet_to_surgeons(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """Route fleet verdict request to 3-surgeons cross-exam.
@@ -592,6 +601,32 @@ class ProductBridge:
         except Exception as e:
             logger.warning("superpowers->fleet failed: %s", e)
             return {"error": str(e), "phase_updated": False}
+
+    def _handle_fleet_to_admin(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Route fleet health/status data to admin panel feed.
+
+        Pushes events into the AdminFeed singleton so the admin panel
+        can display them via SSE or polling endpoints.
+        """
+        try:
+            from multifleet.admin_feed import get_admin_feed
+            feed = get_admin_feed()
+            event_type = msg.get("event_type", "fleet.status.update")
+            node_id = msg.get("node_id", "unknown")
+            event = feed.record_event(
+                event_type=event_type,
+                data=msg.get("data", msg),
+                source="product-bridge",
+                node_id=node_id,
+            )
+            return {
+                "recorded": True,
+                "event_id": event.id,
+                "event_type": event_type,
+            }
+        except Exception as e:
+            logger.warning("fleet->admin failed: %s", e)
+            return {"error": str(e), "recorded": False}
 
     def _handle_surgeons_to_superpowers(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """Route surgeon verdict to superpowers workflow.
