@@ -103,6 +103,7 @@ class FleetMemoryFeedback:
 
         if success:
             result_id = self._record_success(task_desc, detail_str, channel, action, target)
+            self.record_success_pattern(channel, action, target)
         else:
             result_id = self._record_failure(task_desc, detail_str, channel, action, target)
 
@@ -144,11 +145,18 @@ class FleetMemoryFeedback:
 
         try:
             if is_recovery and _auto_capture:
-                return _auto_capture.capture_success(
+                result = _auto_capture.capture_success(
                     task=task,
                     details=details or f"Node {node} recovered to healthy",
                     area="fleet",
                 )
+                # Wire 5: auto-learn from recovery commit if available
+                try:
+                    from memory.auto_learn import process_git_commit
+                    process_git_commit()
+                except Exception:
+                    pass  # best-effort
+                return result
             elif is_degradation and _auto_capture:
                 return _auto_capture.capture_failure(
                     task=task,
@@ -202,6 +210,27 @@ class FleetMemoryFeedback:
     def get_channel_patterns(self) -> dict[str, dict]:
         """Return current channel failure pattern data (for diagnostics)."""
         return dict(self._channel_patterns)
+
+    def record_success_pattern(
+        self,
+        channel: str,
+        action: str,
+        target: str = "",
+    ) -> None:
+        """Wire 4: Extract success patterns via PatternEvolutionEngine.
+
+        Called after a successful repair to feed into pattern evolution.
+        Lazy import, best-effort -- never blocks fleet ops.
+        """
+        try:
+            from memory.pattern_evolution import PatternEvolutionEngine
+            engine = PatternEvolutionEngine()
+            try:
+                engine.evolve()
+            finally:
+                engine.close()
+        except Exception as exc:
+            logger.debug("record_success_pattern failed: %s", exc)
 
     # -- Internal helpers --
 

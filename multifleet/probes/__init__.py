@@ -24,6 +24,7 @@ from multifleet.probes.injection_prioritizer import probe_injection_prioritizer
 from multifleet.probes.repeated_failure_cluster import probe_repeated_failure_cluster
 from multifleet.probes.worktree_divergence import probe_worktree_divergence
 from multifleet.probes.partition_lease_drift import probe_partition_lease_drift
+from multifleet.probes.distributed import DistributedProbeRunner
 
 
 def register_all(registry: ProbeRegistry) -> None:

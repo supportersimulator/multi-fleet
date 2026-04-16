@@ -984,11 +984,30 @@ class SelfHealManager:
             try:
                 fb = _get_memory_feedback()
                 reason = result.get("reason", "unknown") if result else "no_result"
+                level = result.get("level", 0) if result else 0
                 for ch in broken_channels:
                     fb.record_repair(
                         channel=ch, action=action, success=False,
                         details=f"Failed: {reason}",
-                        target=target, level=result.get("level", 0) if result else 0,
+                        target=target, level=level,
+                    )
+            except Exception:
+                pass  # never block fleet ops
+            # Wire 3: Record failure pattern for analysis
+            try:
+                from memory.failure_pattern_analyzer import FailurePatternAnalyzer
+                fpa = FailurePatternAnalyzer()
+                fpa.analyze_for_patterns(hours_back=1)
+            except Exception:
+                pass  # never block fleet ops
+            # Wire 6: Notify on L3+ repair failures
+            try:
+                level = result.get("level", 0) if result else 0
+                if level >= 3:
+                    from memory.notification_manager import send_notification
+                    send_notification(
+                        title="Fleet Repair Failed",
+                        message=f"L{level} repair failed for {target}: {broken_channels}",
                     )
             except Exception:
                 pass  # never block fleet ops
