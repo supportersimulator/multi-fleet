@@ -28,8 +28,6 @@ Multi-Fleet is the first LLM-native fleet coordination system. Every node is ind
 
 ## What's New in v5.0.0
 
-- **NATS clustering** -- each node runs its own nats-server, clustered with all peers. Zero single point of failure. Auto-failover when any node goes down.
-- **Trip mode** -- one command locks fleet for remote operation: keepalive, API failover (OmniRoute), wake-on-LAN, power state management
 - **112 Python modules** across 5 architectural layers
 - **~2,000 tests** across 99 test files
 - **34 MCP tools** for complete fleet operation via protocol
@@ -55,23 +53,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, module map, a
 ## Quick Start
 
 ```bash
-# Install
-pip install multifleet
-
-# Configure your fleet
+# 1. Configure your fleet
 cp config/config.template.json .multifleet/config.json
-# Edit config.json — add one entry per machine
+# Edit config.json -- add one entry per machine
 
-# Set your node identity and start
+# 2. Set your node identity and start
 export MULTIFLEET_NODE_ID=mac2
-fleet status              # Check fleet health
-fleet nats-cluster start  # Start clustered NATS server
-fleet-nerve               # Start fleet daemon
+python3 bin/fleet_nerve_mcp.py
 
-# Send a message
-fleet send mac1 "Hello from the CLI"
-
-# Or via HTTP
+# 3. Send a message (via MCP tools or direct HTTP)
 curl -X POST http://127.0.0.1:8855/message \
   -H "Content-Type: application/json" \
   -d '{"type":"context","to":"mac1","payload":{"body":"Hello from mac2"}}'
@@ -111,16 +101,6 @@ That's it. The plugin auto-discovers skills, commands, hooks, and agents from `p
 | VS Code session detection | Stable | 3-method detection (PID files, JSONL mtime, process scan). Knows active vs idle vs closed |
 | Proactive watchdog | Stable | Continuous health monitoring with threshold alerts and automatic repair triggers |
 | Productivity dashboard | Stable | Live fleet-wide view of nodes, agents, tasks, and backlog in real-time |
-
-### Intelligence
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| Probe engine | Stable | 19 probes with registry-based execution, trigger conditions, and category filtering |
-| Signal scoring | Stable | Probe findings scored by severity, recency, and relevance for prioritized injection |
-| Chief synthesis | Stable | Confidence-weighted verdict aggregation from multiple nodes with pluggable analyzers |
-| Evidence ledger | Stable | Hash-chain tamper-evident audit trail for all decisions and findings |
-| IDE bridge | Stable | Status bar, activity bar, notifications, and SSE streaming for IDE extensions |
 
 ### Platform
 
@@ -192,7 +172,7 @@ Every machine runs a lightweight daemon (port 8855) with 4 background threads:
 |    sync_hold) with JSON Schema validation                     |
 |                                                               |
 |  Task State Machine -- durable SQLite-backed task lifecycle   |
-|    (pending->claimed->running->done/failed/cancelled)            |
+|    (pending→claimed→running→done/failed/cancelled)            |
 +---------------------------------------------------------------+
 ```
 
@@ -211,36 +191,6 @@ Every (peer, channel) pair has exactly one state:
 ```
 
 BROKEN channels are skipped in the cascade to save timeout budget. States auto-reset to HEALTHY after 15 minutes of no failures.
-
-### Probe Engine
-
-19 probes continuously scan fleet and codebase state, feeding the intelligence pipeline:
-
-- **Fleet probes**: `agent_readiness`, `fleet_health`, `blast_radius`, `branch_intent`, `dependency_drift`, `mirror_drift`, `worktree_contamination`, `worktree_divergence`, `repeated_failure`, `repeated_failure_cluster`, `security_surface`, `stale_context`, `task_diff_mismatch`, `invariant_coverage`, `hidden_dependency`, `injection_prioritizer`, `architectural_hotspots`, `distributed`
-- **Code scanner probes**: `blast_radius`, `hidden_dependency`, `injection_prioritizer`, `mirror_drift`, `security_surface`, `stale_context`
-
-Probes run on triggers (message received, session idle, task complete) and produce scored findings that feed into chief synthesis.
-
-### Chief Synthesis
-
-The `ChiefSynthesis` engine aggregates verdicts from multiple nodes into confidence-weighted decisions:
-
-1. Collect verdicts from participating nodes
-2. Run pluggable analyzers (confidence weighting, agreement detection)
-3. Compute final decision with confidence score
-4. Record in evidence ledger (hash-chain for tamper evidence)
-5. Log decision for audit trail
-
-### IDE Bridge
-
-The `IDEBridge` translates fleet events into IDE-consumable formats:
-
-- **Status bar**: compact fleet health (node count, active tasks, channel health)
-- **Activity bar**: detailed panels for nodes, tasks, messages, and probes
-- **Notifications**: alerts requiring user attention (escalation levels: silent, inject, notify, interrupt)
-- **SSE streaming**: real-time event push via `EventBus` server
-
-Works with Claude Code (native), VS Code, Cursor, Codex, and Gemini through generated manifests.
 
 ### Self-Healing Flow
 
@@ -287,10 +237,6 @@ Rate limit: 3 repair escalations per node per hour. Local-first principle: targe
 | `fleet-dispatch-gate` | Hard Gate | Verify target readiness and task safety before dispatching work |
 | `fleet-post-verification` | Hard Gate | Verify fleet health after completing work before claiming done |
 | `fleet-healer` | Invariance | Spawns background agents that auto-heal broken channels |
-| `fleet-events` | Core | EventBus pub/sub for fleet event streaming |
-| `fleet-liaison` | Core | Background communication handler with escalation levels |
-| `fleet-onboard` | Core | New node onboarding flow |
-| `fleet-race` | Orchestration | Parallel competing execution across nodes |
 
 ---
 
@@ -430,7 +376,6 @@ multi-fleet/
   tests/               ~2,000 tests across 99 files
   bin/                 fleet-nerve-mcp entrypoint
   package.json         Plugin metadata + MCP server definition
-  ARCHITECTURE.md      Full system architecture and module map
   COMMS-PROTOCOL.md    Canonical communication specification
   INSTALL.md           Per-IDE installation guide
   CHANGELOG.md         Version history
@@ -452,7 +397,6 @@ multi-fleet/
 
 | Document | Contents |
 |----------|----------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Full system architecture: 5-layer design, 112 modules, data flow, design decisions |
 | [INSTALL.md](INSTALL.md) | Per-IDE installation for Claude Code, Cursor, VS Code, Codex, Gemini |
 | [COMMS-PROTOCOL.md](COMMS-PROTOCOL.md) | Full communication specification: channels, state machine, repair, security, observability |
 | [CHANGELOG.md](CHANGELOG.md) | Version history and release notes |

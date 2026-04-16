@@ -49,9 +49,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# ── Billing gate ──
-from multifleet.billing import get_billing, BillingError, TOOL_FEATURE_MAP  # noqa: E402
-
 # ── Productive Waiter singleton ──
 _productive_waiter = None
 
@@ -64,12 +61,12 @@ def _get_productive_waiter():
         _productive_waiter = ProductiveWaiter(node_id=_get_node_id())
     return _productive_waiter
 
-REPO_ROOT = Path(os.environ.get("MULTIFLEET_REPO_ROOT", str(Path(__file__).parent.parent)))
+REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 # Superrepo fallback: if running inside the superrepo, also add its root
 # so that `tools.*` imports work for modules not yet in the multifleet package.
-_SUPERREPO_ROOT = Path(os.environ.get("MULTIFLEET_SUPERREPO_ROOT", str(REPO_ROOT.parent)))
+_SUPERREPO_ROOT = REPO_ROOT.parent
 if (_SUPERREPO_ROOT / "tools").is_dir():
     sys.path.insert(1, str(_SUPERREPO_ROOT))
 
@@ -756,7 +753,7 @@ def fleet_wake(target: str) -> dict:
                 ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
                  f"{user}@{ip}",
                  "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; source ~/.zshrc 2>/dev/null; "
-                 "cd ${MULTIFLEET_REPO_ROOT:-~/dev/multi-fleet} && bash scripts/fleet-nerve-setup.sh 2>&1 | tail -2"],
+                 "cd ~/dev/er-simulator-superrepo && bash scripts/fleet-nerve-setup.sh 2>&1 | tail -2"],
                 capture_output=True, text=True, timeout=15,
             )
             # Caffeinate to prevent re-sleep
@@ -1460,18 +1457,18 @@ def _get_evidence_ledger():
 
 
 def _get_eventbus():
-    """Get or create an IDEEventBus instance (lazy init via singleton)."""
+    """Get or create a FleetEventBus instance (lazy init)."""
     global _fleet_eventbus
     try:
         return _fleet_eventbus
     except NameError:
         pass
     try:
-        from multifleet.event_bus import IDEEventBus
-        _fleet_eventbus = IDEEventBus.get()
+        from multifleet.eventbus import FleetEventBus
+        _fleet_eventbus = FleetEventBus(node_id=NODE_ID, daemon_port=FLEET_NERVE_PORT)
         return _fleet_eventbus
     except Exception as e:
-        logger.warning(f"IDEEventBus init failed: {e}")
+        logger.warning(f"FleetEventBus init failed: {e}")
         return None
 
 
@@ -1488,7 +1485,7 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
             return {"error": "resource_id required for acquire"}
         result = mgr.acquire(resource_id, lease_type=lease_type)
         if result.get("acquired") and eventbus:
-            eventbus.emit("fleet.lease.acquired", {"resource_id": resource_id, "holder": NODE_ID})
+            eventbus.lease_changed(resource_id, "acquired", NODE_ID)
         # Record in evidence ledger
         evidence = _get_evidence_ledger()
         if evidence:
@@ -1501,7 +1498,7 @@ def fleet_lease(action: str, resource_id: str = "", lease_type: str = "short_tas
             return {"error": "resource_id required for release"}
         result = mgr.release(resource_id)
         if result.get("released") and eventbus:
-            eventbus.emit("fleet.lease.released", {"resource_id": resource_id, "holder": NODE_ID})
+            eventbus.lease_changed(resource_id, "released", NODE_ID)
         return result
     elif action == "renew":
         if not resource_id:
@@ -1540,7 +1537,7 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
             eventbus.emit("rebuttal.proposed", {
                 "proposal_id": result["proposal_id"], "subject": subject,
                 "proposer": NODE_ID, "scope": scope,
-            })
+            }, broadcast=True)
         return result
     elif action == "review":
         if not proposal_id:
@@ -1555,7 +1552,7 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
                 eventbus.emit("rebuttal.resolved", {
                     "proposal_id": proposal_id, "resolution": "accepted",
                     "actor": NODE_ID,
-                })
+                }, broadcast=True)
             evidence = _get_evidence_ledger()
             if evidence:
                 evidence.record("rebuttal_resolved", NODE_ID,
@@ -1580,7 +1577,7 @@ def fleet_rebuttal(action: str, proposal_id: str = "", subject: str = "",
                 eventbus.emit("rebuttal.resolved", {
                     "proposal_id": proposal_id, "resolution": resolution,
                     "actor": NODE_ID,
-                })
+                }, broadcast=True)
             evidence = _get_evidence_ledger()
             if evidence:
                 evidence.record("rebuttal_resolved", NODE_ID,
@@ -1866,7 +1863,7 @@ def fleet_race(task: str, nodes: str = "", timeout: str = "600") -> dict:
             "task": task[:100],
             "participants": list(result.get("participants", {}).keys()),
             "status": result.get("status"),
-        })
+        }, broadcast=True)
 
     return result
 
@@ -1962,7 +1959,7 @@ def fleet_orchestrate(action: str = "run", task: str = "", criteria: str = "",
                 "status": result.get("status"),
                 "parallel": is_parallel,
                 "elapsed_s": result.get("elapsed_s", 0),
-            })
+            }, broadcast=True)
 
         return result
 
@@ -2451,117 +2448,6 @@ def fleet_brainstorm(action: str, task_id: str = "", brainstorm_id: str = "",
         return {"error": f"unknown action: {action}, expected: create|add_option|adjudicate|lock_vision|execute_init|execute_step|escalate|chief_decide|status|list"}
 
 
-# ── Superpowers <-> 3-Surgeons Handoff ──────────────────────────
-
-
-def _get_superpowers_bridge():
-    """Lazy-load the superpowers bridge."""
-    try:
-        from multifleet.superpowers_bridge import SuperpowersBridge, get_store
-        return SuperpowersBridge(), get_store()
-    except ImportError:
-        return None, None
-
-
-def fleet_handoff(action: str, task_id: str = "", approach: str = "",
-                  files_affected: str = "", risks: str = "",
-                  confidence: str = "", done_criteria: str = "",
-                  node_id: str = "") -> dict:
-    """Superpowers <-> 3-Surgeons handoff pipeline.
-
-    Actions:
-      submit  — package brainstorm from superpowers and send to 3-surgeons for review
-      check   — check if 3-surgeons has rendered a decision for a task
-      list    — list pending and decided handoffs
-    """
-    bridge, store = _get_superpowers_bridge()
-    if bridge is None:
-        return {"error": "superpowers_bridge module not available"}
-
-    vp = _get_vision_packets()
-    if vp is None:
-        return {"error": "vision_packets module not available"}
-
-    BrainstormPacket = vp["BrainstormPacket"]
-    effective_node = node_id or NODE_ID
-
-    if action == "submit":
-        if not task_id:
-            return {"error": "task_id required for submit"}
-        if not approach:
-            return {"error": "approach required for submit"}
-
-        # Build a BrainstormPacket from the superpowers output
-        bp = BrainstormPacket(task_id=task_id, node_id=effective_node)
-        files_list = [f.strip() for f in files_affected.split(",")] if files_affected else []
-        risks_list = [r.strip() for r in risks.split(",")] if risks else []
-        conf = float(confidence) if confidence else 0.5
-
-        opt = bp.add_option(
-            title=approach,
-            description=approach,
-            pros=[],
-            cons=risks_list,
-            confidence=conf,
-        )
-        bp.recommended = opt.id
-
-        # Submit for surgical review
-        sdp = bridge.submit_for_review(bp)
-
-        result = {
-            "brainstorm_id": bp.id,
-            "decision_id": sdp.id,
-            "task_id": task_id,
-            "consensus": sdp.consensus,
-            "opinions_count": len(sdp.opinions),
-            "files_affected": files_list,
-        }
-
-        # If consensus and done_criteria provided, auto-create contract
-        if sdp.consensus and done_criteria:
-            criteria = [c.strip() for c in done_criteria.split(",")]
-            try:
-                vc = bridge.create_contract(bp, sdp, criteria, node_id=effective_node)
-                result["contract_id"] = vc.id
-                result["contract_locked"] = vc.locked
-            except ValueError as exc:
-                result["contract_error"] = str(exc)
-
-        if sdp.selected_option:
-            result["selected_option"] = sdp.selected_option
-        if sdp.unresolved_objections:
-            result["unresolved_objections"] = sdp.unresolved_objections
-        return result
-
-    elif action == "check":
-        if not task_id:
-            return {"error": "task_id required for check"}
-        sdp = bridge.check_decision(task_id)
-        if sdp is None:
-            return {"task_id": task_id, "status": "pending", "decision": None}
-        return {
-            "task_id": task_id,
-            "status": "decided",
-            "decision_id": sdp.id,
-            "consensus": sdp.consensus,
-            "selected_option": sdp.selected_option,
-            "opinions_count": len(sdp.opinions),
-            "requires_chief": sdp.requires_chief,
-            "unresolved_objections": sdp.unresolved_objections,
-        }
-
-    elif action == "list":
-        return {
-            "pending": store.list_pending(),
-            "decided": store.list_decided(),
-            "counters": bridge.get_counters(),
-        }
-
-    else:
-        return {"error": f"unknown action: {action}, expected: submit|check|list"}
-
-
 # ── Node Overlay + Acceptance Gate ──────────────────────────────
 
 
@@ -2650,128 +2536,6 @@ def fleet_invariance(action: str = "check_all", rule_id: str = "",
 
 
 # ── MCP Server (stdin/stdout JSON-RPC) ──
-
-
-def _fleet_server_tool(action: str = "status", port: int = 8856) -> dict:
-    """Lazy wrapper for multifleet.web_server.fleet_server_tool."""
-    from multifleet.web_server import fleet_server_tool
-    return fleet_server_tool(action=action, port=port)
-
-
-_health_monitor = None
-
-
-def _run_daemon_bootstrap() -> None:
-    """Bootstrap all daemon services on MCP initialize.
-
-    Runs once when the MCP client connects. Starts background services
-    (health monitor, liaison) and pre-warms lazy singletons (fleet race).
-    All errors are logged but never block startup.
-    """
-    global _health_monitor
-
-    # 1. Startup migration
-    try:
-        _run_startup_migration()
-    except Exception as e:
-        logger.warning("Startup migration failed: %s", e)
-
-    # 2. Health monitor — continuous fleet observation + auto-repair
-    try:
-        from multifleet.health_monitor import FleetHealthMonitor
-        _health_monitor = FleetHealthMonitor(
-            daemon_port=FLEET_NERVE_PORT, node_id=NODE_ID
-        )
-        _health_monitor.start()
-        logger.info("Health monitor started (node=%s port=%d)", NODE_ID, FLEET_NERVE_PORT)
-    except Exception as e:
-        logger.warning("Health monitor init failed: %s", e)
-
-    # 3. Fleet race — pre-warm the lazy singleton
-    try:
-        _get_fleet_race()
-        logger.info("FleetRace pre-warmed")
-    except Exception as e:
-        logger.warning("FleetRace pre-warm failed: %s", e)
-
-    # 4. Liaison — background comms handler
-    try:
-        liaison = _get_liaison()
-        if liaison is not None:
-            logger.info("Liaison initialized for node=%s", NODE_ID)
-    except Exception as e:
-        logger.warning("Liaison init failed: %s", e)
-
-
-def _run_startup_migration() -> None:
-    """Run fleet migration check on startup."""
-    from multifleet.migration import FleetMigration
-    mig = FleetMigration()
-    mig.check_version()
-
-
-def _run_shutdown_backup() -> None:
-    """Create a fleet backup snapshot on shutdown."""
-    from multifleet.backup import FleetBackup
-    backup = FleetBackup()
-    backup.create_snapshot()
-
-
-def _fleet_stripe_tool(action: str, tier: str = "", node_count: int = 1,
-                       email: str = "", subscription_id: str = "",
-                       customer_id: str = "", event_type: str = "") -> dict:
-    """Stripe billing integration — checkout, verify, tier lookup, webhook test."""
-    from multifleet.stripe_integration import get_stripe, StripeError
-
-    si = get_stripe()
-
-    if action == "checkout":
-        if not tier:
-            return {"error": "tier required (pro, team, enterprise)"}
-        if not email:
-            return {"error": "email required for checkout"}
-        try:
-            return si.create_checkout_session(tier, node_count, email)
-        except StripeError as e:
-            return {"error": str(e), "code": e.code}
-
-    elif action == "verify":
-        if not subscription_id:
-            return {"error": "subscription_id required for verify"}
-        try:
-            result = si.verify_subscription(subscription_id)
-            # Also sync billing tier if subscription is valid
-            if result.get("active"):
-                billing = get_billing()
-                sync = billing.sync_from_stripe(subscription_id)
-                result["billing_synced"] = sync.get("tier_change") is not None
-            return result
-        except StripeError as e:
-            return {"error": str(e), "code": e.code}
-
-    elif action == "tier":
-        if not customer_id:
-            return {"error": "customer_id required for tier lookup"}
-        try:
-            tier_name = si.get_customer_tier(customer_id)
-            return {"customer_id": customer_id, "tier": tier_name}
-        except StripeError as e:
-            return {"error": str(e), "code": e.code}
-
-    elif action == "webhook_test":
-        if not event_type:
-            event_type = "checkout.session.completed"
-        # Simulate a webhook event for testing
-        return {
-            "test": True,
-            "event_type": event_type,
-            "handled_events": sorted(si.HANDLED_EVENTS),
-            "stripe_available": si.available,
-        }
-
-    else:
-        return {"error": f"unknown action: {action}, expected: checkout|verify|tier|webhook_test"}
-
 
 TOOLS = [
     {
@@ -3211,25 +2975,6 @@ TOOLS = [
         "fn": fleet_brainstorm,
     },
     {
-        "name": "fleet_handoff",
-        "description": "Superpowers <-> 3-Surgeons handoff pipeline. Submit brainstorm output for surgical review, check decisions, or list pending handoffs. Bridges the gap between creative brainstorming and rigorous multi-model consensus.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["submit", "check", "list"], "description": "Handoff action: submit (brainstorm->surgeons), check (get decision), list (pending handoffs)"},
-                "task_id": {"type": "string", "description": "Task ID (required for submit and check)"},
-                "approach": {"type": "string", "description": "Proposed approach description (required for submit)"},
-                "files_affected": {"type": "string", "description": "Comma-separated file paths affected (for submit)"},
-                "risks": {"type": "string", "description": "Comma-separated risks identified (for submit)"},
-                "confidence": {"type": "string", "description": "Confidence 0-1 (for submit, default 0.5)"},
-                "done_criteria": {"type": "string", "description": "Comma-separated done criteria — if provided with submit and consensus reached, auto-creates VisionContract"},
-                "node_id": {"type": "string", "description": "Override node ID (default: this node)"},
-            },
-            "required": ["action"],
-        },
-        "fn": fleet_handoff,
-    },
-    {
         "name": "fleet_overlay",
         "description": "Node overlay state — the 5-strip view of what each fleet node 'thinks' (epistemic, surgeon, invariant, evidence, probe). Actions: get (single node), list (all nodes), update.",
         "inputSchema": {
@@ -3300,28 +3045,6 @@ TOOLS = [
         },
         "fn": _fleet_server_tool,
     },
-    {
-        "name": "fleet_stripe",
-        "description": "Stripe billing integration — manage fleet subscriptions, checkout sessions, and tier verification.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["checkout", "verify", "tier", "webhook_test"],
-                    "description": "Action: checkout (create session), verify (check subscription), tier (get customer tier), webhook_test (simulate webhook)",
-                },
-                "tier": {"type": "string", "description": "Billing tier: pro, team, enterprise (for checkout)"},
-                "node_count": {"type": "integer", "description": "Number of nodes (for checkout)", "default": 1},
-                "email": {"type": "string", "description": "Customer email (for checkout)"},
-                "subscription_id": {"type": "string", "description": "Stripe subscription ID (for verify)"},
-                "customer_id": {"type": "string", "description": "Stripe customer ID (for tier)"},
-                "event_type": {"type": "string", "description": "Webhook event type to simulate (for webhook_test)"},
-            },
-            "required": ["action"],
-        },
-        "fn": _fleet_stripe_tool,
-    },
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
@@ -3332,7 +3055,6 @@ def handle_request(request: dict) -> dict:
     method = request.get("method", "")
 
     if method == "initialize":
-        _run_daemon_bootstrap()
         return {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
@@ -3359,19 +3081,6 @@ def handle_request(request: dict) -> dict:
             if not allowed:
                 logger.warning("rate_limited tool=%s reason=%s", tool_name, reason)
                 return {"content": [{"type": "text", "text": json.dumps({"error": reason, "rate_limited": True})}], "isError": True}
-        # Billing tier gate (before any work)
-        try:
-            get_billing().require_tool(tool_name)
-        except BillingError as be:
-            logger.warning("billing_gated tool=%s tier=%s required=%s", tool_name, be.current_tier, be.required_tier)
-            payload = {
-                "error": str(be),
-                "billing_gated": True,
-                "current_tier": be.current_tier,
-                "required_tier": be.required_tier,
-                "upgrade_url": "https://contextdna.io/fleet/pricing",
-            }
-            return {"content": [{"type": "text", "text": json.dumps(payload)}], "isError": True}
         t0 = time.monotonic()
         try:
             result = tool["fn"](**args)
