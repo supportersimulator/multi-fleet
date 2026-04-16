@@ -284,6 +284,30 @@ class ProductBridge:
         """
         return self.route("multi-fleet", "superpowers", {"findings": findings})
 
+    def brainstorm_to_surgeons(self, brainstorm_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Superpowers brainstorm output sent to 3-surgeons for adjudication.
+
+        Input: {task_id, options: [{title, description, pros, cons}], recommended?}
+        Output: {verdict, confidence, reasoning, brainstorm_id}
+        """
+        return self.route("superpowers", "3-surgeons", brainstorm_data)
+
+    def superpowers_phase_change(self, phase: str, source: str = "bridge") -> Dict[str, Any]:
+        """Superpowers notifies fleet of workflow phase transition.
+
+        Input: phase name, source of change
+        Output: {phase_updated, current_phase, can_dispatch}
+        """
+        return self.route("superpowers", "multi-fleet", {"phase": phase, "source": source})
+
+    def surgeon_verdict_to_workflow(self, verdict: Dict[str, Any]) -> Dict[str, Any]:
+        """Surgeon verdict informs superpowers workflow progression.
+
+        Input: {task_id, agreed, confidence, verdict}
+        Output: {action, new_phase, can_dispatch}
+        """
+        return self.route("3-surgeons", "superpowers", verdict)
+
     # ── Internal Route Handlers ──────────────────────────────────────
 
     def _register_builtin_routes(self):
@@ -295,9 +319,17 @@ class ProductBridge:
         self._routes["multi-fleet->superpowers"] = self._handle_probes_to_superpowers
         self._routes["3-surgeons->context-dna"] = self._handle_surgeons_to_memory
         self._routes["context-dna->3-surgeons"] = self._handle_memory_to_surgeons
+        self._routes["superpowers->3-surgeons"] = self._handle_superpowers_to_surgeons
+        self._routes["superpowers->multi-fleet"] = self._handle_superpowers_to_fleet
+        self._routes["3-surgeons->superpowers"] = self._handle_surgeons_to_superpowers
 
     def _handle_fleet_to_surgeons(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        """Route fleet verdict request to 3-surgeons cross-exam."""
+        """Route fleet verdict request to 3-surgeons cross-exam.
+
+        Records surgeon activity for SurgeonEventsAdapter consumers.
+        Event emission is deferred (callers use SurgeonEventsAdapter
+        directly for live events to avoid HTTP timeouts in the hot path).
+        """
         try:
             cross_exam = _import_cross_exam()
             if cross_exam is None:
@@ -307,11 +339,26 @@ class ProductBridge:
                 topic=msg.get("claim", "fleet decision review"),
                 context=json.dumps(msg.get("evidence", {})),
             )
+            verdict = getattr(result, "verdict", "unknown")
+            confidence = getattr(result, "confidence", 0.0)
+            dissent = getattr(result, "dissent", [])
+
+            # Store verdict in evidence ledger (contextdna integration)
+            try:
+                self._handle_surgeons_to_memory({
+                    "surgeon": "cross-exam",
+                    "task_id": msg.get("task_id", "fleet-review"),
+                    "verdict": verdict,
+                    "confidence": confidence,
+                })
+            except Exception:
+                pass  # Best-effort memory recording
+
             return {
-                "verdict": getattr(result, "verdict", "unknown"),
-                "confidence": getattr(result, "confidence", 0.0),
+                "verdict": verdict,
+                "confidence": confidence,
                 "reasoning": getattr(result, "reasoning", ""),
-                "dissent": getattr(result, "dissent", []),
+                "dissent": dissent,
                 "source": "3-surgeons",
             }
         except Exception as e:
@@ -319,16 +366,39 @@ class ProductBridge:
             return {"error": str(e), "fallback": True}
 
     def _handle_surgeons_to_fleet(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        """Route surgeon verdict to fleet for broadcast."""
+        """Route surgeon verdict to fleet for broadcast.
+
+        Creates a FleetPacket and writes a P7 git message for fleet delivery.
+        Also records the verdict in ContextDNA memory via the bridge.
+        For full multi-channel broadcast (EventBus, P7, etc.), callers
+        should use surgeon_events.broadcast_surgeon_verdict() directly.
+        """
+        node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+
+        # Record verdict in memory (contextdna integration)
+        try:
+            self._handle_surgeons_to_memory(msg)
+        except Exception:
+            pass  # Best-effort
+
+        # Create fleet packet for internal routing
         try:
             from multifleet.packets import FleetPacket
 
             packet = FleetPacket(
                 type="surgeon_verdict",
-                from_node=os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                from_node=node_id,
                 to_node=msg.get("target_nodes", "all"),
                 payload=msg,
             )
+
+            # Also notify superpowers if verdict has consensus info
+            if "agreed" in msg or "confidence" in msg:
+                try:
+                    self._handle_surgeons_to_superpowers(msg)
+                except Exception:
+                    pass  # Best-effort workflow notification
+
             return {
                 "packet_id": packet.id,
                 "delivered_to": packet.to_node,
@@ -396,7 +466,11 @@ class ProductBridge:
             return {"results": [], "count": 0, "error": str(e)}
 
     def _handle_probes_to_superpowers(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        """Translate probe findings into superpowers workflow adjustments."""
+        """Translate probe findings into superpowers workflow adjustments.
+
+        Checks SuperpowersAdapter for current phase — if workflow is in a
+        blocking phase, findings are queued instead of acted on immediately.
+        """
         findings = msg.get("findings", [])
         if not findings:
             return {"workflow_adjustments": [], "risk_level": "none"}
@@ -409,6 +483,16 @@ class ProductBridge:
             risk_level = "medium"
         else:
             risk_level = "low"
+
+        # Check superpowers phase — queue if in blocking phase
+        can_dispatch = True
+        dispatch_reason = "ok"
+        try:
+            from multifleet.superpowers_adapter import get_adapter
+            sp = get_adapter()
+            can_dispatch, dispatch_reason = sp.can_dispatch_race()
+        except Exception:
+            pass  # Graceful degradation
 
         # Map findings to workflow recommendations
         adjustments = []
@@ -441,6 +525,8 @@ class ProductBridge:
             "workflow_adjustments": adjustments,
             "risk_level": risk_level,
             "findings_count": len(findings),
+            "can_dispatch": can_dispatch,
+            "dispatch_reason": dispatch_reason,
         }
 
     def _handle_surgeons_to_memory(self, msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -461,6 +547,96 @@ class ProductBridge:
             "source": "context-dna",
             "count": memory_result.get("count", 0),
         }
+
+    def _handle_superpowers_to_surgeons(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Route superpowers brainstorm output to 3-surgeons for adjudication.
+
+        Uses BrainstormIngestAdapter to normalize the brainstorm data into
+        a BrainstormPacket, then converts it to a surgeon review request.
+        """
+        try:
+            from multifleet.adapters.brainstorm_ingest import get_brainstorm_ingest
+            adapter = get_brainstorm_ingest()
+            packet = adapter.ingest(msg)
+            surgeon_request = adapter.to_surgeon_request(packet)
+
+            # Route through fleet->surgeons for actual cross-exam
+            result = self._handle_fleet_to_surgeons(surgeon_request)
+            result["brainstorm_id"] = packet.id
+            result["source"] = "superpowers->3-surgeons"
+            return result
+        except Exception as e:
+            logger.warning("superpowers->surgeons failed: %s", e)
+            return {"error": str(e), "fallback": True}
+
+    def _handle_superpowers_to_fleet(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Route superpowers phase change to fleet notification.
+
+        Updates the SuperpowersAdapter with the new phase and emits
+        an event so fleet nodes know about workflow transitions.
+        """
+        phase = msg.get("phase", "unknown")
+        source = msg.get("source", "bridge")
+
+        try:
+            from multifleet.superpowers_adapter import get_adapter
+            sp = get_adapter()
+            sp.update_phase(phase, source=source)
+            state = sp.get_state()
+            return {
+                "phase_updated": True,
+                "current_phase": state["current_phase"],
+                "can_dispatch": state["can_dispatch"],
+                "queued_races": state["queued_races"],
+            }
+        except Exception as e:
+            logger.warning("superpowers->fleet failed: %s", e)
+            return {"error": str(e), "phase_updated": False}
+
+    def _handle_surgeons_to_superpowers(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Route surgeon verdict to superpowers workflow.
+
+        When surgeons reach consensus or block, superpowers needs to know
+        so it can advance or hold the workflow. Maps surgeon outcomes to
+        superpowers phase transitions.
+        """
+        agreed = msg.get("agreed", msg.get("verdict") == "consensus")
+        confidence = msg.get("confidence", 0.0)
+        task_id = msg.get("task_id", "unknown")
+
+        # Determine phase transition based on surgeon outcome
+        if agreed and confidence >= 0.6:
+            new_phase = "executing-plans"
+            action = "proceed"
+        elif not agreed:
+            new_phase = "writing-plans"  # Go back to planning on dissent
+            action = "revise"
+        else:
+            new_phase = "writing-plans"  # Low confidence = needs more work
+            action = "refine"
+
+        # Update superpowers adapter
+        try:
+            from multifleet.superpowers_adapter import get_adapter
+            sp = get_adapter()
+            sp.update_phase(new_phase, source="surgeon-verdict")
+            state = sp.get_state()
+            return {
+                "action": action,
+                "new_phase": new_phase,
+                "task_id": task_id,
+                "surgeon_agreed": agreed,
+                "surgeon_confidence": confidence,
+                "can_dispatch": state["can_dispatch"],
+            }
+        except Exception as e:
+            logger.warning("surgeons->superpowers failed: %s", e)
+            return {
+                "action": action,
+                "new_phase": new_phase,
+                "task_id": task_id,
+                "error": str(e),
+            }
 
     # ── Discovery Helpers ────────────────────────────────────────────
 

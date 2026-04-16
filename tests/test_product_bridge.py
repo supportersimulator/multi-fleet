@@ -127,7 +127,10 @@ class TestRouting:
         assert "multi-fleet->context-dna" in routes
         assert "context-dna->multi-fleet" in routes
         assert "multi-fleet->superpowers" in routes
-        assert len(routes) == 7
+        assert "superpowers->3-surgeons" in routes
+        assert "superpowers->multi-fleet" in routes
+        assert "3-surgeons->superpowers" in routes
+        assert len(routes) == 10
 
 
 # ── 4. Fleet <-> Surgeons Bridge ─────────────────────────────────────────
@@ -289,3 +292,231 @@ class TestSingleton:
         b1 = get_bridge()
         b2 = get_bridge()
         assert b1 is b2
+
+
+# ── 8. New Routes — Superpowers <-> Surgeons <-> Fleet ──────────────────
+
+
+class TestSuperpowersSurgeonsBridge:
+    """Tests for superpowers <-> 3-surgeons wiring."""
+
+    def test_superpowers_to_surgeons_via_brainstorm_ingest(self, bridge):
+        """Brainstorm data is ingested and routed to surgeon cross-exam."""
+        bridge.register_product("3-surgeons", {})
+        bridge.register_product("superpowers", {})
+
+        mock_result = MagicMock()
+        mock_result.verdict = "approve"
+        mock_result.confidence = 0.9
+        mock_result.reasoning = "Option A is best"
+        mock_result.dissent = []
+
+        mock_engine = MagicMock()
+        mock_engine.consult.return_value = mock_result
+
+        with patch("multifleet.product_bridge._import_cross_exam", return_value=mock_engine):
+            result = bridge.brainstorm_to_surgeons({
+                "task_id": "fix-auth",
+                "options": [
+                    {"title": "Option A", "description": "Direct fix", "pros": ["fast"], "cons": ["risky"]},
+                    {"title": "Option B", "description": "Refactor", "pros": ["clean"], "cons": ["slow"]},
+                ],
+            })
+
+        assert result["source"] == "superpowers->3-surgeons"
+        assert "brainstorm_id" in result
+        assert result["verdict"] == "approve"
+
+    def test_superpowers_to_surgeons_fallback_no_cross_exam(self, bridge):
+        """When cross-exam unavailable, returns fallback."""
+        bridge.register_product("3-surgeons", {})
+        bridge.register_product("superpowers", {})
+
+        with patch("multifleet.product_bridge._import_cross_exam", return_value=None):
+            result = bridge.brainstorm_to_surgeons({
+                "task_id": "test",
+                "options": [{"title": "Only Option", "description": "..."}],
+            })
+
+        assert result.get("fallback") is True or result.get("error")
+
+    def test_surgeons_to_superpowers_consensus_advances_workflow(self, bridge):
+        """Surgeon consensus advances superpowers to executing-plans."""
+        bridge.register_product("3-surgeons", {})
+        bridge.register_product("superpowers", {})
+
+        result = bridge.surgeon_verdict_to_workflow({
+            "task_id": "fix-auth",
+            "agreed": True,
+            "confidence": 0.85,
+        })
+
+        assert result["action"] == "proceed"
+        assert result["new_phase"] == "executing-plans"
+        assert result["surgeon_agreed"] is True
+
+    def test_surgeons_to_superpowers_dissent_reverts_to_planning(self, bridge):
+        """Surgeon dissent reverts superpowers to writing-plans."""
+        bridge.register_product("3-surgeons", {})
+        bridge.register_product("superpowers", {})
+
+        result = bridge.surgeon_verdict_to_workflow({
+            "task_id": "fix-auth",
+            "agreed": False,
+            "confidence": 0.3,
+        })
+
+        assert result["action"] == "revise"
+        assert result["new_phase"] == "writing-plans"
+
+    def test_surgeons_to_superpowers_low_confidence_refines(self, bridge):
+        """Low confidence consensus still requires refinement."""
+        bridge.register_product("3-surgeons", {})
+        bridge.register_product("superpowers", {})
+
+        result = bridge.surgeon_verdict_to_workflow({
+            "task_id": "fix-auth",
+            "agreed": True,
+            "confidence": 0.4,
+        })
+
+        assert result["action"] == "refine"
+        assert result["new_phase"] == "writing-plans"
+
+
+class TestSuperpowersFleetBridge:
+    """Tests for superpowers <-> fleet phase notification wiring."""
+
+    def test_superpowers_phase_change_notifies_fleet(self, bridge):
+        """Phase change updates the SuperpowersAdapter and returns state."""
+        bridge.register_product("superpowers", {})
+
+        result = bridge.superpowers_phase_change("executing-plans", source="webhook")
+
+        assert result["phase_updated"] is True
+        assert result["current_phase"] == "executing-plans"
+        assert result["can_dispatch"] is True
+
+    def test_superpowers_blocking_phase_blocks_dispatch(self, bridge):
+        """Blocking phase prevents fleet dispatch."""
+        bridge.register_product("superpowers", {})
+
+        result = bridge.superpowers_phase_change("brainstorming", source="webhook")
+
+        assert result["phase_updated"] is True
+        assert result["current_phase"] == "brainstorming"
+        assert result["can_dispatch"] is False
+
+    def test_probes_to_superpowers_includes_dispatch_status(self, bridge):
+        """Probe findings response includes can_dispatch from SuperpowersAdapter."""
+        result = bridge._handle_probes_to_superpowers({
+            "findings": [
+                {"title": "Test finding", "blast_radius": "low"},
+            ]
+        })
+
+        assert "can_dispatch" in result
+        assert "dispatch_reason" in result
+
+
+class TestCrossProductWiring:
+    """Tests verifying actual cross-product call chains work end-to-end."""
+
+    def test_fleet_to_surgeons_records_in_memory(self, bridge):
+        """Fleet->surgeons verdict is recorded in contextdna memory."""
+        bridge.register_product("3-surgeons", {})
+
+        mock_result = MagicMock()
+        mock_result.verdict = "merge"
+        mock_result.confidence = 0.85
+        mock_result.reasoning = "Tests pass"
+        mock_result.dissent = []
+
+        mock_engine = MagicMock()
+        mock_engine.consult.return_value = mock_result
+
+        with patch("multifleet.product_bridge._import_cross_exam", return_value=mock_engine), \
+             patch.object(bridge, "_handle_surgeons_to_memory") as mock_mem:
+            result = bridge._handle_fleet_to_surgeons({
+                "claim": "branch A is better",
+                "task_id": "test-123",
+            })
+
+        assert result["verdict"] == "merge"
+        # Verify memory was called with surgeon verdict data
+        mock_mem.assert_called_once()
+        mem_args = mock_mem.call_args[0][0]
+        assert mem_args["surgeon"] == "cross-exam"
+        assert mem_args["task_id"] == "test-123"
+
+    def test_surgeons_to_fleet_notifies_superpowers(self, bridge):
+        """Surgeon verdict routed to fleet also notifies superpowers."""
+        bridge.register_product("multi-fleet", {})
+
+        with patch.object(bridge, "_handle_surgeons_to_superpowers") as mock_sp:
+            result = bridge._handle_surgeons_to_fleet({
+                "task_id": "test-123",
+                "verdict": "consensus",
+                "agreed": True,
+                "confidence": 0.9,
+                "target_nodes": "all",
+            })
+
+        assert "packet_id" in result
+        # Verify superpowers was notified
+        mock_sp.assert_called_once()
+
+    def test_full_brainstorm_to_verdict_to_workflow_chain(self, bridge):
+        """End-to-end: brainstorm -> surgeon review -> workflow advance."""
+        bridge.register_product("superpowers", {})
+        bridge.register_product("3-surgeons", {})
+
+        # Step 1: Brainstorm creates options
+        mock_result = MagicMock()
+        mock_result.verdict = "approve"
+        mock_result.confidence = 0.9
+        mock_result.reasoning = "Option A wins"
+        mock_result.dissent = []
+
+        mock_engine = MagicMock()
+        mock_engine.consult.return_value = mock_result
+
+        with patch("multifleet.product_bridge._import_cross_exam", return_value=mock_engine):
+            surgeon_result = bridge.brainstorm_to_surgeons({
+                "task_id": "new-feature",
+                "options": [
+                    {"title": "Option A", "description": "Direct approach"},
+                    {"title": "Option B", "description": "Refactor first"},
+                ],
+            })
+
+        assert surgeon_result["verdict"] == "approve"
+
+        # Step 2: Surgeon verdict advances workflow
+        workflow_result = bridge.surgeon_verdict_to_workflow({
+            "task_id": "new-feature",
+            "agreed": True,
+            "confidence": 0.9,
+        })
+
+        assert workflow_result["action"] == "proceed"
+        assert workflow_result["new_phase"] == "executing-plans"
+
+    def test_all_ten_routes_registered(self, bridge):
+        """All 10 routes are registered and have handlers."""
+        routes = bridge.list_routes()
+        expected = [
+            "multi-fleet->3-surgeons",
+            "3-surgeons->multi-fleet",
+            "multi-fleet->context-dna",
+            "context-dna->multi-fleet",
+            "multi-fleet->superpowers",
+            "3-surgeons->context-dna",
+            "context-dna->3-surgeons",
+            "superpowers->3-surgeons",
+            "superpowers->multi-fleet",
+            "3-surgeons->superpowers",
+        ]
+        for route in expected:
+            assert route in routes, f"Missing route: {route}"
+        assert len(routes) == 10
