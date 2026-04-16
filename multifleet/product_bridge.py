@@ -575,8 +575,8 @@ class ProductBridge:
         Updates the SuperpowersAdapter with the new phase and emits
         an event so fleet nodes know about workflow transitions.
         """
-        phase = msg.get("phase", "unknown")
-        source = msg.get("source", "bridge")
+        phase = str(msg.get("phase", "unknown"))
+        source = str(msg.get("source", "bridge"))
 
         try:
             from multifleet.superpowers_adapter import get_adapter
