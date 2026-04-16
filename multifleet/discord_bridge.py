@@ -35,6 +35,7 @@ except (ImportError, ModuleNotFoundError):
 
 # ── Constants ──
 DAEMON_URL = "http://127.0.0.1:8855"
+THREE_SURGEONS_URL = "http://127.0.0.1:3541"
 MIN_SEND_INTERVAL_S = 1.0
 MAX_QUEUE = 500
 POLL_INTERVAL_S = 5.0
@@ -136,6 +137,56 @@ def _write_seed_file(node_id: str, content: str, author_name: str, is_command: b
         logger.info("Seed file written: %s (trigger touched)", seed_path)
     except Exception as e:
         logger.warning("Failed to write seed file: %s", e)
+
+
+def parse_3s_command(content: str) -> Optional[dict]:
+    """Parse !3s commands. Returns dict with 'cmd' and optional 'topic', or None.
+
+    Commands:
+        !3s probe
+        !3s consult <topic>
+        !3s cross-exam <topic>
+    """
+    if not content.startswith("!3s "):
+        return None
+    rest = content[4:].strip()
+    if not rest:
+        return None
+    parts = rest.split(None, 1)
+    cmd = parts[0]
+    topic = parts[1] if len(parts) > 1 else None
+
+    if cmd == "probe":
+        return {"cmd": "probe"}
+    elif cmd == "consult" and topic:
+        return {"cmd": "consult", "topic": topic}
+    elif cmd == "cross-exam" and topic:
+        return {"cmd": "cross_examine", "topic": topic}
+    return None
+
+
+async def call_3s_api(parsed: dict) -> dict:
+    """Call 3-surgeons HTTP API. Returns {"ok": bool, "data": ..., "error": ...}."""
+    cmd = parsed["cmd"]
+    loop = asyncio.get_event_loop()
+    try:
+        if cmd == "probe":
+            req = urllib.request.Request(f"{THREE_SURGEONS_URL}/tool/probe")
+            resp = await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=10))
+        else:
+            # consult or cross_examine
+            body = json.dumps({"topic": parsed["topic"]}).encode()
+            req = urllib.request.Request(
+                f"{THREE_SURGEONS_URL}/tool/{cmd}",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            resp = await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=30))
+        data = json.loads(resp.read())
+        return {"ok": True, "data": data}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def parse_discord_message(content: str, author_id: str = "unknown") -> Optional[dict]:
@@ -256,6 +307,39 @@ class DiscordFleetBridge:
 
             content = message.content.strip()
             author_name = str(message.author.display_name or message.author.name)
+
+            # ── !3s commands → 3-surgeons HTTP API (bypass fleet daemon) ──
+            parsed_3s = parse_3s_command(content)
+            if parsed_3s:
+                _write_seed_file(self.node_id, content, author_name, is_command=True)
+                await message.add_reaction("\U0001F52C")  # microscope — thinking
+                result = await call_3s_api(parsed_3s)
+                if result["ok"]:
+                    data = result["data"]
+                    # Build response text from whatever the API returned
+                    if isinstance(data, dict):
+                        resp_text = data.get("result") or data.get("summary") or json.dumps(data, indent=2)
+                    else:
+                        resp_text = str(data)
+                    embed = discord.Embed(
+                        title=f"3-Surgeons: {parsed_3s['cmd']}",
+                        description=str(resp_text)[:4096],
+                        color=0xE74C3C,  # red — surgery
+                    )
+                    if parsed_3s.get("topic"):
+                        embed.set_footer(text=f"Topic: {parsed_3s['topic']}")
+                    await message.channel.send(embed=embed)
+                    await message.add_reaction("\u2705")  # checkmark
+                else:
+                    embed = discord.Embed(
+                        title="3-Surgeons: Error",
+                        description=f"Failed to reach 3-surgeons API:\n```{result['error'][:1000]}```",
+                        color=0xFF0000,
+                    )
+                    await message.channel.send(embed=embed)
+                    await message.add_reaction("\u274C")  # red X
+                return
+
             parsed = parse_discord_message(content, str(message.author.id))
 
             # Write seed file for Claude Code injection on ANY message

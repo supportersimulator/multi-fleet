@@ -258,6 +258,26 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, f"Not found: {path}")
 
+    def do_POST(self):
+        path = self.path.split("?")[0]
+
+        if not self._check_auth(path):
+            return
+
+        if path == "/api/panels/events":
+            self._handle_panel_event_post()
+        else:
+            self.send_error(404, f"Not found: {path}")
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight for POST endpoints."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGINS)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+
     # ── Route handlers ──
 
     def _serve_arbiter(self):
@@ -419,6 +439,80 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_json({"error": "Panel engine bridge not available"})
             return
         self._serve_json(bridge.engine_format())
+
+    def _handle_panel_event_post(self):
+        """Accept a TS PanelEvent via POST → translate → emit on IDEEventBus.
+
+        Wires the orphaned translate_event()/translate_bus_event() from
+        panel_engine_bridge into live use, completing the TS→Python direction
+        of the bidirectional bridge.
+
+        Expected JSON body:
+            {
+                "type": "panel.activated",
+                "panelId": "fleet.status",
+                "payload": { ... },
+                "source": "typescript"    // optional, defaults to "typescript"
+            }
+        """
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length == 0 or content_length > 65536:
+                self._send_json_error(400, "Invalid or missing Content-Length (max 64KB)")
+                return
+
+            raw = self.rfile.read(content_length)
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            self._send_json_error(400, f"Invalid JSON: {exc}")
+            return
+
+        event_type = body.get("type", "")
+        panel_id = body.get("panelId", "")
+        payload = body.get("payload", {})
+        source = body.get("source", "typescript")
+
+        if not event_type or not panel_id:
+            self._send_json_error(400, "Missing required fields: 'type' and 'panelId'")
+            return
+
+        # Translate via panel_engine_bridge (previously orphaned code)
+        engine_bridge = _get_panel_engine_bridge()
+        translated_event = None
+        translated_bus_event = None
+        if engine_bridge:
+            translated_event = engine_bridge.translate_event(event_type, payload, source)
+            translated_bus_event = engine_bridge.translate_bus_event(event_type, payload, source)
+
+        # Emit on IDEEventBus so Python subscribers see TS-originated events
+        emitted = False
+        try:
+            from multifleet.event_bus import IDEEventBus
+            bus = IDEEventBus.get()
+            bus.emit(
+                event_type=event_type,
+                payload=payload,
+                source=source,
+            )
+            emitted = True
+        except Exception as exc:
+            logger.warning("Failed to emit event on IDEEventBus: %s", exc)
+
+        # Push to SSE so other TS clients also see it
+        sse_event = translated_event or {"type": event_type, "panelId": panel_id, "payload": payload}
+        _push_sse(sse_event)
+
+        self._serve_json({
+            "status": "accepted",
+            "emitted": emitted,
+            "translated": translated_event is not None,
+            "busEvent": translated_bus_event is not None,
+        })
+
+    def _send_json_error(self, status: int, message: str):
+        """Send a JSON error response."""
+        body = json.dumps({"error": message}).encode("utf-8")
+        self._send(status, body, "application/json")
 
     def _serve_extension(self, path: str):
         bridge = _get_ide_bridge()

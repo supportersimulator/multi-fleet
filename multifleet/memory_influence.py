@@ -70,8 +70,9 @@ class MemoryInfluenceResolver:
     """Resolves memory influence for synthesis decisions.
 
     Queries evidence ledger + decisions JSONL for past decisions related
-    to the current task. When confidence is low, escalates to chief node
-    for authoritative evidence.
+    to the current task. Also consults ContextDNA memory (professor wisdom
+    and learnings) for richer evidence. When confidence is low, escalates
+    to chief node for authoritative evidence.
     """
 
     def __init__(
@@ -88,6 +89,20 @@ class MemoryInfluenceResolver:
         )
         self._node_id = node_id or os.environ.get("MULTIFLEET_NODE_ID", "unknown")
         self._threshold = confidence_threshold
+
+        # Wire ContextDNA memory for compounding intelligence
+        self._query_fn = None
+        self._professor_fn = None
+        try:
+            from memory.query import query_learnings
+            self._query_fn = query_learnings
+        except Exception:
+            pass
+        try:
+            from memory.professor import consult as _consult
+            self._professor_fn = _consult
+        except Exception:
+            pass
 
     def resolve(
         self,
@@ -110,8 +125,11 @@ class MemoryInfluenceResolver:
         # Extract keywords from task context for matching
         keywords = self._extract_keywords(task_id, verdicts)
 
-        # Tier 1: Local evidence
+        # Tier 1: Local evidence (ledger + decisions JSONL)
         influence = self._query_local(keywords)
+
+        # Tier 1.5: ContextDNA memory (learnings + professor wisdom)
+        self._enrich_from_contextdna(influence, task_id, verdicts, keywords)
 
         # Tier 2: Chief escalation if needed
         if current_confidence < self._threshold or influence.decisions_relevant < 2:
@@ -126,8 +144,9 @@ class MemoryInfluenceResolver:
                     else "Sparse local evidence"
                 )
 
-        # Calculate confidence adjustment based on evidence
-        influence.confidence_adjustment = self._calculate_adjustment(
+        # Calculate confidence adjustment based on evidence (additive with ContextDNA)
+        cdna_adj = influence.confidence_adjustment  # preserve ContextDNA adjustments
+        influence.confidence_adjustment = cdna_adj + self._calculate_adjustment(
             influence, current_confidence
         )
 
@@ -223,6 +242,86 @@ class MemoryInfluenceResolver:
             decisions_queried=len(all_decisions),
             decisions_relevant=len(evidence_refs),
         )
+
+    def _enrich_from_contextdna(
+        self,
+        influence: MemoryInfluence,
+        task_id: str,
+        verdicts: dict[str, dict],
+        keywords: list[str],
+    ):
+        """Enrich influence with ContextDNA learnings and professor wisdom.
+
+        Queries the memory system for past learnings related to this task,
+        and consults the professor for distilled wisdom. This compounds
+        intelligence from the full memory system into synthesis decisions.
+        """
+        # Query ContextDNA learnings for relevant prior knowledge
+        if self._query_fn:
+            try:
+                # Build a meaningful query from task context
+                task_summary = next(
+                    (v.get("summary", "") for v in verdicts.values() if v.get("summary")),
+                    task_id,
+                )
+                if task_summary:
+                    learnings = self._query_fn(task_summary, limit=5)
+                    for learning_text in learnings:
+                        text = learning_text if isinstance(learning_text, str) else str(learning_text)
+                        text_lower = text.lower()
+                        # Check if learning signals caution or support
+                        has_failure_signal = any(
+                            kw in text_lower for kw in (
+                                "fail", "broke", "regression", "revert", "bug",
+                                "crash", "error", "never", "avoid",
+                            )
+                        )
+                        has_success_signal = any(
+                            kw in text_lower for kw in (
+                                "success", "works", "fixed", "solved", "improved",
+                                "verified", "stable",
+                            )
+                        )
+                        influence.evidence_refs.append({
+                            "entry_id": f"cdna:{hash(text) & 0xFFFF:04x}",
+                            "event_type": "contextdna_learning",
+                            "node_id": self._node_id,
+                            "timestamp": time.time(),
+                            "entry_hash": "",
+                            "reasoning_snippet": text[:200],
+                        })
+                        influence.decisions_relevant += 1
+                        # Adjust confidence based on learning sentiment
+                        if has_failure_signal:
+                            influence.confidence_adjustment -= 0.03
+                        elif has_success_signal:
+                            influence.confidence_adjustment += 0.02
+            except Exception as e:
+                logger.debug("ContextDNA learnings query failed (non-blocking): %s", e)
+
+        # Consult professor for distilled wisdom about this task
+        if self._professor_fn:
+            try:
+                task_summary = next(
+                    (v.get("summary", "") for v in verdicts.values() if v.get("summary")),
+                    task_id,
+                )
+                if task_summary and len(task_summary) > 5:
+                    guidance = self._professor_fn(task=task_summary)
+                    if guidance and isinstance(guidance, str) and len(guidance.strip()) > 10:
+                        # Professor wisdom enriches the pattern summary
+                        # Extract the most critical insight (first 300 chars)
+                        wisdom_snippet = guidance.strip()[:300]
+                        if influence.pattern_summary:
+                            influence.pattern_summary += f" Professor: {wisdom_snippet}"
+                        else:
+                            influence.pattern_summary = f"Professor: {wisdom_snippet}"
+                        logger.debug(
+                            "Professor wisdom enriched memory influence for task %s",
+                            task_id,
+                        )
+            except Exception as e:
+                logger.debug("Professor consult failed (non-blocking): %s", e)
 
     def _escalate_to_chief(self, task_id: str, keywords: list[str]) -> Optional[MemoryInfluence]:
         """Tier 2: Escalate to chief node for authoritative evidence."""

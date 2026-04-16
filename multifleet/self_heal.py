@@ -30,6 +30,26 @@ logger = logging.getLogger("fleet_nats")
 
 from ._paths import REPO_ROOT
 
+# ── Redis channel health cache (memory module wire) ──
+# Persists per-peer channel health to Redis for cross-process visibility
+# and fast recovery after daemon restart.
+_redis_cache = None
+_REDIS_CHANNEL_HEALTH_KEY = "fleet:channel_health"
+_REDIS_CHANNEL_HEALTH_TTL = 600  # 10 min
+
+
+def _get_redis_cache():
+    """Lazy-load Redis client from memory.redis_cache (no-op if unavailable)."""
+    global _redis_cache
+    if _redis_cache is not None:
+        return _redis_cache
+    try:
+        from memory.redis_cache import get_redis_client
+        _redis_cache = get_redis_client()
+    except Exception:
+        _redis_cache = False  # sentinel: don't retry
+    return _redis_cache if _redis_cache else None
+
 SEED_DIR = "/tmp"
 
 
@@ -418,10 +438,27 @@ class SelfHealManager:
     # ── Channel Health Tracking ──
 
     def _update_channel_health(self, target: str, channel: str, status: str):
-        """Track per-peer channel health. Status: 'ok' or 'broken'."""
+        """Track per-peer channel health. Status: 'ok' or 'broken'.
+
+        Also persists to Redis for cross-process visibility and daemon restart recovery.
+        """
         if target not in self._nerve._channel_health:
             self._nerve._channel_health[target] = {ch: "ok" for ch in ALL_CHANNELS}
         self._nerve._channel_health[target][channel] = status
+
+        # Persist to Redis (best-effort, non-blocking)
+        try:
+            r = _get_redis_cache()
+            if r:
+                import json as _json
+                r.hset(
+                    _REDIS_CHANNEL_HEALTH_KEY,
+                    target,
+                    _json.dumps(self._nerve._channel_health[target]),
+                )
+                r.expire(_REDIS_CHANNEL_HEALTH_KEY, _REDIS_CHANNEL_HEALTH_TTL)
+        except Exception:
+            pass  # Zero silent failures: Redis is optional speed layer
 
     def _get_peer_health_score(self, target: str) -> tuple:
         """Returns (score, broken_list) for a peer. Max score = len(ALL_CHANNELS)."""

@@ -23,6 +23,72 @@ from .channels import GOSSIP_FANOUT, GOSSIP_TTL, UDP_GOSSIP_PORT
 
 logger = logging.getLogger("fleet_nats")
 
+# ── Redis peer heartbeat tracking (memory module wire) ──
+# Records per-peer heartbeat timestamps in Redis for stall detection.
+# Peers missing 3+ beats (30s at 10s interval) are flagged as stalled.
+_REDIS_PEER_HB_PREFIX = "fleet:peer_heartbeat:"
+_REDIS_PEER_HB_TTL = 60  # expire after 60s (6 missed beats)
+_REDIS_STALLED_KEY = "fleet:stalled_peers"
+_HEARTBEAT_STALL_THRESHOLD_S = 30  # 3 missed beats at 10s interval
+_redis_hb_client = None
+
+
+def _get_redis_hb():
+    """Lazy-load Redis client for heartbeat tracking."""
+    global _redis_hb_client
+    if _redis_hb_client is not None:
+        return _redis_hb_client
+    try:
+        from memory.redis_cache import get_redis_client
+        _redis_hb_client = get_redis_client()
+    except Exception:
+        _redis_hb_client = False  # sentinel
+    return _redis_hb_client if _redis_hb_client else None
+
+
+def _record_peer_heartbeat(node: str, ts: float):
+    """Record a peer heartbeat in Redis. Clears stalled flag if present."""
+    r = _get_redis_hb()
+    if not r:
+        return
+    try:
+        import json as _json
+        key = f"{_REDIS_PEER_HB_PREFIX}{node}"
+        r.setex(key, _REDIS_PEER_HB_TTL, _json.dumps({"ts": ts, "node": node}))
+        # Clear stalled flag for this peer
+        r.hdel(_REDIS_STALLED_KEY, node)
+    except Exception:
+        pass
+
+
+def get_stalled_fleet_peers() -> list:
+    """Return list of peers whose heartbeat key has expired (stalled).
+
+    Called by health checks or watchdog to detect unresponsive peers.
+    A peer is stalled if its Redis heartbeat key is absent but was
+    previously known (still in the stalled set or config).
+    """
+    r = _get_redis_hb()
+    if not r:
+        return []
+    try:
+        stalled = r.hgetall(_REDIS_STALLED_KEY)
+        return list(stalled.keys()) if stalled else []
+    except Exception:
+        return []
+
+
+def flag_stalled_peer(node: str):
+    """Mark a peer as stalled in Redis (called when heartbeat key expires)."""
+    r = _get_redis_hb()
+    if not r:
+        return
+    try:
+        import json as _json
+        r.hset(_REDIS_STALLED_KEY, node, _json.dumps({"since": time.time()}))
+    except Exception:
+        pass
+
 
 class FleetDiscoveryManager:
     """Manages peer discovery, gossip protocol, and heartbeat lifecycle."""
@@ -45,6 +111,8 @@ class FleetDiscoveryManager:
                 peer_ver = data.get("protocol_version")
                 compat, ver_status = check_peer_version(peer_ver)
                 nerve._peers[node] = {**data, "_received_at": time.time(), "_version_status": ver_status}
+                # Record heartbeat in Redis for cross-process stall detection
+                _record_peer_heartbeat(node, time.time())
                 if not compat:
                     logger.warning(f"Peer {node} has incompatible protocol: {peer_ver} ({ver_status})")
                 # Fresh heartbeat = peer is alive on NATS. Clear any stale repair state.
