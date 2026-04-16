@@ -101,12 +101,17 @@ class SelfHealManager:
         self._repair_locks.pop(target, None)
 
     def _is_chief(self) -> bool:
-        """Check if this node is the chief (mac1)."""
+        """Check if this node is the chief."""
         chief = getattr(self._nerve, '_chief', None)
         if chief:
             return self._nerve.node_id == chief
-        # Fallback: mac1 is always chief
-        return self._nerve.node_id == "mac1"
+        # Fallback: env var or first node in config (no hardcoded node names)
+        default_chief = os.environ.get("FLEET_CHIEF_NODE", "")
+        if default_chief:
+            return self._nerve.node_id == default_chief
+        # Last resort: first node in peers config (alphabetical)
+        peers = sorted(self._nerve._peers_config.keys())
+        return bool(peers) and self._nerve.node_id == peers[0]
 
     # ── Idle Node Backoff & Vacation ──
 
@@ -596,7 +601,11 @@ class SelfHealManager:
         if self.L4_CHIEF_ONLY and not self._is_chief():
             logger.info(f"Repair L4: non-chief node, escalating to chief for {target}")
             try:
-                chief_id = getattr(self._nerve, '_chief', None) or "mac1"
+                chief_id = (
+                    getattr(self._nerve, '_chief', None)
+                    or os.environ.get("FLEET_CHIEF_NODE", "")
+                    or sorted(self._nerve._peers_config.keys())[0]
+                )
                 escalation_msg = {
                     "type": "repair", "from": self._nerve.node_id, "to": chief_id,
                     "payload": {

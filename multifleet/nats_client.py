@@ -36,6 +36,7 @@ import logging
 import logging.handlers
 import os
 import random
+import re
 import signal
 import socket
 import subprocess
@@ -44,7 +45,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # Handle import for both pip install locations
 try:
@@ -176,6 +177,36 @@ def _sub_heartbeat() -> str:
 
 def _sub_ack(node: str) -> str:
     return f"fleet.{node}.ack"
+
+
+# ── Secret sanitization for git-committed payloads ──
+_SENSITIVE_KEYS = {"secret", "token", "password", "key", "api_key", "credential", "auth"}
+_IP_PATTERN = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+
+
+def _sanitize_for_git(obj: Any, _depth: int = 0) -> Any:
+    """Strip secrets and IPs from a message before git commit.
+
+    - Keys containing sensitive words → value replaced with "***"
+    - IP addresses in string values → replaced with "<redacted-ip>"
+    - Preserves node_id, subject, type, id, timestamp (fleet-useful fields)
+    """
+    if _depth > 10:
+        return "..."
+    if isinstance(obj, dict):
+        sanitized = {}
+        for k, v in obj.items():
+            k_lower = k.lower()
+            if any(s in k_lower for s in _SENSITIVE_KEYS):
+                sanitized[k] = "***"
+            else:
+                sanitized[k] = _sanitize_for_git(v, _depth + 1)
+        return sanitized
+    if isinstance(obj, list):
+        return [_sanitize_for_git(item, _depth + 1) for item in obj]
+    if isinstance(obj, str):
+        return _IP_PATTERN.sub("<redacted-ip>", obj)
+    return obj
 
 
 class FleetNerveNATS:
@@ -583,6 +614,15 @@ class FleetNerveNATS:
                     # else: between first notification and 2min -- silent wait
                 except Exception as e:
                     logger.warning(f"Repair handler error: {e}")
+                return
+
+            # Handle fleet_assist requests (cross-node repair)
+            if msg_type == "fleet_assist" or subject == "assist-request":
+                try:
+                    if hasattr(self, '_healer') and self._healer:
+                        asyncio.create_task(self._healer._handle_fleet_assist(data))
+                except Exception as e:
+                    logger.debug(f"Fleet assist handler error: {e}")
                 return
 
             # Inject into session based on type
@@ -1269,7 +1309,8 @@ class FleetNerveNATS:
             inbox_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             msg_file = inbox_dir / f"{ts}-{message.get('id','msg')[:8]}.json"
-            msg_file.write_text(json.dumps(message, indent=2))
+            sanitized = _sanitize_for_git(message)
+            msg_file.write_text(json.dumps(sanitized, indent=2))
             subprocess.run(["git", "add", str(msg_file)], cwd=str(REPO_ROOT), timeout=5)
             subprocess.run(["git", "commit", "-m", f"fleet: P7 message to {target}"],
                            cwd=str(REPO_ROOT), capture_output=True, timeout=10)

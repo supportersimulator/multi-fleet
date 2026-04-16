@@ -22,6 +22,9 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from multifleet.event_emitter import emit_typed
+from multifleet.event_schema import EventType, EventSource
+
 logger = logging.getLogger("fleet-nerve.evidence")
 
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
@@ -158,6 +161,19 @@ class EvidenceLedger:
 
         logger.info("Evidence recorded: %s [%s] by %s — %s",
                      entry_id[:8], event_type, node_id, subject or "(no subject)")
+
+        # Wire: emit to EventBus so dashboards/panels see evidence in real time
+        try:
+            emit_typed(EventType.EVIDENCE_RECORDED, EventSource.MULTI_FLEET, {
+                "entry_id": entry_id,
+                "event_type": event_type,
+                "node_id": node_id,
+                "subject": subject,
+                "entry_hash_prefix": entry_hash[:16],
+            })
+        except Exception:
+            logger.debug("EventBus emission failed for evidence %s (non-blocking)", entry_id[:8])
+
         return {
             "entry_id": entry_id,
             "seq": self._get_seq(entry_id),

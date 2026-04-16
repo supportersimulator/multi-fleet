@@ -48,6 +48,11 @@ class EventType(Enum):
     # Context/evidence events
     CONTEXT_PACKET_BUILT = "context.packet.built"
     CONTEXT_PACKET_DELIVERED = "context.packet.delivered"
+    EVIDENCE_RECORDED = "evidence.recorded"
+    EVIDENCE_CHAIN_VERIFIED = "evidence.chain.verified"
+
+    # Branch convergence events
+    BRANCH_CONVERGENCE_SCANNED = "fleet.branch.convergence_scanned"
 
     # Ghost layer events
     GHOST_SESSION_DIGESTED = "ghost.session.digested"

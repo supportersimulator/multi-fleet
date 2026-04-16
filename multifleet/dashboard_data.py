@@ -13,6 +13,8 @@ import time
 import urllib.request
 from typing import Optional
 
+from multifleet.node_overlay import NodeOverlayManager
+
 logger = logging.getLogger("fleet-nerve.dashboard-data")
 
 
@@ -23,11 +25,13 @@ class FleetDashboardData:
     Results are cached for ``_cache_ttl`` seconds to avoid redundant daemon calls.
     """
 
-    def __init__(self, daemon_port: int = 8855, cache_ttl: float = 5.0):
+    def __init__(self, daemon_port: int = 8855, cache_ttl: float = 5.0,
+                 overlay_manager: NodeOverlayManager = None):
         self._port = daemon_port
         self._base = f"http://127.0.0.1:{daemon_port}"
         self._cache: dict[str, tuple[float, object]] = {}
         self._cache_ttl = cache_ttl
+        self._overlay = overlay_manager
 
     # ── Public API ──
 
@@ -217,11 +221,25 @@ class FleetDashboardData:
         return data
 
     def _get_overlays(self) -> list:
-        """Get node overlay state from /overlays."""
+        """Get node overlay state from /overlays, enriched by local NodeOverlayManager."""
         data = self._fetch("/overlays")
-        if not data:
-            return []
-        return data.get("overlays", [])
+        overlays = data.get("overlays", []) if data else []
+
+        # Wire: enrich with local NodeOverlayManager if available (richer 5-strip model)
+        if self._overlay:
+            try:
+                local = self._overlay.to_dict()
+                for node_id, strips in local.items():
+                    # Merge local strips into HTTP overlays or add missing nodes
+                    existing = next((o for o in overlays if o.get("node_id") == node_id), None)
+                    if existing:
+                        existing["strips"] = strips
+                    else:
+                        overlays.append({"node_id": node_id, "strips": strips, "source": "local"})
+            except Exception:
+                logger.debug("NodeOverlayManager enrichment failed (non-blocking)")
+
+        return overlays
 
     # ── HTTP fetch with caching ──
 

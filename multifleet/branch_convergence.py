@@ -5,11 +5,15 @@ where they overlap (file conflicts), and recommends merge strategy.
 """
 
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
 from html import escape as html_escape
 from pathlib import Path
+
+from multifleet.event_emitter import emit_typed
+from multifleet.event_schema import EventType, EventSource
 
 logger = logging.getLogger("fleet-nerve.branch-convergence")
 
@@ -251,7 +255,7 @@ class BranchConvergence:
         branches = self.scan_branches()
         conflicts = self.conflict_matrix(branches)
         recs = self.merge_recommendations(branches)
-        return {
+        result = {
             "branches": [
                 {
                     "branch": b.branch, "machine": b.machine_id,
@@ -267,3 +271,28 @@ class BranchConvergence:
             "ascii": self.render_ascii(branches),
             "timestamp": time.time(),
         }
+
+        # Wire: record convergence scan to evidence ledger + emit event
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+            ledger = EvidenceLedger()
+            ledger.record(
+                event_type="branch_convergence",
+                node_id=node_id,
+                subject=f"{len(branches)} branches, {len(conflicts)} conflicts",
+                payload={"branch_count": len(branches), "conflict_count": len(conflicts),
+                         "recommendations": len(recs)},
+            )
+        except Exception:
+            logger.debug("Evidence recording for convergence scan failed (non-blocking)")
+
+        try:
+            emit_typed(EventType.BRANCH_CONVERGENCE_SCANNED, EventSource.MULTI_FLEET, {
+                "branch_count": len(branches),
+                "conflict_count": len(conflicts),
+            })
+        except Exception:
+            logger.debug("EventBus emission for convergence scan failed (non-blocking)")
+
+        return result
