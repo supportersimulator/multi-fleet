@@ -14,6 +14,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    """Reset P7 rate limiter between tests to prevent cross-test leakage."""
+    import multifleet.adapters.surgeon_events as mod
+    mod._last_p7_broadcast_ts = 0.0
+    yield
+    mod._last_p7_broadcast_ts = 0.0
+
+
 class TestBroadcastSurgeonVerdict:
     """Tests for the broadcast_surgeon_verdict() function."""
 
@@ -153,6 +162,62 @@ class TestBroadcastSurgeonVerdict:
         assert "/" not in name
         assert " " not in name
         assert "@" not in name
+
+    def test_routine_consensus_rate_limited(self, tmp_path):
+        """Routine high-confidence consensus is rate limited to 1/hour on P7."""
+        import multifleet.adapters.surgeon_events as mod
+        from multifleet.adapters.surgeon_events import broadcast_surgeon_verdict
+
+        # Reset rate limit state
+        mod._last_p7_broadcast_ts = 0.0
+
+        verdict = self._make_verdict(agreed=True, confidence=0.85, dissent_count=0)
+
+        with patch("multifleet.product_bridge.get_bridge", side_effect=ImportError):
+            # First call should write P7
+            r1 = broadcast_surgeon_verdict(verdict, superrepo_root=tmp_path)
+            assert r1["p7"] is True
+
+            # Second call within the same hour should be rate limited
+            r2 = broadcast_surgeon_verdict(verdict, superrepo_root=tmp_path)
+            assert r2.get("p7", False) is False
+            assert r2.get("p7_skipped") is True
+
+        files = list((tmp_path / ".fleet-messages" / "all").glob("*.md"))
+        assert len(files) == 1  # Only 1 file, not 2
+
+    def test_dissent_bypasses_rate_limit(self, tmp_path):
+        """Dissent verdicts always write to P7 regardless of rate limit."""
+        import multifleet.adapters.surgeon_events as mod
+        from multifleet.adapters.surgeon_events import broadcast_surgeon_verdict
+
+        # Simulate a recent broadcast (rate limit active)
+        import time
+        mod._last_p7_broadcast_ts = time.monotonic()
+
+        verdict = self._make_verdict(agreed=False, confidence=0.4, dissent_count=2)
+
+        with patch("multifleet.product_bridge.get_bridge", side_effect=ImportError):
+            results = broadcast_surgeon_verdict(verdict, superrepo_root=tmp_path)
+
+        assert results["p7"] is True
+        files = list((tmp_path / ".fleet-messages" / "all").glob("*.md"))
+        assert len(files) == 1
+
+    def test_low_confidence_bypasses_rate_limit(self, tmp_path):
+        """Low confidence verdicts (<70%) always write to P7."""
+        import multifleet.adapters.surgeon_events as mod
+        from multifleet.adapters.surgeon_events import broadcast_surgeon_verdict
+
+        import time
+        mod._last_p7_broadcast_ts = time.monotonic()
+
+        verdict = self._make_verdict(agreed=True, confidence=0.5, dissent_count=0)
+
+        with patch("multifleet.product_bridge.get_bridge", side_effect=ImportError):
+            results = broadcast_surgeon_verdict(verdict, superrepo_root=tmp_path)
+
+        assert results["p7"] is True
 
 
 class TestSurgeonEventsAdapterBroadcast:

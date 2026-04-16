@@ -18,6 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# Rate limiting for P7 verdict broadcasts
+_last_p7_broadcast_ts: float = 0.0
+_P7_RATE_LIMIT_SECONDS: float = 3600.0  # max 1 P7 broadcast per hour
+
 from multifleet.event_schema import (
     EventEnvelope, EventType, EventSource, create_event,
     surgeon_phase_event,
@@ -65,37 +69,55 @@ def broadcast_surgeon_verdict(verdict: Dict[str, Any], superrepo_root: Optional[
         logger.debug("Bridge broadcast failed (non-fatal): %s", e)
 
     # Channel 2: P7 git message
+    # Only write to fleet-messages for SIGNIFICANT verdicts:
+    # - Dissent (disagreement between surgeons)
+    # - Low confidence (< 70%)
+    # - Rate limited: max 1 routine verdict per hour
     try:
-        root = superrepo_root or _SUPERREPO_ROOT
-        fleet_dir = root / ".fleet-messages" / "all"
-        fleet_dir.mkdir(parents=True, exist_ok=True)
-
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
-        task_slug = (verdict.get("task_id", "unknown") or "unknown")[:30]
-        # Sanitize for filename
-        task_slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in task_slug)
-        filename = f"{ts}-surgeon-verdict-{task_slug}.md"
-
-        status = "CONSENSUS" if verdict.get("agreed") else "DISSENT"
-        confidence = verdict.get("confidence", 0.0)
-        content = (
-            f"---\n"
-            f"from: {node_id}\n"
-            f"to: all\n"
-            f"subject: surgeon-verdict {status} ({confidence:.0%})\n"
-            f"timestamp: {datetime.now(timezone.utc).isoformat()}\n"
-            f"type: surgeon_verdict\n"
-            f"---\n\n"
-            f"# Surgeon Verdict: {status}\n\n"
-            f"- **Task**: {verdict.get('task_id', 'unknown')}\n"
-            f"- **Agreed**: {verdict.get('agreed', False)}\n"
-            f"- **Confidence**: {confidence:.1%}\n"
-            f"- **Dissent count**: {verdict.get('dissent_count', 0)}\n"
-            f"- **Surgeons consulted**: {', '.join(verdict.get('surgeons_consulted', []))}\n"
-            f"- **Source node**: {node_id}\n"
+        global _last_p7_broadcast_ts
+        now_mono = time.monotonic()
+        is_significant = (
+            not verdict.get("agreed", True)
+            or verdict.get("dissent_count", 0) > 0
+            or verdict.get("confidence", 1.0) < 0.7
         )
-        (fleet_dir / filename).write_text(content)
-        results["p7"] = True
+        is_rate_ok = (now_mono - _last_p7_broadcast_ts) >= _P7_RATE_LIMIT_SECONDS
+
+        if is_significant or is_rate_ok:
+            root = superrepo_root or _SUPERREPO_ROOT
+            fleet_dir = root / ".fleet-messages" / "all"
+            fleet_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+            task_slug = (verdict.get("task_id", "unknown") or "unknown")[:30]
+            # Sanitize for filename
+            task_slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in task_slug)
+            filename = f"{ts}-surgeon-verdict-{task_slug}.md"
+
+            status = "CONSENSUS" if verdict.get("agreed") else "DISSENT"
+            confidence = verdict.get("confidence", 0.0)
+            content = (
+                f"---\n"
+                f"from: {node_id}\n"
+                f"to: all\n"
+                f"subject: surgeon-verdict {status} ({confidence:.0%})\n"
+                f"timestamp: {datetime.now(timezone.utc).isoformat()}\n"
+                f"type: surgeon_verdict\n"
+                f"---\n\n"
+                f"# Surgeon Verdict: {status}\n\n"
+                f"- **Task**: {verdict.get('task_id', 'unknown')}\n"
+                f"- **Agreed**: {verdict.get('agreed', False)}\n"
+                f"- **Confidence**: {confidence:.1%}\n"
+                f"- **Dissent count**: {verdict.get('dissent_count', 0)}\n"
+                f"- **Surgeons consulted**: {', '.join(verdict.get('surgeons_consulted', []))}\n"
+                f"- **Source node**: {node_id}\n"
+            )
+            (fleet_dir / filename).write_text(content)
+            _last_p7_broadcast_ts = now_mono
+            results["p7"] = True
+        else:
+            logger.debug("P7 broadcast skipped: routine consensus, rate limited (1/hr)")
+            results["p7_skipped"] = True
     except Exception as e:
         logger.debug("P7 broadcast failed (non-fatal): %s", e)
 
