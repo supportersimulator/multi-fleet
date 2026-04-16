@@ -156,7 +156,7 @@ def _load_from_json(path: Path) -> Tuple[dict, Optional[str]]:
     chief = cfg.get("chief", {}).get("nodeId")
 
     for nid, node in cfg.get("nodes", {}).items():
-        peers[nid] = {
+        peer = {
             "user": node.get("user", os.environ.get("USER", "")),
             "ip": node.get("host", ""),
             "port": node.get("port", 8855),
@@ -164,6 +164,9 @@ def _load_from_json(path: Path) -> Tuple[dict, Optional[str]]:
             "mac_address": node.get("mac_address", ""),
             "tailscale_ip": node.get("tailscale_ip", ""),
         }
+        if node.get("tunnel_port"):
+            peer["tunnel_port"] = node["tunnel_port"]
+        peers[nid] = peer
 
     return peers, chief
 

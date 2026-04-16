@@ -114,6 +114,30 @@ def format_fleet_embed(msg: dict) -> dict:
     }
 
 
+def _write_seed_file(node_id: str, content: str, author_name: str, is_command: bool = False):
+    """Write Discord message as seed file for Claude Code fleet-inbox-hook injection.
+
+    Every Discord message in the fleet channel becomes a seed file at
+    /tmp/fleet-seed-discord-<timestamp>.md. The fleet-inbox-hook.sh picks
+    these up on next user prompt and injects into Claude Code context.
+    """
+    import time as _time
+    ts = int(_time.time())
+    seed_path = f"/tmp/fleet-seed-discord-{ts}.md"
+    msg_type = "DISCORD CMD" if is_command else "DISCORD"
+    try:
+        with open(seed_path, "w") as f:
+            f.write(f"## [{msg_type}] from {author_name} (via Discord)\n\n")
+            f.write(f"{content}\n")
+        # Touch trigger file — LaunchAgent watches this to wake Claude Code
+        trigger = "/tmp/discord-wake-trigger"
+        with open(trigger, "w") as f:
+            f.write(str(ts))
+        logger.info("Seed file written: %s (trigger touched)", seed_path)
+    except Exception as e:
+        logger.warning("Failed to write seed file: %s", e)
+
+
 def parse_discord_message(content: str, author_id: str = "unknown") -> Optional[dict]:
     """Parse Discord message into fleet payload. Returns None if not a fleet command.
 
@@ -229,8 +253,18 @@ class DiscordFleetBridge:
                 return
             if message.channel.id != int(self.channel_id):
                 return
-            parsed = parse_discord_message(message.content, str(message.author.id))
+
+            content = message.content.strip()
+            author_name = str(message.author.display_name or message.author.name)
+            parsed = parse_discord_message(content, str(message.author.id))
+
+            # Write seed file for Claude Code injection on ANY message
+            # (not just !fleet commands — Aaron directing from iPad should inject)
+            _write_seed_file(self.node_id, content, author_name, is_command=parsed is not None)
+
             if not parsed:
+                # Not a !fleet command but still injected via seed file
+                await message.add_reaction("\U0001F4E8")  # envelope
                 return
             # Forward to fleet daemon
             try:

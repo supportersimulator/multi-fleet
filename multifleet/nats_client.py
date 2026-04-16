@@ -86,25 +86,18 @@ def _default_nats_url():
     If an SSH tunnel is forwarding port 4222 locally, use 127.0.0.1 to avoid
     router-blocked direct connections.
     """
-    # Check if a local tunnel is forwarding port 4222
+    # Check if NATS is running locally (direct server or SSH tunnel)
     try:
         import subprocess as _sp
         out = _sp.check_output(["lsof", "-i", ":4222", "-sTCP:LISTEN"], text=True, timeout=3, stderr=_sp.DEVNULL)
-        if "ssh" in out.lower():
+        if out.strip():
+            # NATS listening locally — always use loopback (fastest, no NAT issues)
             return "nats://127.0.0.1:4222"
     except Exception as e:
-        logger.debug("SSH tunnel detection for NATS port 4222 failed: %s", e)
+        logger.debug("Local NATS detection for port 4222 failed: %s", e)
         pass
 
-    # Try config file for chief IP
-    conf = REPO_ROOT / "scripts" / "3s-network.local.conf"
-    if conf.exists():
-        for line in conf.read_text().split("\n"):
-            if line.startswith("PEER_mac1="):
-                ip = line.split("@")[-1].strip('"')
-                return f"nats://{ip}:4222"
-
-    # Try multifleet config
+    # Try multifleet config (authoritative, scales to 100+)
     mf_conf = REPO_ROOT / ".multifleet" / "config.json"
     if mf_conf.exists():
         try:
@@ -956,13 +949,18 @@ class FleetNerveNATS:
     # Designed for 100+ nodes. Peers resolved from NATS heartbeats + config.
 
     def _resolve_peer(self, target: str) -> dict:
-        """Resolve peer connection info from heartbeats (dynamic) or config (static)."""
-        # Dynamic: from NATS heartbeat cache (scales to 100+)
+        """Resolve peer connection info from heartbeats (dynamic) merged with config (static).
+
+        Heartbeat provides live IP/user. Config provides static fields like tunnel_port.
+        Both are merged so tunnel fallback works even when heartbeats are active.
+        """
+        config = self._peers_config.get(target, {})
         hb = self._peers.get(target, {})
         if hb:
-            return {"ip": hb.get("ip", ""), "user": hb.get("user", ""), "mac_address": hb.get("mac", "")}
-        # Static: from config file (bootstrap / fallback)
-        return self._peers_config.get(target, {})
+            resolved = dict(config)  # start with static config (tunnel_port, etc.)
+            resolved.update({"ip": hb.get("ip", ""), "user": hb.get("user", ""), "mac_address": hb.get("mac", "")})
+            return resolved
+        return config
 
     # ── Local-first repair actions (Protocol: fix yourself before others SSH in) ──
 
