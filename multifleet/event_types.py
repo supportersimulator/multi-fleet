@@ -23,6 +23,7 @@ NAMESPACES: dict[str, str] = {
     "panel": "IDE Panel: lifecycle events (register, activate, suspend, close)",
     "quorum": "Quorum: distributed decision proposals, votes, outcomes",
     "superpowers": "Superpowers: workflow phase transitions",
+    "synaptic": "Synaptic: 8th Intelligence insights, pattern recognition, personality",
     "breaker": "Reserved for Phase 4 circuit breaker",
 }
 

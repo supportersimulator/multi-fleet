@@ -39,10 +39,11 @@ NS_PANEL = "panel"
 NS_EVIDENCE = "evidence"
 NS_QUORUM = "quorum"
 NS_SUPERPOWERS = "superpowers"
+NS_SYNAPTIC = "synaptic"
 
 ALL_NAMESPACES = frozenset({
     NS_FLEET, NS_PROBE, NS_SURGEON, NS_PANEL, NS_EVIDENCE, NS_QUORUM,
-    NS_SUPERPOWERS,
+    NS_SUPERPOWERS, NS_SYNAPTIC,
 })
 
 # Default ring sizes
@@ -433,6 +434,51 @@ class IDEEventBus:
             **extra,
         }, source="superpowers-adapter")
 
+    # ── synaptic.* ──
+
+    def synaptic_insight(
+        self,
+        category: str,
+        severity: str,
+        message: str,
+        evidence: list = None,
+        node_id: str = "",
+        correlation_id: Optional[str] = None,
+        **extra,
+    ) -> Optional[dict]:
+        """Publish synaptic.insight — Synaptic detected a pattern or anomaly."""
+        return self.emit("synaptic.insight", {
+            "category": category, "severity": severity,
+            "message": message, "evidence": evidence or [],
+            "node_id": node_id, **extra,
+        }, source="synaptic-bridge", correlation_id=correlation_id)
+
+    def synaptic_pattern(
+        self,
+        pattern_type: str,
+        title: str,
+        confidence: float,
+        description: str = "",
+        **extra,
+    ) -> Optional[dict]:
+        """Publish synaptic.pattern — a cross-session pattern was detected."""
+        return self.emit("synaptic.pattern", {
+            "pattern_type": pattern_type, "title": title,
+            "confidence": confidence, "description": description, **extra,
+        }, source="synaptic-bridge")
+
+    def synaptic_personality_update(
+        self,
+        trait: str,
+        strength: float,
+        evidence: str = "",
+        **extra,
+    ) -> Optional[dict]:
+        """Publish synaptic.personality.update — personality trait evolved."""
+        return self.emit("synaptic.personality.update", {
+            "trait": trait, "strength": strength, "evidence": evidence, **extra,
+        }, source="synaptic-bridge")
+
     # ══════════════════════════════════════════════════════════════
     # Integration hooks — attach external systems
     # ══════════════════════════════════════════════════════════════
@@ -463,6 +509,14 @@ class IDEEventBus:
         """
         self._integrations["surgeon_adapter"] = surgeon_adapter
         logger.info("Surgeon adapter attached to IDEEventBus")
+
+    def attach_synaptic_bridge(self, synaptic_bridge) -> None:
+        """Wire a SynapticBridge to publish through this bus.
+
+        The bridge subscribes to surgeon.*/evidence.* and emits synaptic.* events.
+        """
+        self._integrations["synaptic_bridge"] = synaptic_bridge
+        logger.info("Synaptic bridge attached to IDEEventBus")
 
     def attach_evidence_ledger(self, evidence_ledger) -> None:
         """Register evidence ledger for chain event forwarding.

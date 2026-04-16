@@ -3,7 +3,7 @@
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -167,6 +167,110 @@ class TestEventProcessing:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Test: Surgeon event processing
+# ═══════════════════════════════════════════════════════════════════
+
+class TestSurgeonEvents:
+    def test_low_confidence_verdict_generates_insight(self, bridge):
+        """Low-confidence surgeon verdict surfaces a warning."""
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.verdict",
+            {"surgeon": "cardiologist", "verdict": "uncertain", "confidence": 0.3},
+        ))
+        insights = bridge.get_active_insights()
+        surgeon_insights = [i for i in insights if i["category"] == "surgeon"]
+        assert len(surgeon_insights) == 1
+        assert "cardiologist" in surgeon_insights[0]["message"]
+        assert "30%" in surgeon_insights[0]["message"]
+
+    def test_high_confidence_verdict_no_insight(self, bridge):
+        """High-confidence verdict does not generate an insight."""
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.verdict",
+            {"surgeon": "atlas", "verdict": "approve", "confidence": 0.95},
+        ))
+        insights = bridge.get_active_insights()
+        surgeon_insights = [i for i in insights if i["category"] == "surgeon"]
+        assert len(surgeon_insights) == 0
+
+    def test_cross_exam_disagreement_generates_insight(self, bridge):
+        """Cross-exam without consensus generates a warning."""
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.cross_exam.complete",
+            {"topic": "schema migration", "consensus": False, "summary": "split"},
+        ))
+        insights = bridge.get_active_insights()
+        surgeon_insights = [i for i in insights if i["category"] == "surgeon"]
+        assert len(surgeon_insights) == 1
+        assert "disagreement" in surgeon_insights[0]["message"].lower()
+        assert "schema migration" in surgeon_insights[0]["message"]
+
+    def test_cross_exam_consensus_no_insight(self, bridge):
+        """Cross-exam with consensus does not generate an insight."""
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.cross_exam.complete",
+            {"topic": "deploy plan", "consensus": True},
+        ))
+        insights = bridge.get_active_insights()
+        surgeon_insights = [i for i in insights if i["category"] == "surgeon"]
+        assert len(surgeon_insights) == 0
+
+    def test_surgeon_events_tracked_in_stats(self, bridge):
+        """Surgeon events are counted in stats."""
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.verdict",
+            {"surgeon": "atlas", "verdict": "ok", "confidence": 0.9},
+        ))
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.cross_exam.complete",
+            {"topic": "test", "consensus": True},
+        ))
+        s = bridge.stats
+        assert s["surgeon_verdicts_tracked"] == 1
+        assert s["cross_exams_seen"] == 1
+        assert s["total_events_processed"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: Evidence event processing
+# ═══════════════════════════════════════════════════════════════════
+
+class TestEvidenceEvents:
+    def test_chain_break_generates_critical_insight(self, bridge):
+        """Evidence chain break is always critical."""
+        bridge._on_evidence_event(_make_event(
+            "evidence.chain_broken",
+            {"broken_at_seq": 42, "detail": "hash mismatch"},
+        ))
+        insights = bridge.get_active_insights()
+        evidence_insights = [i for i in insights if i["category"] == "evidence"]
+        assert len(evidence_insights) == 1
+        assert evidence_insights[0]["severity"] == "critical"
+        assert "42" in evidence_insights[0]["message"]
+
+    def test_evidence_recorded_tracked(self, bridge):
+        """Evidence recorded entries are tracked in stats."""
+        bridge._on_evidence_event(_make_event(
+            "evidence.recorded",
+            {"entry_id": "e1", "event_type": "probe.finding", "node_id": "mac1"},
+        ))
+        s = bridge.stats
+        assert s["evidence_entries_tracked"] == 1
+        assert s["total_events_processed"] == 1
+
+    def test_chain_breaks_counted(self, bridge):
+        """Chain breaks are counted in stats."""
+        bridge._on_evidence_event(_make_event(
+            "evidence.chain_broken", {"broken_at_seq": 1, "detail": "x"},
+        ))
+        bridge._on_evidence_event(_make_event(
+            "evidence.chain_broken", {"broken_at_seq": 2, "detail": "y"},
+        ))
+        s = bridge.stats
+        assert s["chain_breaks"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Test: Alert thresholds
 # ═══════════════════════════════════════════════════════════════════
 
@@ -192,6 +296,13 @@ class TestAlertThresholds:
         bridge.on_fleet_event(_make_event("fleet.peer.offline", {}, "mac2"))
         assert bridge.should_alert_aaron() is False
 
+    def test_evidence_chain_break_triggers_alert(self, bridge):
+        """Evidence chain break (critical) triggers alert."""
+        bridge._on_evidence_event(_make_event(
+            "evidence.chain_broken", {"broken_at_seq": 1, "detail": "hash"},
+        ))
+        assert bridge.should_alert_aaron() is True
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Test: Deduplication
@@ -214,29 +325,141 @@ class TestDeduplication:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestEventBusIntegration:
-    def test_start_subscribes_to_fleet_events(self, bridge_with_bus):
+    def test_start_subscribes_to_all_namespaces(self, bridge_with_bus):
         bridge, bus = bridge_with_bus
         bridge.start()
-        bus.on.assert_called_once_with("fleet.*", bridge._on_fleet_event)
+        # Should subscribe to fleet.*, surgeon.*, evidence.*
+        call_args = [c[0] for c in bus.on.call_args_list]
+        patterns = [args[0] for args in call_args]
+        assert "fleet.*" in patterns
+        assert "surgeon.*" in patterns
+        assert "evidence.*" in patterns
         assert bridge._started is True
 
     def test_start_is_idempotent(self, bridge_with_bus):
         bridge, bus = bridge_with_bus
         bridge.start()
         bridge.start()
-        assert bus.on.call_count == 1
+        assert bus.on.call_count == 3  # fleet.* + surgeon.* + evidence.*
 
-    def test_stop_unsubscribes(self, bridge_with_bus):
+    def test_stop_unsubscribes_all(self, bridge_with_bus):
         bridge, bus = bridge_with_bus
         bridge.start()
         bridge.stop()
-        bus.off.assert_called_once_with("fleet.*", bridge._on_fleet_event)
+        call_args = [c[0] for c in bus.off.call_args_list]
+        patterns = [args[0] for args in call_args]
+        assert "fleet.*" in patterns
+        assert "surgeon.*" in patterns
+        assert "evidence.*" in patterns
         assert bridge._started is False
 
     def test_start_without_bus_is_noop(self):
         bridge = SynapticBridge()
         bridge.start()  # should not raise
         assert bridge._started is False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: emit_insight
+# ═══════════════════════════════════════════════════════════════════
+
+class TestEmitInsight:
+    def test_emit_insight_records_locally(self, bridge):
+        """emit_insight adds to local insight buffer."""
+        bridge.emit_insight("Test insight", ["ev1", "ev2"])
+        insights = bridge.get_active_insights()
+        assert len(insights) == 1
+        assert insights[0]["message"] == "Test insight"
+        assert insights[0]["category"] == "pattern"
+
+    def test_emit_insight_emits_to_bus(self, bridge_with_bus):
+        """emit_insight emits synaptic.insight event on the bus."""
+        bridge, bus = bridge_with_bus
+        result = bridge.emit_insight("Bus insight", ["evidence1"])
+        bus.emit.assert_called_once()
+        call_args = bus.emit.call_args
+        assert call_args[0][0] == "synaptic.insight"
+        assert call_args[0][1]["message"] == "Bus insight"
+        assert call_args[0][1]["evidence"] == ["evidence1"]
+
+    def test_emit_insight_no_bus_returns_none(self, bridge):
+        """emit_insight without bus returns None (no crash)."""
+        result = bridge.emit_insight("No bus insight")
+        assert result is None
+        # But insight is still recorded locally
+        assert len(bridge.get_active_insights()) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: get_personality_state
+# ═══════════════════════════════════════════════════════════════════
+
+class TestGetPersonalityState:
+    def test_degraded_when_module_unavailable(self, bridge):
+        """Returns degraded state when memory module is not importable."""
+        # Force modules_probed so it doesn't try to import
+        bridge._modules_probed = True
+        bridge._personality_factory = None
+        state = bridge.get_personality_state()
+        assert state["available"] is False
+        assert state["mode"] == "degraded"
+
+    def test_full_when_module_available(self, bridge):
+        """Returns full state when personality module works."""
+        mock_personality = MagicMock()
+        mock_personality.get_personality_state.return_value = {
+            "voice": {"warmth": 0.8},
+            "themes": ["async patterns"],
+        }
+        bridge._modules_probed = True
+        bridge._personality_factory = lambda: mock_personality
+        state = bridge.get_personality_state()
+        assert state["available"] is True
+        assert state["mode"] == "full"
+        assert state["voice"] == {"warmth": 0.8}
+
+    def test_graceful_on_personality_exception(self, bridge):
+        """Returns degraded if personality.get_personality_state() throws."""
+        mock_personality = MagicMock()
+        mock_personality.get_personality_state.side_effect = RuntimeError("db locked")
+        bridge._modules_probed = True
+        bridge._personality_factory = lambda: mock_personality
+        state = bridge.get_personality_state()
+        assert state["available"] is False
+        assert "db locked" in state["reason"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: feed_pattern
+# ═══════════════════════════════════════════════════════════════════
+
+class TestFeedPattern:
+    def test_feed_pattern_no_engine_no_crash(self, bridge):
+        """feed_pattern without pattern engine does not crash."""
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = None
+        bridge.feed_pattern("surgeon.verdict", {"verdict": "ok"})
+        # No exception = pass
+
+    def test_feed_pattern_calls_engine(self, bridge):
+        """feed_pattern calls engine.feed_event when available."""
+        mock_engine = MagicMock()
+        mock_engine.feed_event = MagicMock()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        bridge.feed_pattern("surgeon.verdict", {"verdict": "ok"})
+        mock_engine.feed_event.assert_called_once_with(
+            "surgeon.verdict", {"verdict": "ok"}
+        )
+
+    def test_feed_pattern_graceful_on_exception(self, bridge):
+        """feed_pattern handles engine exceptions gracefully."""
+        mock_engine = MagicMock()
+        mock_engine.feed_event.side_effect = RuntimeError("scan failed")
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        bridge.feed_pattern("evidence.recorded", {"entry_id": "e1"})
+        # No exception = pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -251,6 +474,16 @@ class TestStatsAndExpiry:
         assert s["total_events_processed"] == 2
         assert s["nodes_tracked"] == 2
         assert s["started"] is False
+
+    def test_stats_include_new_fields(self, bridge):
+        """Stats include surgeon/evidence/personality tracking."""
+        s = bridge.stats
+        assert "surgeon_verdicts_tracked" in s
+        assert "cross_exams_seen" in s
+        assert "evidence_entries_tracked" in s
+        assert "chain_breaks" in s
+        assert "personality_available" in s
+        assert "pattern_engine_available" in s
 
     def test_expired_insights_excluded_from_active(self, bridge):
         """Insights older than TTL are filtered out."""
@@ -311,3 +544,33 @@ class TestIDEPanelIntegration:
         result = server.all_panels()
         panel_ids = [p["panel_id"] for p in result["panels"]]
         assert "synaptic" in panel_ids
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: Auto-emit on insight creation
+# ═══════════════════════════════════════════════════════════════════
+
+class TestAutoEmit:
+    def test_fleet_insight_emitted_to_bus(self, bridge_with_bus):
+        """When fleet events generate insights, synaptic.insight is emitted."""
+        bridge, bus = bridge_with_bus
+        bridge.on_fleet_event(_make_event(
+            "fleet.peer.offline", {}, node_id="mac1",
+        ))
+        # bus.emit should have been called with synaptic.insight
+        emit_calls = [c for c in bus.emit.call_args_list
+                      if c[0][0] == "synaptic.insight"]
+        assert len(emit_calls) == 1
+        assert emit_calls[0][0][1]["category"] == "drift"
+
+    def test_surgeon_insight_emitted_to_bus(self, bridge_with_bus):
+        """Surgeon disagreement insight is emitted to bus."""
+        bridge, bus = bridge_with_bus
+        bridge._on_surgeon_event(_make_event(
+            "surgeon.cross_exam.complete",
+            {"topic": "deploy", "consensus": False, "summary": "split"},
+        ))
+        emit_calls = [c for c in bus.emit.call_args_list
+                      if c[0][0] == "synaptic.insight"]
+        assert len(emit_calls) == 1
+        assert emit_calls[0][0][1]["category"] == "surgeon"

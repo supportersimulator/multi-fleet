@@ -5,18 +5,27 @@ consciousness that monitors fleet activity, accumulates patterns, and
 proactively surfaces insights when they warrant human attention.
 
 Architecture:
-    EventBus (fleet.*)  ──>  SynapticBridge  ──>  Insight buffer (rolling 50)
-                                   │
-                                   ├── Pattern detection (repeated failures,
-                                   │   node drift, quorum stalls)
-                                   ├── Alert threshold (should_alert_aaron())
-                                   └── IDE panel endpoint (synaptic_panel())
+    EventBus (fleet.*, surgeon.*, evidence.*)
+              │
+              ▼
+        SynapticBridge ──> Insight buffer (rolling 50)
+              │                    │
+              │                    ├── synaptic.insight events (emitted to bus)
+              │                    └── IDE panel endpoint
+              │
+              ├── Pattern detection (repeated failures, node drift, quorum stalls)
+              ├── Surgeon feed (cross-exam results → pattern recognition)
+              ├── Evidence feed (ledger entries → wisdom accumulation)
+              ├── Personality state (from memory/synaptic_personality.py)
+              └── Pattern engine (from memory/synaptic_pattern_engine.py)
 
 Usage:
     from multifleet.synaptic_bridge import SynapticBridge
     bridge = SynapticBridge(event_bus=bus)
-    bridge.start()  # subscribes to fleet.* events
+    bridge.start()  # subscribes to fleet.*, surgeon.*, evidence.* events
     insights = bridge.get_active_insights()
+    bridge.emit_insight("Cross-session pattern detected", ["evidence1", "evidence2"])
+    state = bridge.get_personality_state()
 """
 
 from __future__ import annotations
@@ -39,10 +48,33 @@ ALERT_THRESHOLD_DRIFT_S = 120  # node unseen for 2+ min triggers drift alert
 INSIGHT_TTL_S = 600  # insights expire after 10 minutes
 
 
+# ── Lazy imports for memory modules (graceful degradation) ──
+
+def _try_import_personality():
+    """Try to import synaptic_personality. Returns None on failure."""
+    try:
+        from memory.synaptic_personality import get_personality
+        return get_personality
+    except Exception as exc:
+        logger.debug("synaptic_personality unavailable: %s", exc)
+        return None
+
+
+def _try_import_pattern_engine():
+    """Try to import synaptic_pattern_engine. Returns None on failure."""
+    try:
+        from memory.synaptic_pattern_engine import get_pattern_engine
+        return get_pattern_engine
+    except Exception as exc:
+        logger.debug("synaptic_pattern_engine unavailable: %s", exc)
+        return None
+
+
 @dataclass
 class Insight:
     """A single Synaptic observation about fleet state."""
-    category: str          # "pattern", "anomaly", "drift", "health", "coordination"
+    category: str          # "pattern", "anomaly", "drift", "health", "coordination",
+                           # "surgeon", "evidence"
     severity: str          # "info", "warning", "critical"
     message: str
     timestamp: float = field(default_factory=time.time)
@@ -73,9 +105,13 @@ class Insight:
 class SynapticBridge:
     """Connects fleet events to Synaptic awareness.
 
-    Subscribes to fleet.* events on the EventBus, detects patterns,
-    accumulates insights in a rolling buffer, and determines when
-    patterns warrant human attention.
+    Subscribes to fleet.*, surgeon.*, and evidence.* events on the EventBus,
+    detects patterns, accumulates insights in a rolling buffer, emits
+    synaptic.insight events, and bridges to memory/synaptic_* modules
+    for personality state and pattern recognition.
+
+    Gracefully degrades if memory modules are unavailable — the bridge
+    still processes events and generates insights from fleet data alone.
     """
 
     def __init__(self, event_bus=None, max_insights: int = MAX_INSIGHTS):
@@ -90,26 +126,173 @@ class SynapticBridge:
         self._event_counts: dict[str, int] = defaultdict(int)
         self._total_events = 0
 
+        # Surgeon cross-exam tracking
+        self._surgeon_verdicts: deque[dict] = deque(maxlen=20)
+        self._cross_exam_count = 0
+
+        # Evidence tracking
+        self._evidence_entries: deque[dict] = deque(maxlen=30)
+        self._chain_breaks = 0
+
+        # Memory module handles (lazy-loaded)
+        self._personality_factory = None
+        self._pattern_engine_factory = None
+        self._modules_probed = False
+
+    # ── Memory module access (graceful degradation) ──
+
+    def _probe_modules(self) -> None:
+        """Attempt to import memory modules once. Safe to call repeatedly."""
+        if self._modules_probed:
+            return
+        self._modules_probed = True
+        self._personality_factory = _try_import_personality()
+        self._pattern_engine_factory = _try_import_pattern_engine()
+        if self._personality_factory:
+            logger.info("Synaptic personality module available")
+        if self._pattern_engine_factory:
+            logger.info("Synaptic pattern engine available")
+
+    def _get_personality(self):
+        """Get personality instance, or None if unavailable."""
+        self._probe_modules()
+        if self._personality_factory is None:
+            return None
+        try:
+            return self._personality_factory()
+        except Exception as exc:
+            logger.debug("Failed to get personality: %s", exc)
+            return None
+
+    def _get_pattern_engine(self):
+        """Get pattern engine instance, or None if unavailable."""
+        self._probe_modules()
+        if self._pattern_engine_factory is None:
+            return None
+        try:
+            return self._pattern_engine_factory()
+        except Exception as exc:
+            logger.debug("Failed to get pattern engine: %s", exc)
+            return None
+
     # ── Lifecycle ──
 
     def start(self) -> None:
-        """Subscribe to fleet.* events on the EventBus."""
+        """Subscribe to fleet.*, surgeon.*, and evidence.* events on the EventBus."""
         if self._started:
             return
         if self._bus is None:
             logger.warning("SynapticBridge.start() called without event_bus")
             return
         self._bus.on("fleet.*", self._on_fleet_event)
+        self._bus.on("surgeon.*", self._on_surgeon_event)
+        self._bus.on("evidence.*", self._on_evidence_event)
         self._started = True
-        logger.info("SynapticBridge started — listening to fleet.* events")
+        logger.info("SynapticBridge started — listening to fleet.*, surgeon.*, evidence.*")
 
     def stop(self) -> None:
         """Unsubscribe from events."""
         if not self._started or self._bus is None:
             return
         self._bus.off("fleet.*", self._on_fleet_event)
+        self._bus.off("surgeon.*", self._on_surgeon_event)
+        self._bus.off("evidence.*", self._on_evidence_event)
         self._started = False
         logger.info("SynapticBridge stopped")
+
+    # ── Public API ──
+
+    def get_personality_state(self) -> dict:
+        """Return current Synaptic personality context.
+
+        Returns personality state from memory/synaptic_personality.py if available,
+        otherwise returns a minimal stub indicating degraded mode.
+        """
+        personality = self._get_personality()
+        if personality is None:
+            return {
+                "available": False,
+                "mode": "degraded",
+                "reason": "synaptic_personality module unavailable",
+            }
+        try:
+            state = personality.get_personality_state()
+            return {"available": True, "mode": "full", **state}
+        except Exception as exc:
+            logger.warning("Failed to get personality state: %s", exc)
+            return {
+                "available": False,
+                "mode": "degraded",
+                "reason": str(exc),
+            }
+
+    def emit_insight(self, insight_message: str, evidence: list = None) -> Optional[dict]:
+        """Broadcast a Synaptic insight to the fleet via EventBus.
+
+        Creates an Insight record locally and emits a synaptic.insight event
+        on the bus for other subscribers (IDE panels, fleet nodes, etc.).
+
+        Args:
+            insight_message: Human-readable insight text.
+            evidence: List of evidence strings supporting the insight.
+
+        Returns:
+            The emitted event dict, or None if no bus is available.
+        """
+        evidence_list = evidence or []
+
+        # Record locally
+        insight = Insight(
+            category="pattern",
+            severity="info",
+            message=insight_message,
+            source_event="synaptic.insight",
+            evidence={"items": evidence_list},
+        )
+        with self._lock:
+            self._add_insight(insight)
+
+        # Emit to EventBus
+        if self._bus is None:
+            return None
+        try:
+            return self._bus.emit(
+                "synaptic.insight",
+                {
+                    "category": "pattern",
+                    "severity": "info",
+                    "message": insight_message,
+                    "evidence": evidence_list,
+                },
+                source="synaptic-bridge",
+            )
+        except Exception as exc:
+            logger.warning("Failed to emit synaptic.insight: %s", exc)
+            return None
+
+    def feed_pattern(self, event_type: str, data: dict) -> None:
+        """Feed data to Synaptic for pattern recognition.
+
+        If the memory/synaptic_pattern_engine is available, feeds the data
+        for cross-session pattern detection. Otherwise logs and continues.
+
+        Args:
+            event_type: The type of event being fed (e.g., "surgeon.verdict").
+            data: Event payload data for pattern analysis.
+        """
+        engine = self._get_pattern_engine()
+        if engine is None:
+            logger.debug("Pattern engine unavailable — event %s buffered only", event_type)
+            return
+        try:
+            # Pattern engine's scan expects session data — feed via its API
+            # if it has a feed_event method, use it; otherwise queue for next scan
+            if hasattr(engine, 'feed_event'):
+                engine.feed_event(event_type, data)
+            else:
+                logger.debug("Pattern engine has no feed_event — event %s noted", event_type)
+        except Exception as exc:
+            logger.debug("Pattern engine feed failed: %s", exc)
 
     # ── Event processing ──
 
@@ -148,7 +331,44 @@ class SynapticBridge:
             elif "quorum" in event_type or "consensus" in event_type:
                 self._analyze_quorum(event_type, payload, node_id, now)
 
-    # ── Pattern analyzers ──
+    def _on_surgeon_event(self, event: dict) -> None:
+        """Handle surgeon.* events — feed cross-exam results to pattern recognition."""
+        event_type = event.get("type", "")
+        payload = event.get("payload", {})
+        now = time.time()
+
+        with self._lock:
+            self._total_events += 1
+            self._event_counts[event_type] += 1
+
+        # Track surgeon verdicts
+        if "verdict" in event_type:
+            self._analyze_surgeon_verdict(event_type, payload, now)
+        elif "cross_exam.complete" in event_type:
+            self._analyze_cross_exam_complete(event_type, payload, now)
+
+        # Feed to pattern engine
+        self.feed_pattern(event_type, payload)
+
+    def _on_evidence_event(self, event: dict) -> None:
+        """Handle evidence.* events — feed ledger entries to wisdom accumulation."""
+        event_type = event.get("type", "")
+        payload = event.get("payload", {})
+        now = time.time()
+
+        with self._lock:
+            self._total_events += 1
+            self._event_counts[event_type] += 1
+
+        if "chain_broken" in event_type:
+            self._analyze_evidence_chain_break(event_type, payload, now)
+        elif "recorded" in event_type:
+            self._analyze_evidence_recorded(event_type, payload, now)
+
+        # Feed to pattern engine
+        self.feed_pattern(event_type, payload)
+
+    # ── Pattern analyzers: Fleet ──
 
     def _analyze_failure(self, event_type: str, payload: dict,
                          node_id: str, now: float) -> None:
@@ -238,6 +458,79 @@ class SynapticBridge:
                 evidence={"decision": decision, "confidence": confidence},
             ))
 
+    # ── Pattern analyzers: Surgeon ──
+
+    def _analyze_surgeon_verdict(self, event_type: str, payload: dict,
+                                 now: float) -> None:
+        """Track individual surgeon verdicts for pattern detection."""
+        verdict_record = {
+            "surgeon": payload.get("surgeon", "unknown"),
+            "verdict": payload.get("verdict", ""),
+            "confidence": payload.get("confidence", 0),
+            "timestamp": now,
+        }
+        with self._lock:
+            self._surgeon_verdicts.append(verdict_record)
+
+        # Detect low-confidence surgeon verdicts
+        confidence = payload.get("confidence", 1.0)
+        if confidence < 0.5:
+            surgeon = payload.get("surgeon", "unknown")
+            self._add_insight(Insight(
+                category="surgeon",
+                severity="warning",
+                message=f"Low-confidence verdict from {surgeon}: {confidence:.0%}",
+                source_event=event_type,
+                evidence={"surgeon": surgeon, "confidence": confidence,
+                          "verdict": payload.get("verdict", "")},
+            ))
+
+    def _analyze_cross_exam_complete(self, event_type: str, payload: dict,
+                                     now: float) -> None:
+        """Track cross-exam completions — detect disagreements."""
+        with self._lock:
+            self._cross_exam_count += 1
+
+        consensus = payload.get("consensus", True)
+        topic = payload.get("topic", "unknown")
+        if not consensus:
+            self._add_insight(Insight(
+                category="surgeon",
+                severity="warning",
+                message=f"Surgeon disagreement on: {topic}",
+                source_event=event_type,
+                evidence={"topic": topic, "summary": payload.get("summary", "")},
+            ))
+
+    # ── Pattern analyzers: Evidence ──
+
+    def _analyze_evidence_chain_break(self, event_type: str, payload: dict,
+                                      now: float) -> None:
+        """Evidence chain integrity failure — always critical."""
+        with self._lock:
+            self._chain_breaks += 1
+
+        self._add_insight(Insight(
+            category="evidence",
+            severity="critical",
+            message=f"Evidence chain broken at seq {payload.get('broken_at_seq', '?')}",
+            source_event=event_type,
+            evidence={"detail": payload.get("detail", ""),
+                      "broken_at_seq": payload.get("broken_at_seq", 0)},
+        ))
+
+    def _analyze_evidence_recorded(self, event_type: str, payload: dict,
+                                   now: float) -> None:
+        """Track evidence entries — surface interesting patterns."""
+        entry = {
+            "entry_id": payload.get("entry_id", ""),
+            "event_type": payload.get("event_type", ""),
+            "node_id": payload.get("node_id", ""),
+            "timestamp": now,
+        }
+        with self._lock:
+            self._evidence_entries.append(entry)
+
     # ── Insight management ──
 
     def _add_insight(self, insight: Insight) -> None:
@@ -250,6 +543,17 @@ class SynapticBridge:
                 return
         self._insights.append(insight)
         logger.debug("Synaptic insight: [%s] %s", insight.severity, insight.message)
+
+        # Emit to bus if available (non-blocking, best-effort)
+        if self._bus is not None and insight.source_event != "synaptic.insight":
+            try:
+                self._bus.emit(
+                    "synaptic.insight",
+                    insight.to_dict(),
+                    source="synaptic-bridge",
+                )
+            except Exception:
+                pass  # best-effort — insight is already recorded locally
 
     def get_active_insights(self) -> list[dict]:
         """Return current non-expired Synaptic observations about fleet state.
@@ -289,4 +593,10 @@ class SynapticBridge:
                 "alert_state": self.should_alert_aaron(),
                 "started": self._started,
                 "event_type_counts": dict(self._event_counts),
+                "surgeon_verdicts_tracked": len(self._surgeon_verdicts),
+                "cross_exams_seen": self._cross_exam_count,
+                "evidence_entries_tracked": len(self._evidence_entries),
+                "chain_breaks": self._chain_breaks,
+                "personality_available": self._personality_factory is not None,
+                "pattern_engine_available": self._pattern_engine_factory is not None,
             }
