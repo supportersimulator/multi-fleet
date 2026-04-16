@@ -272,16 +272,43 @@ class FleetNerveNATS:
         except Exception as e:
             logger.warning(f"EvidenceSync init failed: {e}")
 
+        # Supervisor — singleton instance shared across daemon
+        self._supervisor = None
+        try:
+            from .supervisor_store import PersistentSupervisor
+            self._supervisor = PersistentSupervisor(node_id=self.node_id)
+            logger.info("PersistentSupervisor initialized (singleton)")
+        except ImportError:
+            from .supervisor import Supervisor
+            self._supervisor = Supervisor(node_id=self.node_id)
+            logger.info("Supervisor initialized (in-memory singleton)")
+        except Exception as e:
+            logger.warning(f"Supervisor init failed: {e}")
+
         # Supervisor Watchdog — detects stalled supervisor phases
         self._supervisor_watchdog = None
+        if self._supervisor:
+            try:
+                from .supervisor_watchdog import SupervisorWatchdog
+                self._supervisor_watchdog = SupervisorWatchdog(self._supervisor)
+                logger.info("SupervisorWatchdog initialized")
+            except Exception as e:
+                logger.warning(f"SupervisorWatchdog init failed: {e}")
+
+        # Chief Election — heartbeat + majority vote leader election
+        self._chief_election = None
         try:
-            from .supervisor import Supervisor
-            from .supervisor_watchdog import SupervisorWatchdog
-            supervisor = Supervisor(node_id=self.node_id)
-            self._supervisor_watchdog = SupervisorWatchdog(supervisor)
-            logger.info("SupervisorWatchdog initialized")
+            from .chief_election import ChiefElection
+            self._chief_election = ChiefElection(
+                node_id=self.node_id,
+                fleet_size=len(self._peers_config) + 1 if self._peers_config else 3,
+            )
+            # Seed with configured chief if available
+            if self._chief:
+                self._chief_election.current_chief = self._chief
+            logger.info("ChiefElection initialized (chief=%s)", self._chief)
         except Exception as e:
-            logger.warning(f"SupervisorWatchdog init failed: {e}")
+            logger.warning(f"ChiefElection init failed: {e}")
 
         # Dashboard Event Consumer — live state from EventBus (attached in serve())
         self._dashboard_events = None
@@ -1769,6 +1796,14 @@ class FleetNerveNATS:
         except Exception as e:
             logger.warning("Health monitor failed to start: %s", e)
 
+        # Wire chief election into health monitor (auto-triggers on chief timeout)
+        if self._chief_election and hasattr(self, '_health_monitor') and self._health_monitor:
+            try:
+                self._chief_election.wire_to_health_monitor(self._health_monitor)
+                logger.info("ChiefElection wired to health monitor")
+            except Exception as e:
+                logger.warning("ChiefElection wiring failed: %s", e)
+
         # Start memory bridge promotion loop (every ~100s)
         try:
             from .memory_bridge import MemoryBridge
@@ -2407,15 +2442,19 @@ class FleetNerveNATS:
                     return None
 
             def _get_supervisor(self):
-                """Lazy-init PersistentSupervisor singleton (state survives restart)."""
+                """Return daemon's singleton Supervisor instance."""
                 if Handler._supervisor is not None:
                     return Handler._supervisor
+                # Use daemon-level singleton (initialized in __init__)
+                if daemon._supervisor is not None:
+                    Handler._supervisor = daemon._supervisor
+                    return Handler._supervisor
+                # Fallback: lazy-init if daemon didn't create one
                 try:
                     from .supervisor_store import PersistentSupervisor
                     Handler._supervisor = PersistentSupervisor(node_id=daemon.node_id)
                     return Handler._supervisor
                 except ImportError:
-                    # Fallback to non-persistent supervisor
                     from .supervisor import Supervisor
                     Handler._supervisor = Supervisor(node_id=daemon.node_id)
                     return Handler._supervisor

@@ -30,6 +30,21 @@ def _fetch(path: str) -> dict | None:
         return None
 
 
+def _fetch_via_data_layer() -> dict | None:
+    """Fetch dashboard data via FleetDashboardData (sibling module).
+
+    Uses the structured data layer instead of raw HTTP, providing
+    richer data including truth ladder stats, overlays, and supervisor state.
+    Falls back to raw HTTP _fetch() on import/runtime failure.
+    """
+    try:
+        from multifleet.dashboard_data import FleetDashboardData
+        dd = FleetDashboardData()
+        return dd.snapshot()
+    except Exception:
+        return _fetch("/health")
+
+
 def _ago(s: int | float) -> str:
     s = int(s)
     if s < 60: return f"{s}s"
@@ -167,7 +182,7 @@ def main():
     try:
         with Live(build_dashboard(None), console=console, refresh_per_second=1, screen=True) as live:
             while not stop.is_set():
-                live.update(build_dashboard(_fetch("/health")))
+                live.update(build_dashboard(_fetch_via_data_layer()))
                 stop.wait(2)
     except KeyboardInterrupt:
         stop.set()

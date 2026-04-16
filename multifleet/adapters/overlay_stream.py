@@ -25,8 +25,9 @@ class OverlayStreamAdapter:
         adapter.push_probe_update(findings=3, blocking=1)
     """
 
-    def __init__(self, node_id: str = ""):
+    def __init__(self, node_id: str = "", supervisor=None):
         self._node_id = node_id or os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+        self._supervisor = supervisor  # Use injected singleton; avoids fresh Supervisor per call
         self._last_push: float = 0.0
         self._push_interval_s: float = 5.0
         self._stats = {"pushes": 0, "errors": 0}
@@ -56,10 +57,13 @@ class OverlayStreamAdapter:
         except Exception as e:
             logger.debug("Surgeon state collection failed: %s", e)
 
-        # 2. Supervisor state
+        # 2. Supervisor state (use injected singleton to preserve task state)
         try:
-            from multifleet.supervisor import Supervisor
-            sup = Supervisor(node_id=self._node_id)
+            sup = self._supervisor
+            if sup is None:
+                # Fallback: try to get daemon's singleton via module-level ref
+                from multifleet.supervisor import Supervisor
+                sup = Supervisor(node_id=self._node_id)
             active = sup.list_active()
             state["supervisor"] = {
                 "active_tasks": len(active),

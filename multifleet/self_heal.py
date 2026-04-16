@@ -30,26 +30,6 @@ logger = logging.getLogger("fleet_nats")
 
 from ._paths import REPO_ROOT
 
-# ── Redis channel health cache (memory module wire) ──
-# Persists per-peer channel health to Redis for cross-process visibility
-# and fast recovery after daemon restart.
-_redis_cache = None
-_REDIS_CHANNEL_HEALTH_KEY = "fleet:channel_health"
-_REDIS_CHANNEL_HEALTH_TTL = 600  # 10 min
-
-
-def _get_redis_cache():
-    """Lazy-load Redis client from memory.redis_cache (no-op if unavailable)."""
-    global _redis_cache
-    if _redis_cache is not None:
-        return _redis_cache
-    try:
-        from memory.redis_cache import get_redis_client
-        _redis_cache = get_redis_client()
-    except Exception:
-        _redis_cache = False  # sentinel: don't retry
-    return _redis_cache if _redis_cache else None
-
 SEED_DIR = "/tmp"
 
 
@@ -438,27 +418,10 @@ class SelfHealManager:
     # ── Channel Health Tracking ──
 
     def _update_channel_health(self, target: str, channel: str, status: str):
-        """Track per-peer channel health. Status: 'ok' or 'broken'.
-
-        Also persists to Redis for cross-process visibility and daemon restart recovery.
-        """
+        """Track per-peer channel health. Status: 'ok' or 'broken'."""
         if target not in self._nerve._channel_health:
             self._nerve._channel_health[target] = {ch: "ok" for ch in ALL_CHANNELS}
         self._nerve._channel_health[target][channel] = status
-
-        # Persist to Redis (best-effort, non-blocking)
-        try:
-            r = _get_redis_cache()
-            if r:
-                import json as _json
-                r.hset(
-                    _REDIS_CHANNEL_HEALTH_KEY,
-                    target,
-                    _json.dumps(self._nerve._channel_health[target]),
-                )
-                r.expire(_REDIS_CHANNEL_HEALTH_KEY, _REDIS_CHANNEL_HEALTH_TTL)
-        except Exception:
-            pass  # Zero silent failures: Redis is optional speed layer
 
     def _get_peer_health_score(self, target: str) -> tuple:
         """Returns (score, broken_list) for a peer. Max score = len(ALL_CHANNELS)."""
@@ -697,7 +660,184 @@ class SelfHealManager:
 
         self._release_repair_lock(target)
         logger.warning(f"Repair FAILED: all 4 levels exhausted for {target}")
+
+        # ── Degradation alert: notify fleet via guaranteed channels ──
+        # When a node can't self-resolve, it MUST NOT be silent.
+        # Use P7 git (guaranteed async) + broadcast assist request so
+        # other nodes can attempt resolution from their vantage point.
+        await self._alert_degradation(target, broken_channels, action)
+        await self._request_fleet_assist(target, broken_channels, action)
+
         return {"repaired": False, "level": 4, "reason": "all_levels_failed"}
+
+    # ── Degradation Alert & Fleet Assist ──
+
+    # Rate limit: max 1 degradation alert per target per 30 min
+    _degradation_cooldowns: dict[str, float] = {}
+    DEGRADATION_COOLDOWN_S = 1800  # 30 min
+
+    async def _alert_degradation(self, target: str, broken_channels: list, action: str):
+        """Alert fleet of unresolvable degradation via P7 git (guaranteed delivery).
+
+        This is NOT a repair message — it's a one-time degradation notice
+        committed to .fleet-messages/all/ so every node sees it on next pull.
+        Secrets are stripped from the payload before commit.
+        """
+        now = time.time()
+        cooldown_key = f"degrade:{target}"
+        if now - self._degradation_cooldowns.get(cooldown_key, 0) < self.DEGRADATION_COOLDOWN_S:
+            logger.debug(f"Degradation alert for {target} rate-limited")
+            return
+
+        self._degradation_cooldowns[cooldown_key] = now
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+        # Sanitize: only include channel names and node IDs — no IPs, keys, or payloads
+        safe_broken = [ch for ch in broken_channels if isinstance(ch, str)]
+        alert_content = (
+            f"# DEGRADATION ALERT\n\n"
+            f"- **Reporter**: {self._nerve.node_id}\n"
+            f"- **Target**: {target}\n"
+            f"- **Broken channels**: {', '.join(safe_broken)}\n"
+            f"- **Attempted action**: {action}\n"
+            f"- **All 4 repair levels exhausted** (L1 Notify → L2 Guide → L3 Assist → L4 Remote)\n"
+            f"- **Timestamp**: {ts}Z\n\n"
+            f"## Requested\n\n"
+            f"Any node with connectivity to `{target}` — please attempt repair.\n"
+            f"Check: SSH reachability, NATS tunnel, daemon process.\n"
+        )
+
+        # Write to .fleet-messages/all/ and git push (P7 guaranteed)
+        fleet_dir = REPO_ROOT / ".fleet-messages" / "all"
+        fleet_dir.mkdir(parents=True, exist_ok=True)
+        alert_file = fleet_dir / f"{ts}-degradation-{target}.md"
+        try:
+            alert_file.write_text(alert_content)
+            # Git add + commit + push (P7 guaranteed delivery)
+            subprocess.run(["git", "add", str(alert_file)],
+                           cwd=str(REPO_ROOT), capture_output=True, timeout=5)
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"fleet: DEGRADATION {target} — {len(safe_broken)} channels down, assist requested"],
+                cwd=str(REPO_ROOT), capture_output=True, timeout=10)
+            subprocess.run(["git", "push", "origin", "main"],
+                           cwd=str(REPO_ROOT), capture_output=True, timeout=15)
+            logger.warning(
+                f"DEGRADATION ALERT committed via P7 git for {target}: "
+                f"broken={safe_broken}, action={action}"
+            )
+        except Exception as e:
+            logger.error(f"Degradation alert P7 git failed: {e}")
+            # Fallback: write seed file so local node at least has record
+            try:
+                seed = Path(SEED_DIR) / f"fleet-degradation-{target}.md"
+                seed.write_text(alert_content)
+                logger.info(f"Degradation alert written to seed file: {seed}")
+            except Exception as e2:
+                logger.error(f"Degradation alert seed fallback also failed: {e2}")
+
+    async def _request_fleet_assist(self, target: str, broken_channels: list, action: str):
+        """Broadcast assist request to all online peers.
+
+        Other nodes may have different network paths to the target
+        (e.g., node B can SSH to node C even if node A cannot).
+        Uses NATS broadcast if available, falls back to seed files.
+        """
+        assist_payload = {
+            "type": "fleet_assist",
+            "from": self._nerve.node_id,
+            "to": "all",
+            "payload": {
+                "subject": "assist-request",
+                "body": json.dumps({
+                    "target": target,
+                    "broken_channels": broken_channels,
+                    "action": action,
+                    "reporter": self._nerve.node_id,
+                    "reason": "all_repair_levels_exhausted",
+                }),
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+        }
+
+        # Try NATS broadcast first (if connected)
+        delivered = False
+        if self._nerve.nc and self._nerve.nc.is_connected:
+            try:
+                await self._nerve.send("all", "fleet_assist", "assist-request",
+                                       f"Repair exhausted for {target}. "
+                                       f"Broken: {broken_channels}. "
+                                       f"Any node with access — please attempt repair.")
+                delivered = True
+                logger.info(f"Fleet assist request broadcast via NATS for {target}")
+            except Exception as e:
+                logger.debug(f"Fleet assist NATS broadcast failed: {e}")
+
+        # Fallback: write seed files for each known peer
+        if not delivered:
+            for peer_id in self._nerve._peers_config:
+                if peer_id in (self._nerve.node_id, target):
+                    continue
+                try:
+                    seed = Path(SEED_DIR) / f"fleet-seed-{peer_id}.md"
+                    with open(seed, "a") as f:
+                        f.write(
+                            f"\n## [ASSIST REQUEST] from {self._nerve.node_id}\n\n"
+                            f"Target `{target}` unreachable after L1-L4 repair.\n"
+                            f"Broken channels: {broken_channels}\n"
+                            f"Please attempt repair if you have connectivity.\n\n---\n"
+                        )
+                except Exception:
+                    pass
+            logger.info(f"Fleet assist request written to seed files for {target}")
+
+    async def _handle_fleet_assist(self, message: dict):
+        """Handle incoming fleet_assist request from another node.
+
+        If this node can reach the target, attempt repair.
+        Prevents cascade: only acts if we haven't already tried recently.
+        """
+        payload = message.get("payload", {})
+        body_str = payload.get("body", "{}")
+        try:
+            body = json.loads(body_str) if isinstance(body_str, str) else body_str
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        target = body.get("target")
+        reporter = body.get("reporter")
+        if not target or target == self._nerve.node_id:
+            return
+        if reporter == self._nerve.node_id:
+            return  # Don't assist our own request
+
+        # Check cooldown — don't re-attempt if we already tried recently
+        cooldown_key = f"assist:{target}"
+        now = time.time()
+        if now - self._degradation_cooldowns.get(cooldown_key, 0) < self.DEGRADATION_COOLDOWN_S:
+            logger.debug(f"Fleet assist for {target} skipped — cooldown active")
+            return
+
+        self._degradation_cooldowns[cooldown_key] = now
+        logger.info(f"Fleet assist: attempting repair of {target} (requested by {reporter})")
+
+        broken = body.get("broken_channels", [])
+        action = body.get("action", "restart_nats")
+
+        # Attempt our own repair escalation
+        result = await self.repair_with_escalation(target, broken, action)
+        if result and result.get("repaired"):
+            # Notify fleet of success
+            try:
+                await self._nerve.send(
+                    "all", "fleet_assist_result", "assist-resolved",
+                    f"Node {self._nerve.node_id} repaired {target} "
+                    f"(level {result.get('level')}) — originally reported by {reporter}")
+                logger.info(f"Fleet assist SUCCESS: {target} repaired at level {result.get('level')}")
+            except Exception:
+                pass
+        else:
+            logger.info(f"Fleet assist: could not repair {target} from this node either")
 
     # ── Watchdog Loop ──
 
@@ -739,6 +879,22 @@ class SelfHealManager:
             except Exception as e:
                 logger.debug(f"Watchdog cycle error: {e}")
             await asyncio.sleep(30)
+
+    async def _watchdog_run_maintenance(self):
+        """Hourly store maintenance: expire old messages, WAL prune, checkpoint."""
+        now = time.time()
+        if now - self._last_maintenance_run < self._maintenance_interval:
+            return
+        try:
+            from multifleet.store import run_maintenance
+            store = self._nerve._store
+            if store is not None:
+                result = run_maintenance(store)
+                logger.info("Maintenance complete: %s", result)
+            self._last_maintenance_run = now
+        except Exception as e:
+            logger.warning("Maintenance failed: %s", e)
+            self._last_maintenance_run = now  # avoid retry storm
 
     async def _watchdog_check_idle(self):
         """Detect idle state for this node and peers, trigger proactive work discovery.

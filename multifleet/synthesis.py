@@ -245,10 +245,10 @@ class ChiefSynthesis:
                     from multifleet.wisdom_consumer import WisdomAccuracyTracker
                     accuracy = WisdomAccuracyTracker()
                     accuracy.resolve_outcome(flagged_ids, decision_succeeded=success)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Wisdom accuracy resolve failed: %s", e)
+        except Exception as e:
+            logger.debug("Outcome tracking failed: %s", e)
         return result
 
     def _basic_confidence_analyzer(

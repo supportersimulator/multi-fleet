@@ -11,7 +11,10 @@ consumer provides sub-second state updates.
 import logging
 import time
 from collections import deque
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from multifleet.eventbus import FleetEventBus
 
 logger = logging.getLogger("fleet-nerve.dashboard-events")
 
@@ -28,7 +31,7 @@ class DashboardEventConsumer:
     Writes happen only from EventBus dispatch (single-threaded in asyncio loop).
     """
 
-    def __init__(self, bus=None):
+    def __init__(self, bus: "Optional[FleetEventBus]" = None):
         self._bus = bus
         self._live_state = {
             "peers_online": {},
@@ -52,10 +55,24 @@ class DashboardEventConsumer:
         self._bus.on("fleet.race.*", self._on_race_event)
         logger.info("DashboardEventConsumer subscribed to fleet.* events")
 
-    def attach(self, bus) -> None:
+    def attach(self, bus: "FleetEventBus") -> None:
         """Attach to an EventBus after construction (for lazy init)."""
         self._bus = bus
         self._subscribe()
+
+    @classmethod
+    def create_attached(cls) -> "DashboardEventConsumer":
+        """Factory: create consumer attached to the default FleetEventBus singleton.
+
+        Lazy import avoids circular deps. Returns unattached consumer if
+        FleetEventBus is unavailable.
+        """
+        try:
+            from multifleet.eventbus import FleetEventBus
+            bus = FleetEventBus()
+            return cls(bus=bus)
+        except Exception:
+            return cls()
 
     # ── Event handlers ──
 

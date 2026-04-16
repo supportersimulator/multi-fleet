@@ -64,11 +64,14 @@ class AcceptanceGate:
     """
 
     def __init__(self, strict: bool = False, probe_engine=None, evidence_ledger=None,
-                 surgeon_adapter: SurgeonAdapter = None):
+                 surgeon_adapter: SurgeonAdapter = None, gains_gate=None,
+                 overlay_manager=None, **_extra_kwargs):
         self._strict = strict
         self._probe_engine = probe_engine
         self._evidence_ledger = evidence_ledger
         self._surgeon: SurgeonAdapter = surgeon_adapter or SurgeonAdapter()
+        self._gains_gate = gains_gate
+        self._overlay_manager = overlay_manager
 
     def evaluate(
         self,

@@ -552,6 +552,35 @@ class FleetTheater:
         c.print(Panel(body, border_style="bright_blue", padding=(0, 2)))
         c.print()
 
+    # ── Data-Enriched Convenience Methods ─────────────────────────
+
+    def show_truth_ladder(self):
+        """Fetch truth ladder stats from sibling module and display."""
+        try:
+            from multifleet.truth_ladder import TruthLadder
+            ladder = TruthLadder()
+            self.truth_ladder_display(ladder.stats)
+        except Exception as e:
+            if self._rich:
+                self._console.print(f"[dim]Truth ladder unavailable: {e}[/]")
+            else:
+                _plain_print(f"Truth ladder unavailable: {e}")
+
+    def show_evidence_chain(self, limit: int = 20):
+        """Fetch recent evidence entries from sibling module and display."""
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            ledger = EvidenceLedger()
+            entries = ledger.recent(limit=limit)
+            verified = ledger.verify_chain() if hasattr(ledger, 'verify_chain') else True
+            entry_dicts = [e if isinstance(e, dict) else e.to_dict() if hasattr(e, 'to_dict') else vars(e) for e in entries]
+            self.evidence_chain(entry_dicts, verified)
+        except Exception as e:
+            if self._rich:
+                self._console.print(f"[dim]Evidence chain unavailable: {e}[/]")
+            else:
+                _plain_print(f"Evidence chain unavailable: {e}")
+
     # ── Doctor Display ──────────────────────────────────────────────
 
     def doctor_display(self, checks: list, summary: str = ""):

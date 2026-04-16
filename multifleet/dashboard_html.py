@@ -117,7 +117,7 @@ def _render_liaison(snapshot: dict) -> str:
 </section>"""
 
 
-def render_dashboard(snapshot: dict, *, prefer_web: bool = True) -> str:
+def render_dashboard(snapshot: dict = None, *, prefer_web: bool = True) -> str:
     """Render fleet status as a complete HTML page.
 
     When prefer_web=True (default), delegates to the real-time web dashboard
@@ -127,7 +127,8 @@ def render_dashboard(snapshot: dict, *, prefer_web: bool = True) -> str:
     Falls back to the static snapshot renderer if the web dashboard is unavailable.
 
     Args:
-        snapshot: Dict from FleetStatusAggregator.snapshot()
+        snapshot: Dict from FleetStatusAggregator.snapshot(). If None,
+            auto-fetches from FleetStatusAggregator (sibling module).
         prefer_web: If True, use the real-time web dashboard when available
 
     Returns:
@@ -139,6 +140,14 @@ def render_dashboard(snapshot: dict, *, prefer_web: bool = True) -> str:
             return build_dashboard_html()
         except ImportError:
             pass
+
+    # Auto-fetch snapshot from FleetStatusAggregator if not provided
+    if snapshot is None:
+        try:
+            from multifleet.status_aggregator import FleetStatusAggregator
+            snapshot = FleetStatusAggregator().snapshot()
+        except Exception:
+            snapshot = {}
 
     # Fallback: static snapshot (original implementation)
     return _render_static_dashboard(snapshot)
