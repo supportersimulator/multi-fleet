@@ -5,8 +5,13 @@ import pytest
 from multifleet.dashboard_components import (
     COMPONENTS,
     SHARED_CSS,
+    CorrigibilityGauge,
     EvidenceTimeline,
+    FleetConstellation,
+    MemoryHeatMap,
+    ProbeStatusGrid,
     QuorumPulse,
+    SessionGoldStream,
     SurgeonFeed,
     VitalSignsBar,
     get_component_css,
@@ -248,12 +253,22 @@ class TestComponentRegistry:
         assert "surgeon-feed" in COMPONENTS
         assert "quorum-pulse" in COMPONENTS
         assert "evidence-timeline" in COMPONENTS
+        assert "fleet-constellation" in COMPONENTS
+        assert "memory-heatmap" in COMPONENTS
+        assert "probe-status-grid" in COMPONENTS
+        assert "corrigibility-gauge" in COMPONENTS
+        assert "session-gold-stream" in COMPONENTS
 
     def test_registry_maps_to_classes(self):
         assert COMPONENTS["vitals"] is VitalSignsBar
         assert COMPONENTS["surgeon-feed"] is SurgeonFeed
         assert COMPONENTS["quorum-pulse"] is QuorumPulse
         assert COMPONENTS["evidence-timeline"] is EvidenceTimeline
+        assert COMPONENTS["fleet-constellation"] is FleetConstellation
+        assert COMPONENTS["memory-heatmap"] is MemoryHeatMap
+        assert COMPONENTS["probe-status-grid"] is ProbeStatusGrid
+        assert COMPONENTS["corrigibility-gauge"] is CorrigibilityGauge
+        assert COMPONENTS["session-gold-stream"] is SessionGoldStream
 
     def test_render_all_components_standalone(self):
         html = render_all_components()
@@ -262,6 +277,11 @@ class TestComponentRegistry:
         assert "Surgeon Feed" in html
         assert "Quorum Pulse" in html
         assert "Evidence Timeline" in html
+        assert "Fleet Constellation" in html
+        assert "Memory Heat Map" in html
+        assert "Probe Status Grid" in html
+        assert "Corrigibility Gauge" in html
+        assert "Session Gold Stream" in html
         assert "THEATRICAL DASHBOARD" in html
 
     def test_render_all_with_custom_data(self):
@@ -389,3 +409,260 @@ class TestFlaskRegistration:
             resp = client.get("/dashboard/components")
             assert resp.status_code == 200
             assert b"THEATRICAL DASHBOARD" in resp.data
+
+
+# ── FleetConstellation ────────────────────────────────────────────
+
+
+class TestFleetConstellation:
+    def test_sample_data_has_required_keys(self):
+        data = FleetConstellation.get_sample_data()
+        assert "nodes" in data
+        assert "connections" in data
+        assert len(data["nodes"]) == 3
+        assert len(data["connections"]) == 3
+
+    def test_render_contains_node_ids(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert "mac1" in html
+        assert "mac2" in html
+        assert "mac3" in html
+
+    def test_render_contains_header(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert "Fleet Constellation" in html
+
+    def test_render_contains_svg(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert "<svg" in html
+        assert "<circle" in html
+        assert "<line" in html
+
+    def test_render_contains_connection_channels(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert "P1" in html
+        assert "P7" in html
+
+    def test_render_contains_status_labels(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert "ONLINE" in html
+        assert "DEGRADED" in html
+        assert "OFFLINE" in html
+
+    def test_render_empty_nodes(self):
+        html = FleetConstellation().render({"nodes": [], "connections": []})
+        assert "No topology data" in html
+
+    def test_component_wrapper_class(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert 'tc-fleet-constellation' in html
+
+    def test_render_health_percentages(self):
+        html = FleetConstellation().render(FleetConstellation.get_sample_data())
+        assert "90%" in html
+        assert "40%" in html
+        assert "10%" in html
+
+
+# ── MemoryHeatMap ─────────────────────────────────────────────────
+
+
+class TestMemoryHeatMap:
+    def test_sample_data_has_topics(self):
+        data = MemoryHeatMap.get_sample_data()
+        assert "topics" in data
+        assert len(data["topics"]) == 7
+
+    def test_render_contains_header(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert "Memory Heat Map" in html
+
+    def test_render_contains_topic_names(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert "FLEET" in html
+        assert "SURGEONS" in html
+        assert "WEBHOOK" in html
+        assert "SYNAPTIC" in html
+
+    def test_render_contains_counts(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert "347" in html
+        assert "412" in html
+
+    def test_render_contains_density_bars(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert "tc-fill" in html
+
+    def test_render_contains_clickable_expand(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert "onclick" in html
+
+    def test_render_empty_topics(self):
+        html = MemoryHeatMap().render({"topics": []})
+        assert "No topic data" in html
+
+    def test_component_wrapper_class(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert 'tc-memory-heatmap' in html
+
+    def test_render_recent_entries_hidden(self):
+        html = MemoryHeatMap().render(MemoryHeatMap.get_sample_data())
+        assert 'display:none' in html
+
+
+# ── ProbeStatusGrid ───────────────────────────────────────────────
+
+
+class TestProbeStatusGrid:
+    def test_sample_data_has_18_probes(self):
+        data = ProbeStatusGrid.get_sample_data()
+        assert "probes" in data
+        assert len(data["probes"]) == 18
+
+    def test_render_contains_header(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert "Probe Status Grid" in html
+
+    def test_render_contains_probe_names(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert "mirror_drift" in html
+        assert "webhook_health" in html
+        assert "constitutional_compliance" in html
+
+    def test_render_contains_summary_counts(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert "passing" in html
+        assert "stale" in html
+        assert "failing" in html
+
+    def test_render_contains_score_percentages(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert "%" in html
+
+    def test_render_uses_grid_layout(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert "grid-template-columns" in html
+
+    def test_render_empty_probes(self):
+        html = ProbeStatusGrid().render({"probes": []})
+        assert "No probe data" in html
+
+    def test_component_wrapper_class(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert 'tc-probe-status-grid' in html
+
+    def test_render_status_icons(self):
+        html = ProbeStatusGrid().render(ProbeStatusGrid.get_sample_data())
+        assert "\u2713" in html  # checkmark for passing
+        assert "\u2717" in html  # x for failing
+
+
+# ── CorrigibilityGauge ────────────────────────────────────────────
+
+
+class TestCorrigibilityGauge:
+    def test_sample_data_has_required_keys(self):
+        data = CorrigibilityGauge.get_sample_data()
+        assert "score" in data
+        assert "trend" in data
+        assert "history" in data
+        assert "factors" in data
+        assert len(data["history"]) == 5
+        assert len(data["factors"]) == 3
+
+    def test_render_contains_header(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "Corrigibility Gauge" in html
+
+    def test_render_contains_svg_gauge(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "<svg" in html
+        assert "<circle" in html
+
+    def test_render_contains_score(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "88%" in html or "87%" in html
+
+    def test_render_contains_trend_arrow(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "\u2191" in html  # up arrow
+
+    def test_render_contains_corrigibility_label(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "CORRIGIBILITY" in html
+
+    def test_render_contains_factor_names(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "Surgeon consensus" in html
+        assert "Evidence backing" in html
+        assert "Constitutional compliance" in html
+
+    def test_render_contains_history_sparkline(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert "polyline" in html
+        assert "Last 5 readings" in html
+
+    def test_render_trend_down(self):
+        data = CorrigibilityGauge.get_sample_data()
+        data["trend"] = "down"
+        html = CorrigibilityGauge().render(data)
+        assert "\u2193" in html  # down arrow
+
+    def test_component_wrapper_class(self):
+        html = CorrigibilityGauge().render(CorrigibilityGauge.get_sample_data())
+        assert 'tc-corrigibility-gauge' in html
+
+
+# ── SessionGoldStream ─────────────────────────────────────────────
+
+
+class TestSessionGoldStream:
+    def test_sample_data_has_nuggets(self):
+        data = SessionGoldStream.get_sample_data()
+        assert "nuggets" in data
+        assert len(data["nuggets"]) >= 5
+
+    def test_render_contains_header(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        assert "Session Gold Stream" in html
+
+    def test_render_contains_severity_labels(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        assert "CRIT" in html
+        assert "ARCH" in html
+        assert "QUAL" in html
+
+    def test_render_contains_pass_names(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        assert "eval_webhook_quality" in html
+        assert "quality_cardiologist" in html
+        assert "corrigibility_gate" in html
+
+    def test_render_contains_findings(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        assert "S2 professor injection" in html
+
+    def test_render_contains_summary_counts(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        # Should show count of each severity
+        assert "2 CRIT" in html
+        assert "2 ARCH" in html
+
+    def test_render_contains_slide_animation(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        assert "tc-slide-in" in html
+
+    def test_render_sorted_newest_first(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        # session_gold (most recent) should appear before cv_sentinel (older)
+        pos_recent = html.find("session_gold")
+        pos_older = html.find("cv_sentinel")
+        assert pos_recent < pos_older
+
+    def test_render_empty_nuggets(self):
+        html = SessionGoldStream().render({"nuggets": []})
+        assert "No gold mined yet" in html
+
+    def test_component_wrapper_class(self):
+        html = SessionGoldStream().render(SessionGoldStream.get_sample_data())
+        assert 'tc-session-gold-stream' in html
