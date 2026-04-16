@@ -17,7 +17,9 @@ import time
 import urllib.request
 import urllib.error
 
-DAEMON = "http://127.0.0.1:8855"
+from .service_urls import get_fleet_daemon_url
+
+DAEMON = get_fleet_daemon_url()
 
 
 # ---------------------------------------------------------------------------

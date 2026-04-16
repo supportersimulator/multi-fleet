@@ -542,6 +542,18 @@ class SelfHealManager:
             logger.info(f"Repair skipped for {target}: repair already in progress")
             return {"repaired": False, "reason": "repair_locked"}
 
+        # Wire: search learning_store for prior repair knowledge
+        try:
+            fb = _get_memory_feedback()
+            prior = fb.search_prior_repairs(f"{action} {target} {' '.join(broken_channels)}")
+            if prior:
+                logger.info(
+                    f"Repair: found {len(prior)} prior repair(s) for {target}/{action}: "
+                    + "; ".join(p.get("title", "?")[:60] for p in prior[:3])
+                )
+        except Exception:
+            pass  # never block fleet ops
+
         logger.info(f"Repair escalation for {target}: broken={broken_channels}, action={action}")
 
         # Level 1: NOTIFY -- silent repair msg (no seed/keystroke), 2min wait

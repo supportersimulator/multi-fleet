@@ -219,7 +219,8 @@ class SessionManager:
         # Try to detect primary session from daemon health endpoint
         try:
             import urllib.request
-            resp = urllib.request.urlopen("http://127.0.0.1:8855/health", timeout=2)
+            from .service_urls import get_fleet_daemon_url
+            resp = urllib.request.urlopen(f"{get_fleet_daemon_url()}/health", timeout=2)
             health = json.loads(resp.read())
             sessions = health.get("sessions", [])
             if sessions:

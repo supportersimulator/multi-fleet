@@ -25,12 +25,13 @@ _MEMORY_DIR = _REPO_ROOT / "memory"
 # Lazy-loaded flags -- avoid import cost at module level
 _auto_capture = None
 _bugfix_tracker = None
+_learning_store = None
 _imports_attempted = False
 
 
 def _ensure_imports():
     """Lazy-load memory modules. Called once, caches results."""
-    global _auto_capture, _bugfix_tracker, _imports_attempted
+    global _auto_capture, _bugfix_tracker, _learning_store, _imports_attempted
     if _imports_attempted:
         return
     _imports_attempted = True
@@ -51,6 +52,12 @@ def _ensure_imports():
         _bugfix_tracker = bt
     except Exception as exc:
         logger.debug("memory.bugfix_tracker unavailable: %s", exc)
+
+    try:
+        from memory.learning_store import get_learning_store
+        _learning_store = get_learning_store()
+    except Exception as exc:
+        logger.debug("memory.learning_store unavailable: %s", exc)
 
 
 class FleetMemoryFeedback:
@@ -106,6 +113,15 @@ class FleetMemoryFeedback:
             self.record_success_pattern(channel, action, target)
         else:
             result_id = self._record_failure(task_desc, detail_str, channel, action, target)
+
+        # Wire: store in learning_store for cross-session searchability
+        self._store_learning(
+            learning_type="fix" if success else "gotcha",
+            title=task_desc,
+            content=detail_str,
+            tags=["fleet", "repair", channel, action],
+            success=success,
+        )
 
         return result_id
 
@@ -231,6 +247,55 @@ class FleetMemoryFeedback:
                 engine.close()
         except Exception as exc:
             logger.debug("record_success_pattern failed: %s", exc)
+
+    def search_prior_repairs(self, query: str, limit: int = 5) -> list[dict]:
+        """Search learning_store for prior repair knowledge.
+
+        Used by self_heal before attempting a repair to check if we've
+        seen this problem before and what worked/failed.
+
+        Args:
+            query: Search string (e.g. "P1_nats restart mac2")
+            limit: Max results to return
+
+        Returns:
+            List of matching learning dicts, or empty list if unavailable.
+        """
+        _ensure_imports()
+        if not _learning_store:
+            return []
+        try:
+            return _learning_store.query(query, limit=limit)
+        except Exception as exc:
+            logger.debug("learning_store search failed: %s", exc)
+            return []
+
+    def _store_learning(
+        self,
+        learning_type: str,
+        title: str,
+        content: str,
+        tags: list[str],
+        success: bool,
+    ) -> None:
+        """Store a repair outcome in learning_store for future searchability.
+
+        Best-effort: never raises, never blocks fleet ops.
+        """
+        _ensure_imports()
+        if not _learning_store:
+            return
+        try:
+            _learning_store.store_learning({
+                "type": learning_type,
+                "title": title,
+                "content": content,
+                "tags": tags,
+                "source": "fleet_memory_feedback",
+                "metadata": {"success": success},
+            })
+        except Exception as exc:
+            logger.debug("learning_store store failed: %s", exc)
 
     # -- Internal helpers --
 

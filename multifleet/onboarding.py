@@ -16,8 +16,9 @@ from typing import Optional
 logger = logging.getLogger("fleet-nerve.onboarding")
 
 from ._paths import REPO_ROOT
+from .service_urls import get_fleet_daemon_url
 
-DAEMON_URL = "http://127.0.0.1:8855"
+DAEMON_URL = get_fleet_daemon_url()
 NATS_PORT = 4222
 CONFIG_PATH = REPO_ROOT / ".multifleet" / "config.json"
 
