@@ -26,6 +26,8 @@ import json
 import logging
 import os
 import queue
+import secrets
+import sys
 import threading
 import time
 from typing import Optional
@@ -35,6 +37,10 @@ logger = logging.getLogger("fleet-nerve.web-server")
 DEFAULT_PORT = 8856
 DAEMON_PORT = int(os.environ.get("FLEET_DAEMON_PORT", "8855"))
 EVENTBUS_PORT = int(os.environ.get("FLEET_EVENTBUS_PORT", "8031"))
+
+# ── Authentication ──
+_fleet_api_token: str = os.environ.get("FLEET_API_TOKEN", "") or secrets.token_urlsafe(32)
+ALLOWED_ORIGINS: str = os.environ.get("FLEET_CORS_ORIGIN", "http://127.0.0.1")
 
 # ── Shared state for SSE ──
 _sse_queues: list[queue.Queue] = []
@@ -165,8 +171,49 @@ class FleetWebHandler(BaseHTTPRequestHandler):
     daemon_port = DAEMON_PORT
     eventbus_port = EVENTBUS_PORT
 
+    # Paths exempt from bearer token auth (monitoring endpoints)
+    AUTH_EXEMPT_PATHS = frozenset({"/health", "/metrics"})
+
+    def _check_auth(self, path: str) -> bool:
+        """Check bearer token for protected routes.
+
+        Returns True if authorized, False if 401 was sent.
+        """
+        if path in self.AUTH_EXEMPT_PATHS:
+            return True
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header == f"Bearer {_fleet_api_token}":
+            return True
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        body = json.dumps({"error": "Unauthorized", "detail": "Missing or invalid Authorization: Bearer <token> header"})
+        self.wfile.write(body.encode("utf-8"))
+        return False
+
+    @staticmethod
+    def _parse_int_param(raw: str, default: int, lo: int, hi: int) -> int:
+        """Parse and clamp an integer query parameter."""
+        try:
+            val = int(raw)
+        except (ValueError, TypeError):
+            return default
+        return max(lo, min(hi, val))
+
+    @staticmethod
+    def _parse_float_param(raw: str, default: float, lo: float, hi: float) -> float:
+        """Parse and clamp a float query parameter."""
+        try:
+            val = float(raw)
+        except (ValueError, TypeError):
+            return default
+        return max(lo, min(hi, val))
+
     def do_GET(self):
         path = self.path.split("?")[0]  # strip query params
+
+        if not self._check_auth(path):
+            return
 
         if path in ("/", "/dashboard"):
             self._serve_dashboard()
@@ -256,7 +303,7 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGINS)
         self.end_headers()
 
         q: queue.Queue = queue.Queue(maxsize=100)
@@ -327,10 +374,10 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         elif sub == "fleet-status":
             self._serve_json(panel_server.fleet_status_panel())
         elif sub == "evidence-timeline":
-            hours = float(params.get("hours", "24"))
+            hours = self._parse_float_param(params.get("hours", "24"), 24.0, 0.1, 8760.0)
             self._serve_json(panel_server.evidence_timeline_panel(hours=hours))
         elif sub == "synthesis-decisions":
-            limit = int(params.get("limit", "20"))
+            limit = self._parse_int_param(params.get("limit", "20"), 20, 1, 10000)
             self._serve_json(panel_server.synthesis_decisions_panel(limit=limit))
         elif sub == "probe-findings":
             self._serve_json(panel_server.probe_findings_panel())
@@ -487,7 +534,7 @@ class FleetWebHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGINS)
         self.end_headers()
         self.wfile.write(body)
 
@@ -526,6 +573,9 @@ def start_fleet_server(port: int = DEFAULT_PORT, daemon_port: int = DAEMON_PORT,
 
     _server_instance = server
     _server_start_time = time.time()
+
+    # Print token to stderr so operator can use it
+    print(f"[fleet-web] API token: {_fleet_api_token}", file=sys.stderr)
 
     def _run():
         logger.info("Fleet web server started on port %d", port)
