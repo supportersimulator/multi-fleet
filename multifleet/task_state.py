@@ -17,6 +17,7 @@ Usage:
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from enum import Enum
@@ -56,6 +57,7 @@ class TaskStateMachine:
     def __init__(self, db_path: str = None):
         self.db_path = str(db_path or DEFAULT_DB)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
         self._init_tables()
 
     def _conn(self) -> sqlite3.Connection:
@@ -105,65 +107,67 @@ class TaskStateMachine:
         """Create a new task. Returns task_id."""
         task_id = str(uuid.uuid4())
         now = time.time()
-        conn = self._conn()
-        try:
-            conn.execute(
-                """INSERT INTO task_states
-                   (id, chain_id, chain_step, node_id, origin_node, state, payload,
-                    lease_s, max_retries, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)""",
-                (task_id, chain_id, chain_step, node_id, origin_node,
-                 json.dumps(payload), lease_s, max_retries, now, now),
-            )
-            conn.execute(
-                "INSERT INTO task_audit (task_id, old_state, new_state, reason, timestamp) "
-                "VALUES (?, NULL, 'created', 'new', ?)",
-                (task_id, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    """INSERT INTO task_states
+                       (id, chain_id, chain_step, node_id, origin_node, state, payload,
+                        lease_s, max_retries, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)""",
+                    (task_id, chain_id, chain_step, node_id, origin_node,
+                     json.dumps(payload), lease_s, max_retries, now, now),
+                )
+                conn.execute(
+                    "INSERT INTO task_audit (task_id, old_state, new_state, reason, timestamp) "
+                    "VALUES (?, NULL, 'created', 'new', ?)",
+                    (task_id, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         logger.info("Task %s created: %s → %s", task_id[:8], origin_node, node_id)
         return task_id
 
     def transition(self, task_id: str, new_state: TaskState, reason: str = "") -> bool:
         """Transition a task to a new state. Returns True on success."""
         now = time.time()
-        conn = self._conn()
-        try:
-            row = conn.execute(
-                "SELECT state, retries, max_retries FROM task_states WHERE id = ?",
-                (task_id,)
-            ).fetchone()
-            if not row:
-                logger.warning("Task %s not found for transition", task_id[:8])
-                return False
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT state, retries, max_retries FROM task_states WHERE id = ?",
+                    (task_id,)
+                ).fetchone()
+                if not row:
+                    logger.warning("Task %s not found for transition", task_id[:8])
+                    return False
 
-            old = TaskState(row["state"])
-            allowed = TRANSITIONS.get(old, set())
-            if new_state not in allowed:
-                logger.warning("Invalid transition %s: %s → %s", task_id[:8], old.value, new_state.value)
-                return False
+                old = TaskState(row["state"])
+                allowed = TRANSITIONS.get(old, set())
+                if new_state not in allowed:
+                    logger.warning("Invalid transition %s: %s → %s", task_id[:8], old.value, new_state.value)
+                    return False
 
-            updates = {"state": new_state.value, "updated_at": now}
-            if new_state == TaskState.IN_PROGRESS:
-                updates["leased_at"] = now
-            elif new_state in TERMINAL_STATES:
-                updates["completed_at"] = now
-            elif new_state == TaskState.ASSIGNED and old == TaskState.STALE:
-                updates["retries"] = row["retries"] + 1
+                updates = {"state": new_state.value, "updated_at": now}
+                if new_state == TaskState.IN_PROGRESS:
+                    updates["leased_at"] = now
+                elif new_state in TERMINAL_STATES:
+                    updates["completed_at"] = now
+                elif new_state == TaskState.ASSIGNED and old == TaskState.STALE:
+                    updates["retries"] = row["retries"] + 1
 
-            set_clause = ", ".join(f"{k} = ?" for k in updates)
-            vals = list(updates.values()) + [task_id]
-            conn.execute(f"UPDATE task_states SET {set_clause} WHERE id = ?", vals)
-            conn.execute(
-                "INSERT INTO task_audit (task_id, old_state, new_state, reason, timestamp) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (task_id, old.value, new_state.value, reason, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+                set_clause = ", ".join(f"{k} = ?" for k in updates)
+                vals = list(updates.values()) + [task_id]
+                conn.execute(f"UPDATE task_states SET {set_clause} WHERE id = ?", vals)
+                conn.execute(
+                    "INSERT INTO task_audit (task_id, old_state, new_state, reason, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (task_id, old.value, new_state.value, reason, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
         logger.info("Task %s: %s → %s (%s)", task_id[:8], old.value, new_state.value, reason)
         return True

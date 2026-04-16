@@ -13,6 +13,7 @@ Layers:
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -75,6 +76,7 @@ class TruthLadder:
         self.db_path = str(db_path or DEFAULT_DB)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn_cache: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -218,57 +220,70 @@ class TruthLadder:
     # ── Internal ──
 
     def _insert(self, entry: TruthEntry):
-        with self._conn() as conn:
-            conn.execute(
-                """INSERT INTO truth_entries
-                   (id, layer, title, content, evidence_refs, created_at,
-                    promoted_at, promoted_from, promoted_by, status, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entry.id, entry.layer, entry.title, entry.content,
-                 json.dumps(entry.evidence_refs), entry.created_at,
-                 entry.promoted_at, entry.promoted_from, entry.promoted_by,
-                 entry.status, json.dumps(entry.metadata)),
-            )
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT INTO truth_entries
+                       (id, layer, title, content, evidence_refs, created_at,
+                        promoted_at, promoted_from, promoted_by, status, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (entry.id, entry.layer, entry.title, entry.content,
+                     json.dumps(entry.evidence_refs), entry.created_at,
+                     entry.promoted_at, entry.promoted_from, entry.promoted_by,
+                     entry.status, json.dumps(entry.metadata)),
+                )
 
     def _promote(self, source_id: str, expected_layer: str, target_layer: str,
                  evidence_refs: list[str] = None, promoted_by: str = "") -> TruthEntry:
-        source = self.get(source_id)
-        if not source:
-            raise ValueError(f"Entry not found: {source_id}")
-        if source.layer != expected_layer:
-            raise ValueError(
-                f"Cannot promote from {source.layer} to {target_layer}. "
-                f"Expected source layer: {expected_layer}"
-            )
-        if source.status != "active":
-            raise ValueError(f"Entry {source_id} is not active (status={source.status})")
-        valid_target = VALID_PROMOTIONS.get(expected_layer)
-        if valid_target != target_layer:
-            raise ValueError(f"Invalid promotion: {expected_layer} -> {target_layer}")
+        with self._lock:
+            source = self.get(source_id)
+            if not source:
+                raise ValueError(f"Entry not found: {source_id}")
+            if source.layer != expected_layer:
+                raise ValueError(
+                    f"Cannot promote from {source.layer} to {target_layer}. "
+                    f"Expected source layer: {expected_layer}"
+                )
+            if source.status != "active":
+                raise ValueError(f"Entry {source_id} is not active (status={source.status})")
+            valid_target = VALID_PROMOTIONS.get(expected_layer)
+            if valid_target != target_layer:
+                raise ValueError(f"Invalid promotion: {expected_layer} -> {target_layer}")
 
-        # Create promoted entry
-        now = time.time()
-        promoted = TruthEntry(
-            id=str(uuid.uuid4()),
-            layer=target_layer,
-            title=source.title,
-            content=source.content,
-            evidence_refs=evidence_refs or [],
-            created_at=now,
-            promoted_at=now,
-            promoted_from=source_id,
-            promoted_by=promoted_by,
-            status="active",
-            metadata={**source.metadata, "promotion_chain": f"{expected_layer}->{target_layer}"},
-        )
-        self._insert(promoted)
-
-        # Mark source as promoted
-        with self._conn() as conn:
-            conn.execute(
-                "UPDATE truth_entries SET status = 'promoted' WHERE id = ?",
-                (source_id,),
+            # Create promoted entry
+            now = time.time()
+            promoted = TruthEntry(
+                id=str(uuid.uuid4()),
+                layer=target_layer,
+                title=source.title,
+                content=source.content,
+                evidence_refs=evidence_refs or [],
+                created_at=now,
+                promoted_at=now,
+                promoted_from=source_id,
+                promoted_by=promoted_by,
+                status="active",
+                metadata={**source.metadata, "promotion_chain": f"{expected_layer}->{target_layer}"},
             )
+            # Direct insert without re-acquiring _lock (we already hold it)
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT INTO truth_entries
+                       (id, layer, title, content, evidence_refs, created_at,
+                        promoted_at, promoted_from, promoted_by, status, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (promoted.id, promoted.layer, promoted.title, promoted.content,
+                     json.dumps(promoted.evidence_refs), promoted.created_at,
+                     promoted.promoted_at, promoted.promoted_from, promoted.promoted_by,
+                     promoted.status, json.dumps(promoted.metadata)),
+                )
+
+            # Mark source as promoted
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE truth_entries SET status = 'promoted' WHERE id = ?",
+                    (source_id,),
+                )
 
         logger.info(
             "truth_ladder promote %s->%s id=%s from=%s by=%s",
