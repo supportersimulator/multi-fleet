@@ -544,9 +544,10 @@ class CoordinatorAgent:
         """Execute a local repair action."""
         import subprocess
 
+        repo_dir = os.environ.get("FLEET_REPO_DIR", "$HOME/dev/er-simulator-superrepo")
         REPAIR_COMMANDS = {
-            "restart_nats": "pkill -f fleet_nerve_nats; sleep 2; cd ~/dev/er-simulator-superrepo && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
-            "restart_daemon": "pkill -f fleet_nerve; sleep 2; cd ~/dev/er-simulator-superrepo && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
+            "restart_nats": f"pkill -f fleet_nerve_nats; sleep 2; cd {repo_dir} && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
+            "restart_daemon": f"pkill -f fleet_nerve; sleep 2; cd {repo_dir} && nohup python3 tools/fleet_nerve_nats.py serve > /tmp/fleet-nerve.log 2>&1 &",
             "reconnect_nats": "echo 'reconnect_nats: handled by coordinator agent'",
             "restart_eventbus": "pkill -f event_bus_server; sleep 1",
             "clear_dedup": "echo 'dedup cleared'",
