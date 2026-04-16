@@ -34,6 +34,8 @@ from typing import Any, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+FLEET_CONFIG_PATH = Path(__file__).parent.parent.parent / ".multifleet" / "config.json"
+
 logger = logging.getLogger("fleet-nerve.omniroute")
 
 # Rate limit detection window
@@ -266,13 +268,9 @@ class OmniRouteOrchestrator:
         # Find next healthy provider
         next_tier = self._find_next_healthy(tier)
         if next_tier is None:
-            return {
-                "action": "exhausted",
-                "details": "All providers unhealthy — manual intervention needed",
-                "provider_states": {
-                    t.name: p.to_dict() for t, p in self._providers.items()
-                },
-            }
+            # All local providers exhausted → attempt fleet baton handoff
+            logger.warning("All local providers exhausted — attempting fleet handoff")
+            return self._handoff_to_fleet(reason=reason)
 
         # Execute failover
         return self._execute_failover(tier, next_tier, reason)
@@ -472,6 +470,254 @@ class OmniRouteOrchestrator:
             )
             logger.info("Keepawake asserted for model transition")
 
+    # ── Fleet baton-passing (all providers exhausted → hand off to peer) ──
+
+    def _load_fleet_config(self) -> dict[str, Any]:
+        """Load fleet node config from .multifleet/config.json."""
+        try:
+            if FLEET_CONFIG_PATH.exists():
+                return json.loads(FLEET_CONFIG_PATH.read_text())
+            # Fallback: check relative to repo root
+            alt = self._repo / ".multifleet" / "config.json"
+            if alt.exists():
+                return json.loads(alt.read_text())
+        except Exception as e:
+            logger.warning("Could not load fleet config: %s", e)
+        return {}
+
+    def _query_peer_health(self) -> list[dict[str, Any]]:
+        """Query fleet peers for health status. Returns list of reachable peers sorted by preference.
+
+        Preference order: warm-idle > session-hot > busy-protected.
+        Skips self. Skips unreachable nodes.
+        """
+        config = self._load_fleet_config()
+        nodes = config.get("nodes", {})
+        peers: list[dict[str, Any]] = []
+
+        for node_id, node_info in nodes.items():
+            if node_id == self._node_id:
+                continue
+
+            host = node_info.get("host", "")
+            if not host:
+                continue
+
+            # Try fleet daemon health endpoint
+            health = self._probe_peer_health(host, node_id)
+            if health:
+                peers.append(health)
+
+        # Sort: warm-idle first (best handoff target), then session-hot, then others
+        state_priority = {"warm-idle": 0, "session-hot": 1, "busy-protected": 2}
+        peers.sort(key=lambda p: state_priority.get(p.get("power_state", ""), 99))
+        return peers
+
+    def _probe_peer_health(self, host: str, node_id: str) -> Optional[dict[str, Any]]:
+        """Probe a single peer's fleet daemon health endpoint."""
+        try:
+            url = f"http://{host}:8855/health"
+            req = Request(url, method="GET")
+            resp = urlopen(req, timeout=5)
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                data["node_id"] = node_id
+                data["host"] = host
+                data["reachable"] = True
+                return data
+        except Exception:
+            pass
+        return None
+
+    def _handoff_to_fleet(self, reason: str) -> dict[str, Any]:
+        """Hand off current task to another fleet node when all local providers exhausted.
+
+        Steps:
+        1. Capture ModelSwapCheckpoint (preserves task context)
+        2. Query peer health to find best handoff target
+        3. Send handoff message via fleet channels (HTTP direct → P7 git)
+        4. Try Superset bridge as backup launch mechanism
+        5. Sanitize all payloads (no secrets in fleet messages)
+
+        Returns dict with handoff result.
+        """
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        checkpoint_id = ""
+
+        # 1. Capture checkpoint
+        try:
+            from multifleet.model_swap import ModelSwapCheckpoint
+            swapper = ModelSwapCheckpoint(repo_root=str(self._repo))
+            cp = swapper.capture(
+                reason=f"fleet-handoff-all-providers-exhausted",
+                source_model=self._providers[self._active_tier].name,
+                target_model="fleet-peer",
+            )
+            checkpoint_id = cp.checkpoint_id
+            logger.info("Handoff checkpoint captured: %s", checkpoint_id)
+        except Exception as e:
+            logger.warning("Handoff checkpoint failed (continuing): %s", e)
+
+        # 2. Query peers
+        peers = self._query_peer_health()
+        if not peers:
+            logger.error("No reachable fleet peers for handoff")
+            return {
+                "action": "exhausted_no_peers",
+                "details": "All providers exhausted AND no fleet peers reachable",
+                "checkpoint_id": checkpoint_id,
+                "provider_states": {
+                    t.name: p.to_dict() for t, p in self._providers.items()
+                },
+            }
+
+        target = peers[0]
+        target_node = target["node_id"]
+        target_host = target["host"]
+        target_state = target.get("power_state", target.get("state", "unknown"))
+        logger.info(
+            "Handoff target: %s (%s) in state %s",
+            target_node, target_host, target_state,
+        )
+
+        # 3. Build handoff payload (sanitized — no secrets)
+        handoff_payload = {
+            "type": "baton_handoff",
+            "from": self._node_id,
+            "to": target_node,
+            "timestamp": ts,
+            "reason": reason,
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_path": "/tmp/model-swap-checkpoint.json",
+            "provider_states": {
+                t.name: {"tier": t.value, "healthy": p.healthy, "rate_limited": p.rate_limited}
+                for t, p in self._providers.items()
+            },
+            "priority": "high",
+        }
+
+        # 3a. Try HTTP direct to peer daemon
+        delivered = self._send_handoff_http(target_host, handoff_payload)
+
+        # 3b. Fallback to P7 git channel
+        if not delivered:
+            self._send_handoff_git(target_node, handoff_payload)
+
+        # 4. Try Superset bridge as backup launch mechanism
+        superset_launched = False
+        try:
+            superset_launched = self._launch_via_superset(target_node, reason, checkpoint_id)
+        except Exception as e:
+            logger.debug("Superset bridge launch failed (non-critical): %s", e)
+
+        # 5. Fleet-wide notification
+        event = FailoverEvent(
+            timestamp=ts,
+            from_provider=self._providers[self._active_tier].name,
+            to_provider=f"fleet:{target_node}",
+            reason=f"baton-handoff: {reason}",
+            node_id=self._node_id,
+            checkpoint_id=checkpoint_id,
+        )
+        self._failover_history.append(event)
+        self._append_history(event)
+        try:
+            self._notify_fleet(event)
+        except Exception:
+            pass
+
+        # macOS notification
+        try:
+            self._macos_notify(
+                f"Baton handoff to {target_node}",
+                f"All providers exhausted. Task handed to {target_node} ({target_state})",
+            )
+        except Exception:
+            pass
+
+        self._save_state()
+
+        return {
+            "action": "fleet_handoff",
+            "target_node": target_node,
+            "target_state": target_state,
+            "checkpoint_id": checkpoint_id,
+            "http_delivered": delivered,
+            "superset_launched": superset_launched,
+            "reason": reason,
+        }
+
+    def _send_handoff_http(self, host: str, payload: dict) -> bool:
+        """Send handoff message via HTTP POST to peer fleet daemon."""
+        try:
+            url = f"http://{host}:8855/message"
+            data = json.dumps(payload).encode()
+            req = Request(url, data=data, method="POST")
+            req.add_header("Content-Type", "application/json")
+            resp = urlopen(req, timeout=10)
+            if resp.status in (200, 201, 202):
+                logger.info("Handoff delivered via HTTP to %s", host)
+                return True
+        except Exception as e:
+            logger.warning("HTTP handoff to %s failed: %s", host, e)
+        return False
+
+    def _send_handoff_git(self, target_node: str, payload: dict) -> None:
+        """Send handoff via P7 git channel (.fleet-messages/)."""
+        try:
+            msg_dir = self._repo / ".fleet-messages" / target_node
+            msg_dir.mkdir(parents=True, exist_ok=True)
+
+            filename_ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+            msg_path = msg_dir / f"{filename_ts}-baton-handoff-{self._node_id}.json"
+
+            # Sanitize: strip any env vars / secrets that might leak
+            safe_payload = {k: v for k, v in payload.items()
+                           if k not in ("env", "api_keys", "secrets")}
+            msg_path.write_text(json.dumps(safe_payload, indent=2))
+
+            subprocess.run(
+                ["git", "add", str(msg_path)], cwd=str(self._repo),
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", f"fleet: baton handoff {self._node_id} -> {target_node}"],
+                cwd=str(self._repo), capture_output=True, timeout=10,
+            )
+            subprocess.run(
+                ["git", "push", "origin", "main"],
+                cwd=str(self._repo), capture_output=True, timeout=15,
+            )
+            logger.info("Handoff written to P7 git channel for %s", target_node)
+        except Exception as e:
+            logger.warning("P7 git handoff failed: %s", e)
+
+    def _launch_via_superset(self, target_node: str, reason: str, checkpoint_id: str) -> bool:
+        """Try to launch a Superset agent on target node as backup runtime."""
+        try:
+            from multifleet.superset_bridge import SupersetBridge
+            bridge = SupersetBridge()
+            # Create workspace for handoff task
+            ws = bridge.create_workspace(
+                project_id=f"baton-handoff-{checkpoint_id[:8]}",
+                branch="main",
+            )
+            if ws and ws.get("id"):
+                agent = bridge.launch_agent(
+                    workspace_id=ws["id"],
+                    task_id=f"continue-from-{self._node_id}",
+                )
+                logger.info(
+                    "Superset agent launched on workspace %s for handoff to %s",
+                    ws["id"], target_node,
+                )
+                return bool(agent)
+        except ImportError:
+            logger.debug("SupersetBridge not available")
+        except Exception as e:
+            logger.debug("Superset launch failed: %s", e)
+        return False
+
     # ── Fleet coordination ──
 
     def _notify_fleet(self, event: FailoverEvent) -> None:
@@ -615,5 +861,15 @@ if __name__ == "__main__":
         tier = ProviderTier(int(sys.argv[2])) if len(sys.argv) > 2 else ProviderTier.SUBSCRIPTION
         ok = orch.attempt_recovery(tier)
         print(f"Recovery {'succeeded' if ok else 'failed'} for tier {tier.value}")
+    elif sys.argv[1] == "peers":
+        peers = orch._query_peer_health()
+        if not peers:
+            print("No reachable peers")
+        for p in peers:
+            print(f"  {p.get('node_id','?'):6s}  {p.get('power_state', p.get('state','?')):16s}  {p.get('host','')}")
+    elif sys.argv[1] == "handoff":
+        reason = sys.argv[2] if len(sys.argv) > 2 else "manual-handoff"
+        result = orch._handoff_to_fleet(reason)
+        print(json.dumps(result, indent=2))
     else:
-        print("Usage: python -m multifleet.omniroute [status|test-failover|recover [tier]]")
+        print("Usage: python -m multifleet.omniroute [status|test-failover|recover [tier]|peers|handoff [reason]]")
