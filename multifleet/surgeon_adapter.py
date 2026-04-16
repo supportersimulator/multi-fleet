@@ -151,6 +151,10 @@ class SurgeonAdapter:
         cardiologist cross-exam). If cardio unavailable, falls back to
         consensus check. If all fail, returns degraded result.
 
+        Records corrigibility data: the topic, consensus result, and
+        whether surgeon input resulted in a different outcome than
+        the caller's proposed action.
+
         Args:
             topic: Description of the decision to examine.
             evidence: Dict of evidence supporting/opposing the decision.
@@ -182,6 +186,7 @@ class SurgeonAdapter:
 
         # Try cardio_review (cross-exam path)
         surgeons_consulted = ["atlas"]
+        exam_result: Optional[Dict[str, Any]] = None
         try:
             review = self._bridge_module.cardio_review(prompt)
             if review.get("status") == "ok":
@@ -189,7 +194,7 @@ class SurgeonAdapter:
                 output = review.get("output", "")
                 # Parse consensus from review output
                 resolved, confidence, dissent = self._parse_consensus(review)
-                return {
+                exam_result = {
                     "surgeons_consulted": surgeons_consulted,
                     "consensus": resolved,
                     "dissents": dissent,
@@ -202,45 +207,59 @@ class SurgeonAdapter:
             logger.warning("Cross-exam cardio_review failed: %s", exc)
 
         # Fallback: neurologist challenge
-        try:
-            challenge = self._bridge_module.neurologist_challenge(prompt)
-            if challenge.get("status") == "ok":
-                surgeons_consulted.append("neurologist")
-                return {
-                    "surgeons_consulted": surgeons_consulted,
-                    "consensus": False,  # challenge != consensus
-                    "dissents": [str(challenge.get("output", ""))[:200]],
-                    "confidence": 0.4,
-                    "output": str(challenge.get("output", "")),
-                    "source": challenge.get("path", "unknown"),
-                }
-        except Exception as exc:
-            _COUNTERS["bridge_errors"] += 1
-            logger.warning("Cross-exam neurologist_challenge failed: %s", exc)
+        if exam_result is None:
+            try:
+                challenge = self._bridge_module.neurologist_challenge(prompt)
+                if challenge.get("status") == "ok":
+                    surgeons_consulted.append("neurologist")
+                    exam_result = {
+                        "surgeons_consulted": surgeons_consulted,
+                        "consensus": False,  # challenge != consensus
+                        "dissents": [str(challenge.get("output", ""))[:200]],
+                        "confidence": 0.4,
+                        "output": str(challenge.get("output", "")),
+                        "source": challenge.get("path", "unknown"),
+                    }
+            except Exception as exc:
+                _COUNTERS["bridge_errors"] += 1
+                logger.warning("Cross-exam neurologist_challenge failed: %s", exc)
 
         # Fallback: consensus only
-        try:
-            cons = self._bridge_module.consensus(prompt)
-            resolved, confidence, dissent = self._parse_consensus(cons)
-            return {
-                "surgeons_consulted": surgeons_consulted,
-                "consensus": resolved,
-                "dissents": dissent,
-                "confidence": confidence,
-                "output": str(cons.get("output", "")),
-                "source": cons.get("path", "unknown"),
-            }
-        except Exception as exc:
-            _COUNTERS["bridge_errors"] += 1
-            logger.error("All cross-exam paths failed: %s", exc)
-            return {
-                "surgeons_consulted": surgeons_consulted,
-                "consensus": False,
-                "dissents": [],
-                "confidence": 0.0,
-                "output": f"all paths failed: {exc}",
-                "source": "error",
-            }
+        if exam_result is None:
+            try:
+                cons = self._bridge_module.consensus(prompt)
+                resolved, confidence, dissent = self._parse_consensus(cons)
+                exam_result = {
+                    "surgeons_consulted": surgeons_consulted,
+                    "consensus": resolved,
+                    "dissents": dissent,
+                    "confidence": confidence,
+                    "output": str(cons.get("output", "")),
+                    "source": cons.get("path", "unknown"),
+                }
+            except Exception as exc:
+                _COUNTERS["bridge_errors"] += 1
+                logger.error("All cross-exam paths failed: %s", exc)
+                exam_result = {
+                    "surgeons_consulted": surgeons_consulted,
+                    "consensus": False,
+                    "dissents": [],
+                    "confidence": 0.0,
+                    "output": f"all paths failed: {exc}",
+                    "source": "error",
+                }
+
+        # Record to corrigibility ledger (best-effort)
+        self._record_corrigibility(
+            context=topic,
+            proposed="proceed",
+            surgeon_input=str(exam_result.get("output", ""))[:500],
+            consensus=exam_result.get("consensus", False),
+            dissents=exam_result.get("dissents", []),
+            source="cross_exam",
+        )
+
+        return exam_result
 
     def validate_acceptance(self, task_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         """Validate a task result through surgeon protocol before acceptance.
@@ -285,10 +304,22 @@ class SurgeonAdapter:
         confidence = cross_exam.get("confidence", 0.0)
         dissents = cross_exam.get("dissents", [])
 
+        # Caller assumed acceptance (proposed=accept). Did surgeons change that?
+        surgeon_resolved = validated and confidence >= 0.6
+        changed = not surgeon_resolved  # surgeon blocked what caller wanted to accept
+        self._record_corrigibility(
+            context=f"acceptance:{task_id}:{claim[:100]}",
+            proposed="accept",
+            surgeon_input=str(cross_exam.get("output", ""))[:500],
+            consensus=validated,
+            dissents=dissents,
+            source="validate_acceptance",
+        )
+
         return {
             "validated": validated,
             "confidence": confidence,
-            "surgeon_resolved": validated and confidence >= 0.6,
+            "surgeon_resolved": surgeon_resolved,
             "dissent_count": len(dissents),
             "dissents": dissents,
             "source": cross_exam.get("source", "unknown"),
@@ -407,6 +438,39 @@ class SurgeonAdapter:
                     "path": "none",
                     "review_type": "none",
                 }
+
+    def _record_corrigibility(
+        self,
+        context: str,
+        proposed: str,
+        surgeon_input: str,
+        consensus: bool,
+        dissents: List,
+        source: str,
+    ) -> None:
+        """Best-effort recording to corrigibility ledger."""
+        try:
+            from multifleet.corrigibility_ledger import CorrigibilityLedger
+            ledger = CorrigibilityLedger()
+            changed = not consensus or len(dissents) > 0
+            final = "blocked" if not consensus else "approved"
+            ledger.record_decision_point(
+                context=context,
+                proposed_action=proposed,
+                surgeon_input=surgeon_input,
+                final_action=final,
+                changed=changed,
+                source=source,
+            )
+            if dissents:
+                ledger.record_disagreement(
+                    topic=context,
+                    surgeon_a_position=proposed,
+                    surgeon_b_position="; ".join(str(d)[:200] for d in dissents),
+                    resolution=final,
+                )
+        except Exception as exc:
+            logger.debug("Corrigibility ledger recording failed: %s", exc)
 
     def get_state(self) -> Dict[str, Any]:
         """Get current surgeon state for node overlay SurgeonStrip.

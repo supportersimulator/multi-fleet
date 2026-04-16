@@ -102,6 +102,9 @@ class EventType(Enum):
     GHOST_MIRROR_DRIFT = "ghost.mirror.drift_detected"
     GHOST_ANTICIPATE_COMPLETED = "ghost.anticipate.completed"
 
+    # Corrigibility events
+    CORRIGIBILITY_DECISION_RECORDED = "corrigibility.decision.recorded"
+
     # Synthesis/merge events
     SYNTHESIS_MERGE_DECISION = "synthesis.merge_decision"
     SYNTHESIS_DECISION = "synthesis.decision"

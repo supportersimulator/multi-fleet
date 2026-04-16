@@ -80,18 +80,52 @@ class GateResult:
 
 
 def _record_audit(gate_name: str, result: "GateResult"):
-    """Best-effort audit trail recording."""
+    """Best-effort audit trail + event emission."""
+    try:
+        from .event_bus import IDEEventBus
+        bus = IDEEventBus.get()
+        bus.emit("gate.checked", {
+            "gate": result.gate,
+            "passed": result.passed,
+            "checks_run": len(result.checks),
+            "failures": [c.name for c in result.checks if not c.passed],
+            "timestamp": time.time(),
+        })
+    except Exception:
+        pass  # Event emission must never break gate operation
     try:
         from .evidence_ledger import EvidenceLedger
         ledger = EvidenceLedger()
         ledger.record(
-            f"gate_{gate_name}",
+            "gate_activation",
             os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
-            result.summary,
-            result.to_dict(),
+            result.gate,
+            {"passed": result.passed, "summary": result.summary,
+             "checks_run": len(result.checks),
+             "failures": [c.name for c in result.checks if not c.passed]},
         )
     except Exception:
         pass  # Audit must never break gate operation
+
+    # Record gate blocks to corrigibility ledger
+    if not result.passed:
+        try:
+            from .corrigibility_ledger import CorrigibilityLedger
+            cl = CorrigibilityLedger()
+            failed_checks = [
+                c.name for c in result.checks
+                if isinstance(c, GateCheck) and not c.passed and getattr(c, "critical", True)
+            ]
+            cl.record_decision_point(
+                context=f"gate:{gate_name}",
+                proposed_action="proceed",
+                surgeon_input="; ".join(failed_checks),
+                final_action="blocked",
+                changed=True,
+                source=f"invariance_gate:{gate_name}",
+            )
+        except Exception:
+            pass  # Never break gate operation
 
 
 class FleetSendGate:
