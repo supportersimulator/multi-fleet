@@ -2298,6 +2298,51 @@ class FleetNerveNATS:
                         })
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/rebuttals":
+                    # Wire P2-3: GET /rebuttals — list active rebuttal sessions
+                    try:
+                        mgr = self._get_rebuttal_manager()
+                        if mgr is None:
+                            self._json_response(503, {"error": "RebuttalManager unavailable"})
+                            return
+                        active = [s.to_dict() for s in mgr.active_sessions()]
+                        all_sessions = [s.to_dict() for s in mgr.all_sessions()]
+                        self._json_response(200, {
+                            "active": active,
+                            "all": all_sessions,
+                            "active_count": len(active),
+                            "total_count": len(all_sessions),
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/leases":
+                    # Wire P2-4: GET /leases — list active resource leases
+                    try:
+                        mgr = self._get_lease_manager()
+                        if mgr is None:
+                            self._json_response(503, {"error": "LeaseManager unavailable"})
+                            return
+                        active = mgr.list_active()
+                        self._json_response(200, {
+                            "leases": active,
+                            "count": len(active),
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
+                elif self.path == "/probes":
+                    # Wire P2-5: GET /probes — return latest cached probe results
+                    try:
+                        from .probe_engine import ProbeRegistry
+                        registry = ProbeRegistry()
+                        results = registry.latest_results()
+                        result_dicts = [r.to_dict() if hasattr(r, 'to_dict') else r for r in results]
+                        self._json_response(200, {
+                            "results": result_dicts,
+                            "count": len(result_dicts),
+                            "cached": True,
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -2333,6 +2378,8 @@ class FleetNerveNATS:
             _evidence_ledger = None
             _truth_ladder = None
             _probe_engine = None
+            _rebuttal_manager = None
+            _lease_manager = None
 
             def _get_overlay_manager(self):
                 """Lazy-init NodeOverlayManager instance."""
@@ -2412,6 +2459,36 @@ class FleetNerveNATS:
                     return Handler._probe_engine
                 except Exception as e:
                     logger.warning("ProbeEngine init failed: %s", e)
+                    return None
+
+            def _get_rebuttal_manager(self):
+                """Lazy-init RebuttalManager singleton (in-memory state)."""
+                if Handler._rebuttal_manager is not None:
+                    return Handler._rebuttal_manager
+                try:
+                    from .cross_rebuttal import RebuttalManager
+                    Handler._rebuttal_manager = RebuttalManager()
+                    return Handler._rebuttal_manager
+                except Exception as e:
+                    logger.warning("RebuttalManager init failed: %s", e)
+                    return None
+
+            def _get_lease_manager(self):
+                """Lazy-init LeaseManager singleton (SQLite-backed via daemon store)."""
+                if Handler._lease_manager is not None:
+                    return Handler._lease_manager
+                try:
+                    from .leases import LeaseManager
+                    store = daemon._store
+                    if not store:
+                        logger.warning("LeaseManager: daemon store not available")
+                        return None
+                    Handler._lease_manager = LeaseManager(
+                        store=store, node_id=daemon.node_id
+                    )
+                    return Handler._lease_manager
+                except Exception as e:
+                    logger.warning("LeaseManager init failed: %s", e)
                     return None
 
             def do_POST(self):
@@ -2757,6 +2834,28 @@ class FleetNerveNATS:
                         self._json_response(400, {"error": str(e)})
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/probes":
+                    # Wire P2-5: POST /probes — run a probe scan
+                    try:
+                        from .probe_engine import ProbeRegistry
+                        registry = ProbeRegistry()
+                        context = body.get("context", {})
+                        results = registry.run_all(context=context)
+                        result_dicts = [r.to_dict() if hasattr(r, 'to_dict') else r for r in results]
+                        # Update overlay with results
+                        try:
+                            mgr = self._get_overlay_manager()
+                            if mgr:
+                                mgr.update_from_probe(daemon.node_id, result_dicts)
+                        except Exception:
+                            pass
+                        self._json_response(200, {
+                            "results": result_dicts,
+                            "count": len(result_dicts),
+                            "cached": False,
+                        })
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/orchestrate":
                     try:
                         orch = daemon._task_orchestrator
@@ -2812,6 +2911,14 @@ class FleetNerveNATS:
                     return
         Thread(target=server.serve_forever, daemon=True).start()
         logger.info("HTTP compat server on :8855 (health + broadcast + message)")
+
+        # Wire: Start SSE event stream server for IDE consumption (best-effort)
+        try:
+            from multifleet.event_stream import start_server as start_sse
+            start_sse(port=8033, daemon=True)
+            logger.info("SSE event stream on :8033")
+        except Exception as e:
+            logger.debug("SSE event stream not started: %s", e)
 
 
 # ── CLI ──

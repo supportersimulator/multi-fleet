@@ -87,6 +87,9 @@ class IDEEventBus:
         # Auto-capture events into namespace rings
         self._bus.on("*", self._capture_to_ns_ring)
 
+        # Wire event_stream SSE bridge — push all events to connected SSE clients
+        self._bus.on("*", self._forward_to_event_stream)
+
         # Register default advisory middleware (schema validation + rate limiting)
         register_default_middleware(self)
 
@@ -170,6 +173,14 @@ class IDEEventBus:
         if ns in self._ns_rings:
             self._ns_rings[ns].append(event)
             self._ns_stats[ns] += 1
+
+    def _forward_to_event_stream(self, event: dict) -> None:
+        """Forward events to the SSE event_stream for IDE consumption (best-effort)."""
+        try:
+            from multifleet.event_stream import push_event
+            push_event(event)
+        except Exception:
+            pass  # SSE bridge is optional — never block event bus
 
     def history(
         self,

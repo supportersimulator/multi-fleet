@@ -148,16 +148,18 @@ class FleetDashboardData:
         return data.get("races", [])
 
     def _get_rebuttals(self) -> list:
-        """Get active rebuttals. Parsed from /health or dedicated endpoint if available."""
-        # No dedicated /rebuttals endpoint in the daemon yet — return empty
-        # Future: GET /rebuttals when the endpoint is wired
-        return []
+        """Get active rebuttal sessions from /rebuttals endpoint."""
+        data = self._fetch("/rebuttals")
+        if not data:
+            return []
+        return data.get("active", [])
 
     def _get_leases(self) -> list:
-        """Get active leases. Parsed from /health or dedicated endpoint if available."""
-        # No dedicated /leases endpoint yet — return empty
-        # Future: GET /leases when the endpoint is wired
-        return []
+        """Get active resource leases from /leases endpoint."""
+        data = self._fetch("/leases")
+        if not data:
+            return []
+        return data.get("leases", [])
 
     def _get_recent_evidence(self) -> list:
         """Get last 10 evidence entries from /evidence/latest."""
