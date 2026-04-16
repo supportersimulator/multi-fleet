@@ -16,12 +16,27 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.evidence")
+
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _get_write_lock(db_path: str) -> threading.Lock:
+    """Return a process-local lock for a specific ledger DB path."""
+    resolved = str(Path(db_path).resolve())
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[resolved] = lock
+        return lock
 
 
 class EvidenceLedger:
@@ -36,38 +51,44 @@ class EvidenceLedger:
         self._db_path = db_path or str(Path.home() / ".fleet-nerve" / "evidence.db")
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._data_layer = data_layer
+        self._write_lock = _get_write_lock(self._db_path)
         self._init_db()
 
     def _init_db(self):
         """Create evidence table with hash chain."""
-        conn = self._conn()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS evidence (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_id TEXT UNIQUE NOT NULL,
-                timestamp REAL NOT NULL,
-                event_type TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                subject TEXT,
-                payload TEXT NOT NULL,
-                prev_hash TEXT NOT NULL,
-                entry_hash TEXT NOT NULL,
-                verified INTEGER DEFAULT 1
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_evidence_type
-            ON evidence(event_type)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_evidence_node
-            ON evidence(node_id)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_evidence_ts
-            ON evidence(timestamp)
-        """)
-        conn.commit()
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS evidence (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                        entry_id TEXT UNIQUE NOT NULL,
+                        timestamp REAL NOT NULL,
+                        event_type TEXT NOT NULL,
+                        node_id TEXT NOT NULL,
+                        subject TEXT,
+                        payload TEXT NOT NULL,
+                        prev_hash TEXT NOT NULL,
+                        entry_hash TEXT NOT NULL,
+                        verified INTEGER DEFAULT 1
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_evidence_type
+                    ON evidence(event_type)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_evidence_node
+                    ON evidence(node_id)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_evidence_ts
+                    ON evidence(timestamp)
+                """)
+                conn.commit()
+            finally:
+                self._maybe_close(conn)
 
     def _conn(self) -> sqlite3.Connection:
         """Get a SQLite connection with WAL mode and Row factory.
@@ -79,7 +100,6 @@ class EvidenceLedger:
             return self._data_layer.get_connection("evidence")
         conn = sqlite3.connect(self._db_path, check_same_thread=False, timeout=10)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
@@ -112,27 +132,28 @@ class EvidenceLedger:
         ts = time.time()
         payload_json = json.dumps(payload, sort_keys=True)
 
-        conn = self._conn()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            prev_hash = self._get_last_hash(conn)
-            entry_hash = self._compute_hash(
-                entry_id, ts, event_type, node_id, payload_json, prev_hash
-            )
-            conn.execute(
-                """INSERT INTO evidence
-                   (entry_id, timestamp, event_type, node_id, subject,
-                    payload, prev_hash, entry_hash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entry_id, ts, event_type, node_id, subject,
-                 payload_json, prev_hash, entry_hash),
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            self._maybe_close(conn)
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                prev_hash = self._get_last_hash(conn)
+                entry_hash = self._compute_hash(
+                    entry_id, ts, event_type, node_id, payload_json, prev_hash
+                )
+                conn.execute(
+                    """INSERT INTO evidence
+                       (entry_id, timestamp, event_type, node_id, subject,
+                        payload, prev_hash, entry_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (entry_id, ts, event_type, node_id, subject,
+                     payload_json, prev_hash, entry_hash),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._maybe_close(conn)
 
         logger.info("Evidence recorded: %s [%s] by %s — %s",
                      entry_id[:8], event_type, node_id, subject or "(no subject)")

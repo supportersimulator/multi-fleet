@@ -11,6 +11,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG="$REPO_ROOT/.multifleet/config.json"
 THEATRICAL=false
 [[ "${1:-}" == "--theatrical" ]] && THEATRICAL=true
+FAST_DEMO=false
+if [[ "$THEATRICAL" != true ]] && [[ "${CI:-}" == "true" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
+    FAST_DEMO=true
+fi
 
 DAEMON="http://127.0.0.1:8855"
 WEB="http://127.0.0.1:8856"
@@ -20,7 +24,15 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'
 DIM='\033[2m'; NC='\033[0m'; WHITE='\033[1;37m'
 
-pause() { [[ "$THEATRICAL" == true ]] && sleep "${1:-1.5}" || sleep 0.3; }
+pause() {
+    if [[ "$THEATRICAL" == true ]]; then
+        sleep "${1:-1.5}"
+    elif [[ "$FAST_DEMO" == true ]]; then
+        sleep 0.02
+    else
+        sleep 0.3
+    fi
+}
 section() {
     echo ""
     echo -e "${DIM}────────────────────────────────────────────────────────────${NC}"

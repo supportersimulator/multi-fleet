@@ -10,7 +10,7 @@ import logging
 import queue
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 logger = logging.getLogger("fleet-nerve.event-stream")
@@ -203,7 +203,10 @@ def start_server(
     else:
         _ide_bridge = None
 
-    server = HTTPServer((host, port), EventStreamHandler)
+    # SSE connections stay open by design, so a single-threaded HTTPServer can
+    # block shutdown and all subsequent requests behind one /events client.
+    server = ThreadingHTTPServer((host, port), EventStreamHandler)
+    server.daemon_threads = daemon
     thread = threading.Thread(target=server.serve_forever, name="fleet-event-stream")
     thread.daemon = daemon
     thread.start()

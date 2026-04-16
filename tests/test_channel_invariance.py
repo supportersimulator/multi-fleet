@@ -126,39 +126,48 @@ class TestEscalation:
             "action": "repair", "escalation_level": 1,
         }
 
-        # First attempt: L1
-        r1 = invariant.auto_repair(violation, health_monitor=mock_monitor)
-        assert r1["level"] == 1
-        assert r1["level_name"] == "notify"
+        # L4 triggers a surgeon corrigibility review. Stub it here so this
+        # test stays focused on escalation math rather than live bridge I/O.
+        with patch("multifleet.surgeon_adapter.SurgeonAdapter") as mock_adapter_cls:
+            mock_adapter = mock_adapter_cls.return_value
+            mock_adapter.request_review.return_value = {
+                "status": "ok",
+                "output": "approved",
+            }
 
-        # Simulate cooldown expired by backdating last_repair_attempt
-        invariant._last_repair_attempt["mac1"] = time.time() - 400
+            # First attempt: L1
+            r1 = invariant.auto_repair(violation, health_monitor=mock_monitor)
+            assert r1["level"] == 1
+            assert r1["level_name"] == "notify"
 
-        # Second attempt: should escalate to L2
-        violation["escalation_level"] = invariant.get_escalation_level("mac1")
-        r2 = invariant.auto_repair(violation, health_monitor=mock_monitor)
-        assert r2["level"] == 2
-        assert r2["level_name"] == "guide"
+            # Simulate cooldown expired by backdating last_repair_attempt
+            invariant._last_repair_attempt["mac1"] = time.time() - 400
 
-        # Simulate another cooldown
-        invariant._last_repair_attempt["mac1"] = time.time() - 400
-        violation["escalation_level"] = invariant.get_escalation_level("mac1")
-        r3 = invariant.auto_repair(violation, health_monitor=mock_monitor)
-        assert r3["level"] == 3
-        assert r3["level_name"] == "assist"
+            # Second attempt: should escalate to L2
+            violation["escalation_level"] = invariant.get_escalation_level("mac1")
+            r2 = invariant.auto_repair(violation, health_monitor=mock_monitor)
+            assert r2["level"] == 2
+            assert r2["level_name"] == "guide"
 
-        # One more
-        invariant._last_repair_attempt["mac1"] = time.time() - 400
-        violation["escalation_level"] = invariant.get_escalation_level("mac1")
-        r4 = invariant.auto_repair(violation, health_monitor=mock_monitor)
-        assert r4["level"] == 4
-        assert r4["level_name"] == "remote_fix"
+            # Simulate another cooldown
+            invariant._last_repair_attempt["mac1"] = time.time() - 400
+            violation["escalation_level"] = invariant.get_escalation_level("mac1")
+            r3 = invariant.auto_repair(violation, health_monitor=mock_monitor)
+            assert r3["level"] == 3
+            assert r3["level_name"] == "assist"
 
-        # L4 is max — stays at L4
-        invariant._last_repair_attempt["mac1"] = time.time() - 400
-        violation["escalation_level"] = invariant.get_escalation_level("mac1")
-        r5 = invariant.auto_repair(violation, health_monitor=mock_monitor)
-        assert r5["level"] == 4
+            # One more
+            invariant._last_repair_attempt["mac1"] = time.time() - 400
+            violation["escalation_level"] = invariant.get_escalation_level("mac1")
+            r4 = invariant.auto_repair(violation, health_monitor=mock_monitor)
+            assert r4["level"] == 4
+            assert r4["level_name"] == "remote_fix"
+
+            # L4 is max — stays at L4
+            invariant._last_repair_attempt["mac1"] = time.time() - 400
+            violation["escalation_level"] = invariant.get_escalation_level("mac1")
+            r5 = invariant.auto_repair(violation, health_monitor=mock_monitor)
+            assert r5["level"] == 4
 
     def test_clear_escalation(self, invariant):
         """clear_escalation resets peer back to L1."""
