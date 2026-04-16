@@ -44,6 +44,7 @@ from .coordinator_evidence import EvidencePipeline
 from .coordinator_health import HealthChecker, LocalHealthSnapshot
 from .coordinator_surgeon_proxy import SurgeonProxy
 from .packets import FleetPacket
+from .superset_bridge import SupersetBridge
 
 logger = logging.getLogger("fleet-nerve.coordinator-agent")
 
@@ -95,6 +96,10 @@ class CoordinatorAgent:
         # Task management
         self._task_state = None
         self._active_tasks: dict[str, dict] = {}
+
+        # Superset bridge (graceful — fleet works without it)
+        self._superset = SupersetBridge()
+        self._superset_task_map: dict[str, str] = {}  # fleet_task_id -> superset_task_id
 
         # Invariance gates (lazy)
         self._send_gate = None
@@ -463,6 +468,10 @@ class CoordinatorAgent:
             except Exception as e:
                 logger.debug("Task state transition failed: %s", e)
 
+        # Mirror task in Superset (fire-and-forget, non-blocking)
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, self._superset_create_task, task_id, payload, origin)
+
         # Execute task asynchronously
         asyncio.create_task(self._execute_task(task_id, payload, origin))
 
@@ -481,6 +490,7 @@ class CoordinatorAgent:
             if "error" in result:
                 self._stats["tasks_failed"] += 1
                 self.evidence.record_task_failed(task_id, result["error"])
+                self._superset_update_task(task_id, "failed", result["error"])
                 if self._task_state:
                     try:
                         from .task_state import TaskState
@@ -490,6 +500,7 @@ class CoordinatorAgent:
             else:
                 self._stats["tasks_completed"] += 1
                 self.evidence.record_task_completed(task_id, duration_ms)
+                self._superset_update_task(task_id, "completed", f"Done in {duration_ms:.0f}ms")
                 if self._task_state:
                     try:
                         from .task_state import TaskState
@@ -502,6 +513,7 @@ class CoordinatorAgent:
             self._active_tasks.pop(task_id, None)
             self._stats["tasks_failed"] += 1
             self.evidence.record_task_failed(task_id, str(e))
+            self._superset_update_task(task_id, "failed", str(e)[:500])
             logger.error("Task %s execution error: %s", task_id[:8], e)
 
     # ── Self-Healing ──
@@ -675,6 +687,42 @@ class CoordinatorAgent:
         except Exception as e:
             logger.debug("Task state machine unavailable: %s", e)
 
+    # ── Superset Task Sync ──
+
+    def _superset_create_task(self, task_id: str, payload: dict, origin: str):
+        """Create a task in Superset mirroring a fleet task. Fire-and-forget."""
+        try:
+            title = payload.get("subject", payload.get("title", f"Fleet task {task_id[:8]}"))
+            desc = payload.get("body", payload.get("prompt", ""))
+            description = f"[fleet:{self.node_id}] from={origin}\n{desc[:500]}"
+            result = self._superset.create_task(title=title, description=description)
+            if isinstance(result, dict) and result.get("_available") is not False:
+                # Extract Superset task ID from response
+                ss_id = result.get("id", result.get("taskId", ""))
+                if ss_id:
+                    self._superset_task_map[task_id] = str(ss_id)
+                    logger.info("Superset task created: %s -> %s", task_id[:8], str(ss_id)[:8])
+                else:
+                    logger.debug("Superset task created but no ID in response")
+            else:
+                logger.debug("Superset unavailable for task create")
+        except Exception as e:
+            logger.debug("Superset task create failed (non-fatal): %s", e)
+
+    def _superset_update_task(self, task_id: str, status: str, detail: str = ""):
+        """Update a Superset task status. Fire-and-forget."""
+        ss_id = self._superset_task_map.get(task_id)
+        if not ss_id:
+            return
+        try:
+            updates: dict = {"status": status}
+            if detail:
+                updates["description"] = detail[:500]
+            self._superset.update_task(ss_id, updates)
+            logger.debug("Superset task %s updated: %s", ss_id[:8], status)
+        except Exception as e:
+            logger.debug("Superset task update failed (non-fatal): %s", e)
+
     # ── Status / Introspection ──
 
     def status(self) -> dict:
@@ -690,6 +738,8 @@ class CoordinatorAgent:
             "surgeons_available": self.surgeons.get_available_count(),
             "active_tasks": len(self._active_tasks),
             "evidence": self.evidence.stats,
+            "superset": self._superset.stats,
+            "superset_tracked_tasks": len(self._superset_task_map),
             "stats": dict(self._stats),
         }
 

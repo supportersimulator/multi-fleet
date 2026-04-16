@@ -14,6 +14,7 @@ from .coordinator_health import HealthChecker, LocalHealthSnapshot, ServiceHealt
 from .coordinator_surgeon_proxy import SurgeonProxy, SurgicalOutcome, SurgeonAvailability
 from .chief_orchestrator import ChiefOrchestrator, SurgicalPhase, SurgicalProtocolResult
 from .workspace_roles import WorkspaceRegistry, WorkspaceRole, ApproachStrategy
+from .superset_bridge import SupersetBridge
 from .surgeon_lan_relay import SurgeonLANRelay, SurgeonPacket
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "WorkspaceRegistry",
     "WorkspaceRole",
     "ApproachStrategy",
+    "SupersetBridge",
     "SurgeonLANRelay",
     "SurgeonPacket",
 ]

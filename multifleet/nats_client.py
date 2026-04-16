@@ -1994,6 +1994,35 @@ class FleetNerveNATS:
                         self._json_response(200, dd.snapshot())
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/theatrical":
+                    try:
+                        from .dashboard_data import FleetDashboardData
+                        from .theatrical.theatrical_dashboard import TheatricalDashboard
+                        dd = FleetDashboardData(daemon_port=8855)
+                        td = TheatricalDashboard(dashboard_data=dd)
+                        raw_html = td.render()
+                        # Override auto-refresh to 30s
+                        html_out = raw_html.replace(
+                            'content="10"', 'content="30"', 1
+                        )
+                        data = html_out.encode("utf-8")
+                    except Exception as e:
+                        data = f"<html><body><h1>Theatrical Dashboard Error</h1><pre>{e}</pre></body></html>".encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(data)
+                elif self.path == "/theatrical/json":
+                    try:
+                        from .dashboard_data import FleetDashboardData
+                        from .theatrical.theatrical_dashboard import TheatricalDashboard
+                        dd = FleetDashboardData(daemon_port=8855)
+                        td = TheatricalDashboard(dashboard_data=dd)
+                        self._json_response(200, td.gather_data())
+                    except Exception as e:
+                        self._json_response(500, {"error": str(e)})
                 elif self.path == "/broadcast/health":
                     # Run async broadcast in the event loop
                     future = asyncio.run_coroutine_threadsafe(daemon.broadcast_health(), main_loop)
