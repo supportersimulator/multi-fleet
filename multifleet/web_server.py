@@ -48,6 +48,7 @@ _server_instance: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
 _ide_panel_server = None
 _panel_bus_bridge = None
+_panel_engine_bridge = None
 
 
 def _get_aggregator():
@@ -113,6 +114,21 @@ def _get_panel_bus_bridge():
             logger.warning("Could not init panel bus bridge: %s", e)
     return _panel_bus_bridge
 
+
+
+def _get_panel_engine_bridge():
+    """Lazy-init panel engine bridge."""
+    global _panel_engine_bridge
+    if _panel_engine_bridge is None:
+        try:
+            from multifleet.panel_engine_bridge import PanelEngineBridge
+            _panel_engine_bridge = PanelEngineBridge(
+                ide_panel_server=_get_ide_panel_server(),
+                panel_bus_bridge=_get_panel_bus_bridge(),
+            )
+        except Exception as e:
+            logger.warning("Could not init panel engine bridge: %s", e)
+    return _panel_engine_bridge
 
 
 def _fetch_daemon(path: str, timeout: float = 1.5) -> Optional[dict]:
@@ -320,6 +336,8 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_json(panel_server.probe_findings_panel())
         elif sub == "wisdom-feedback":
             self._serve_json(panel_server.wisdom_feedback_panel())
+        elif sub == "engine-format":
+            self._serve_panels_engine_format()
         elif sub == "poll":
             self._serve_panels_poll()
         elif sub == "timestamps":
@@ -346,6 +364,14 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_json({"error": "Panel bus bridge not available"})
             return
         self._serve_json(bridge.get_timestamps())
+
+    def _serve_panels_engine_format(self):
+        """Return all panels in TS engine-compatible format."""
+        bridge = _get_panel_engine_bridge()
+        if bridge is None:
+            self._serve_json({"error": "Panel engine bridge not available"})
+            return
+        self._serve_json(bridge.engine_format())
 
     def _serve_extension(self, path: str):
         bridge = _get_ide_bridge()
