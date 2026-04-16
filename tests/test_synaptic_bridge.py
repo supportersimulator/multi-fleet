@@ -574,3 +574,142 @@ class TestAutoEmit:
                       if c[0][0] == "synaptic.insight"]
         assert len(emit_calls) == 1
         assert emit_calls[0][0][1]["category"] == "surgeon"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test: Scheduled pattern scan
+# ═══════════════════════════════════════════════════════════════════
+
+class TestPatternScan:
+    def test_start_scan_without_engine_returns_false(self):
+        """Cannot start scan if pattern engine is unavailable."""
+        bridge = SynapticBridge()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = None
+        assert bridge.start_pattern_scan() is False
+
+    def test_start_scan_with_engine(self):
+        """Scan thread starts when engine is available."""
+        bridge = SynapticBridge()
+        mock_engine = MagicMock()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        try:
+            assert bridge.start_pattern_scan(interval_s=3600) is True
+            assert bridge._scan_thread is not None
+            assert bridge._scan_thread.is_alive()
+        finally:
+            bridge.stop_pattern_scan()
+
+    def test_start_scan_idempotent(self):
+        """Starting scan twice returns False on second call."""
+        bridge = SynapticBridge()
+        mock_engine = MagicMock()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        try:
+            assert bridge.start_pattern_scan(interval_s=3600) is True
+            assert bridge.start_pattern_scan(interval_s=3600) is False
+        finally:
+            bridge.stop_pattern_scan()
+
+    def test_stop_scan_safe_when_not_running(self):
+        """stop_pattern_scan is safe to call when no scan is active."""
+        bridge = SynapticBridge()
+        bridge.stop_pattern_scan()  # should not raise
+
+    def test_run_single_scan_emits_events(self):
+        """_run_single_scan emits pattern events when patterns found."""
+        from multifleet.synaptic_bridge import Insight
+        from dataclasses import dataclass
+
+        bus = MagicMock()
+        bridge = SynapticBridge(event_bus=bus)
+
+        mock_engine = MagicMock()
+        # scan() returns a result with new patterns
+        mock_result = MagicMock()
+        mock_result.scan_id = "test123"
+        mock_result.patterns_found = 1
+        mock_result.new_patterns = 1
+        mock_result.reinforced_patterns = 0
+        mock_result.scan_duration_ms = 42.0
+        mock_engine.scan.return_value = mock_result
+
+        # get_recent returns a mock pattern
+        mock_pattern = MagicMock()
+        mock_pattern.pattern_type = "recurring_error"
+        mock_pattern.title = "Test Pattern"
+        mock_pattern.confidence = 0.8
+        mock_pattern.description = "Test description"
+        mock_pattern.actionable = True
+        mock_pattern.suggested_action = "Fix it"
+        mock_engine.get_recent.return_value = [mock_pattern]
+        mock_engine.surface_to_outbox.return_value = 1
+
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+
+        bridge._run_single_scan()
+
+        # Verify scan was called
+        mock_engine.scan.assert_called_once()
+        # Verify pattern event emitted
+        pattern_events = [
+            c for c in bus.emit.call_args_list
+            if c[0][0] == "synaptic.pattern.detected"
+        ]
+        assert len(pattern_events) == 1
+        payload = pattern_events[0][0][1]
+        assert payload["pattern_type"] == "recurring_error"
+        assert payload["title"] == "Test Pattern"
+        assert payload["confidence"] == 0.8
+        # Verify outbox surfacing
+        mock_engine.surface_to_outbox.assert_called_once()
+
+    def test_stats_include_scan_fields(self):
+        """Stats dict includes pattern_scan_active and failure count."""
+        bridge = SynapticBridge()
+        s = bridge.stats
+        assert "pattern_scan_active" in s
+        assert "pattern_scan_failures" in s
+        assert s["pattern_scan_active"] is False
+        assert s["pattern_scan_failures"] == 0
+
+    def test_interval_floor_at_30s(self):
+        """Scan interval cannot go below 30s."""
+        bridge = SynapticBridge()
+        mock_engine = MagicMock()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        try:
+            bridge.start_pattern_scan(interval_s=5)
+            assert bridge._scan_interval_s == 30
+        finally:
+            bridge.stop_pattern_scan()
+
+    def test_bridge_start_auto_starts_scan(self):
+        """SynapticBridge.start() auto-starts pattern scan."""
+        bus = MagicMock()
+        bridge = SynapticBridge(event_bus=bus)
+        mock_engine = MagicMock()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        try:
+            bridge.start()
+            assert bridge._scan_thread is not None
+            assert bridge._scan_thread.is_alive()
+        finally:
+            bridge.stop()
+
+    def test_bridge_stop_stops_scan(self):
+        """SynapticBridge.stop() stops the pattern scan thread."""
+        bus = MagicMock()
+        bridge = SynapticBridge(event_bus=bus)
+        mock_engine = MagicMock()
+        bridge._modules_probed = True
+        bridge._pattern_engine_factory = lambda: mock_engine
+        bridge.start()
+        assert bridge._scan_thread is not None
+        bridge.stop()
+        assert bridge._scan_thread is None

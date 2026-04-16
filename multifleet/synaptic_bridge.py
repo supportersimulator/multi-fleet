@@ -139,6 +139,12 @@ class SynapticBridge:
         self._pattern_engine_factory = None
         self._modules_probed = False
 
+        # Pattern scan scheduling
+        self._scan_thread: Optional[threading.Thread] = None
+        self._scan_stop_event = threading.Event()
+        self._scan_interval_s = 300  # default 5 minutes
+        self._scan_failure_count = 0
+
     # ── Memory module access (graceful degradation) ──
 
     def _probe_modules(self) -> None:
@@ -190,8 +196,12 @@ class SynapticBridge:
         self._started = True
         logger.info("SynapticBridge started — listening to fleet.*, surgeon.*, evidence.*")
 
+        # Auto-start pattern scan (best-effort, non-blocking)
+        self.start_pattern_scan(interval_s=self._scan_interval_s)
+
     def stop(self) -> None:
-        """Unsubscribe from events."""
+        """Unsubscribe from events and stop pattern scan."""
+        self.stop_pattern_scan()
         if not self._started or self._bus is None:
             return
         self._bus.off("fleet.*", self._on_fleet_event)
@@ -599,4 +609,123 @@ class SynapticBridge:
                 "chain_breaks": self._chain_breaks,
                 "personality_available": self._personality_factory is not None,
                 "pattern_engine_available": self._pattern_engine_factory is not None,
+                "pattern_scan_active": self._scan_thread is not None and self._scan_thread.is_alive(),
+                "pattern_scan_failures": self._scan_failure_count,
             }
+
+    # ── Scheduled pattern scan ──
+
+    def start_pattern_scan(self, interval_s: int = 300) -> bool:
+        """Start a background thread that runs pattern engine scan on interval.
+
+        When patterns are detected, emits ``synaptic.pattern.detected`` events
+        on the EventBus and pushes insights to the Synaptic outbox for webhook
+        injection (S6/S8).
+
+        Args:
+            interval_s: Seconds between scans (default 300 = 5 min).
+
+        Returns:
+            True if scan thread started, False if already running or engine
+            unavailable.
+        """
+        if self._scan_thread is not None and self._scan_thread.is_alive():
+            logger.debug("Pattern scan already running")
+            return False
+
+        engine = self._get_pattern_engine()
+        if engine is None:
+            logger.warning("Cannot start pattern scan — pattern engine unavailable")
+            return False
+
+        self._scan_interval_s = max(30, interval_s)  # floor at 30s
+        self._scan_stop_event.clear()
+
+        self._scan_thread = threading.Thread(
+            target=self._pattern_scan_loop,
+            name="synaptic-pattern-scan",
+            daemon=True,
+        )
+        self._scan_thread.start()
+        logger.info(
+            "Synaptic pattern scan started — interval %ds", self._scan_interval_s
+        )
+        return True
+
+    def stop_pattern_scan(self) -> None:
+        """Stop the background pattern scan thread."""
+        self._scan_stop_event.set()
+        if self._scan_thread is not None:
+            self._scan_thread.join(timeout=5)
+            self._scan_thread = None
+        logger.info("Synaptic pattern scan stopped")
+
+    def _pattern_scan_loop(self) -> None:
+        """Background loop: scan → emit → outbox, repeat every interval."""
+        while not self._scan_stop_event.is_set():
+            try:
+                self._run_single_scan()
+            except Exception as exc:
+                self._scan_failure_count += 1
+                logger.error("Pattern scan cycle failed: %s", exc)
+
+            # Wait for next interval (interruptible via stop event)
+            self._scan_stop_event.wait(timeout=self._scan_interval_s)
+
+    def _run_single_scan(self) -> None:
+        """Execute one scan cycle: scan → emit events → surface to outbox."""
+        engine = self._get_pattern_engine()
+        if engine is None:
+            return
+
+        result = engine.scan()
+        logger.info(
+            "Pattern scan %s: %d found (%d new, %d reinforced) in %.0fms",
+            result.scan_id,
+            result.patterns_found,
+            result.new_patterns,
+            result.reinforced_patterns,
+            result.scan_duration_ms,
+        )
+
+        # Emit events for newly detected patterns
+        if result.new_patterns > 0 or result.reinforced_patterns > 0:
+            recent = engine.get_recent(limit=result.patterns_found, unsurfaced_only=True)
+            for pattern in recent:
+                self._emit_pattern_event(pattern)
+
+            # Push to outbox for S6/S8 webhook injection
+            surfaced = engine.surface_to_outbox(max_patterns=3)
+            if surfaced:
+                logger.info("Surfaced %d patterns to Synaptic outbox", surfaced)
+
+    def _emit_pattern_event(self, pattern) -> None:
+        """Emit a synaptic.pattern.detected event for a single pattern."""
+        payload = {
+            "pattern_type": pattern.pattern_type,
+            "title": pattern.title,
+            "confidence": pattern.confidence,
+            "description": pattern.description[:200],
+            "actionable": pattern.actionable,
+            "suggested_action": pattern.suggested_action[:150] if pattern.suggested_action else "",
+        }
+
+        # Record as local insight
+        self._add_insight(Insight(
+            category="pattern",
+            severity="warning" if pattern.confidence >= 0.7 else "info",
+            message=f"[Pattern] {pattern.title} (conf: {pattern.confidence:.0%})",
+            source_event="synaptic.pattern.detected",
+            evidence={"pattern_type": pattern.pattern_type},
+        ))
+
+        # Emit to bus
+        if self._bus is not None:
+            try:
+                self._bus.emit(
+                    "synaptic.pattern.detected",
+                    payload,
+                    source="synaptic-bridge",
+                )
+            except Exception as exc:
+                logger.debug("Failed to emit pattern event: %s", exc)
