@@ -23,13 +23,17 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
-from rich import box
-from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
 
 # ── Constants ─────────────────────────────────────────────────────────
 
@@ -169,6 +173,10 @@ class TheaterDashboard:
     """
 
     def __init__(self, daemon_port: int = 8855, refresh_rate: float = 2.0):
+        if not HAS_RICH:
+            raise ImportError(
+                "'rich' package required for TheaterDashboard. Install: pip install rich>=13.0"
+            )
         self._port = daemon_port
         self._refresh = refresh_rate
         self._console = Console()

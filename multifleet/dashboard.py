@@ -7,12 +7,17 @@ Usage: python3 -m multifleet.dashboard
 """
 import json, sys, threading, urllib.request
 from datetime import datetime
-from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
+
+try:
+    from rich.console import Console
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
 
 DAEMON = "http://127.0.0.1:8855"
 
@@ -132,6 +137,9 @@ def build_dashboard(data: dict | None) -> Layout:
 
 
 def main():
+    if not HAS_RICH:
+        print("ERROR: 'rich' package required for dashboard. Install: pip install rich>=13.0", file=sys.stderr)
+        sys.exit(1)
     console, stop = Console(), threading.Event()
 
     def _keys():
