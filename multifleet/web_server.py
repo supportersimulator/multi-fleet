@@ -252,6 +252,8 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             self._serve_sse()
         elif path in ("/arbiter", "/arbiter/"):
             self._serve_arbiter()
+        elif path == "/arbiter/decisions":
+            self._serve_arbiter_decisions()
         elif path == "/arbiter/pending":
             self._serve_json(self._get_arbiter_pending())
         elif path == "/regression":
@@ -296,6 +298,20 @@ class FleetWebHandler(BaseHTTPRequestHandler):
     # ── Route handlers ──
 
     def _serve_arbiter(self):
+        try:
+            from multifleet.human_arbiter_view import build_human_arbiter_html
+            html = build_human_arbiter_html(self.daemon_port)
+        except ImportError:
+            # Fall back to legacy arbiter view
+            try:
+                from multifleet.arbiter_view import build_arbiter_html
+                html = build_arbiter_html(self.daemon_port)
+            except ImportError:
+                html = "<html><body><h1>Fleet Arbiter</h1><p>arbiter_view module not available</p></body></html>"
+        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _serve_arbiter_decisions(self):
+        """Serve the legacy decision-focused arbiter view."""
         try:
             from multifleet.arbiter_view import build_arbiter_html
             html = build_arbiter_html(self.daemon_port)

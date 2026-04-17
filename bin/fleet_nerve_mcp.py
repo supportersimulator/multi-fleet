@@ -3047,6 +3047,24 @@ TOOLS = [
     },
 ]
 
+def _fleet_server_tool(args: dict) -> str:
+    """Start/stop/status the fleet web server."""
+    action = args.get("action", "status")
+    port = args.get("port", 8856)
+    if action == "status":
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3)
+            return f"Fleet web server running on port {port}"
+        except Exception:
+            return f"Fleet web server not running on port {port}"
+    elif action == "start":
+        return f"Use: python3 -m multifleet.web_server --port {port}"
+    elif action == "stop":
+        return "Web server stop not implemented via MCP. Use process manager."
+    return f"Unknown action: {action}"
+
+
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
 

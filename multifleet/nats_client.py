@@ -1129,7 +1129,12 @@ class FleetNerveNATS:
             return {"delivered": False}
 
     async def _send_p3_chief(self, target: str, message: dict) -> dict:
-        """P3: Chief relay -- stores and forwards. Tries direct, then tunnel."""
+        """P3: Chief relay -- relay message through chief's daemon /message endpoint.
+
+        When this node cannot reach the target directly (P1/P2 failed), it asks
+        the chief node to forward the message via the chief's daemon on port 8855.
+        Only useful for non-chief nodes; chief skips this channel (it IS the relay).
+        """
         if not self._chief:
             return {"delivered": False}
         chief = self._resolve_peer(self._chief)
@@ -1137,16 +1142,23 @@ class FleetNerveNATS:
         if not chief_ip or self.node_id == self._chief:
             return {"delivered": False}
         import urllib.request
-        payload = json.dumps({"from": self.node_id, "to": [target],
-                              "subject": message.get("payload", {}).get("subject", ""),
-                              "body": message.get("payload", {}).get("body", "")}).encode()
-        # Try direct chief, then via tunnel (localhost:8844 if tunneled)
-        urls = [f"http://{chief_ip}:8844/message", "http://127.0.0.1:8844/message"]
+        # Wrap as relay request: chief daemon forwards to target via its own channels
+        relay_msg = dict(message)
+        relay_msg["_relay_from"] = self.node_id
+        relay_msg["to"] = target
+        payload = json.dumps(relay_msg).encode()
+        # Chief's daemon listens on 8855 (same as all daemons), not a separate port
+        chief_port = chief.get("port", 8855)
+        urls = [f"http://{chief_ip}:{chief_port}/message"]
+        # Also try localhost if tunneled to chief
+        tunnel_port = chief.get("tunnel_port")
+        if tunnel_port:
+            urls.append(f"http://127.0.0.1:{tunnel_port}/message")
         for url in urls:
             try:
                 req = urllib.request.Request(url, data=payload,
                     headers={"Content-Type": "application/json"}, method="POST")
-                urllib.request.urlopen(req, timeout=3)
+                urllib.request.urlopen(req, timeout=5)
                 return {"delivered": True, "url": url}
             except Exception:
                 continue
@@ -2016,6 +2028,29 @@ class FleetNerveNATS:
                     self.wfile.write(data)
                 elif self.path == "/dashboard":
                     try:
+                        from .dashboard_data import FleetDashboardData
+                        from .theatrical.theatrical_dashboard import TheatricalDashboard
+                        dd = FleetDashboardData(daemon_port=8855)
+                        td = TheatricalDashboard(dashboard_data=dd)
+                        data = td.render().encode("utf-8")
+                    except Exception as e:
+                        # Fallback to text dashboard
+                        try:
+                            from .dashboard import render_dashboard
+                            from .config import load_peers
+                            peers, _chief = load_peers()
+                            text = render_dashboard(daemon.node_id, peers, port=8855)
+                            data = (text or "Fleet idle -- no activity").encode()
+                        except Exception as e2:
+                            data = f"Dashboard error: {e} / {e2}".encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(data)
+                elif self.path == "/dashboard/legacy":
+                    try:
                         from .dashboard import render_dashboard
                         from .config import load_peers
                         peers, _chief = load_peers()
@@ -2064,6 +2099,18 @@ class FleetNerveNATS:
                         self._json_response(200, td.gather_data())
                     except Exception as e:
                         self._json_response(500, {"error": str(e)})
+                elif self.path == "/arbiter":
+                    try:
+                        from .human_arbiter_view import build_human_arbiter_html
+                        data = build_human_arbiter_html(daemon_port=8855).encode("utf-8")
+                    except Exception as e:
+                        data = f"<html><body><h1>Arbiter View Error</h1><pre>{e}</pre></body></html>".encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(data)
                 elif self.path == "/broadcast/health":
                     # Run async broadcast in the event loop
                     future = asyncio.run_coroutine_threadsafe(daemon.broadcast_health(), main_loop)
