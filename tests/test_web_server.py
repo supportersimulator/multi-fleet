@@ -91,10 +91,15 @@ class TestDashboardEndpoint:
         status, headers, body = _auth_get(running_server, "/")
         assert status == 200
         assert "text/html" in headers.get("Content-Type", "")
-        assert b"Fleet Dashboard" in body
+        assert b"Context DNA" in body
 
     def test_dashboard_alias(self, running_server):
         status, headers, body = _auth_get(running_server, "/dashboard")
+        assert status == 200
+        assert b"Context DNA" in body
+
+    def test_legacy_dashboard(self, running_server):
+        status, headers, body = _auth_get(running_server, "/dashboard/legacy")
         assert status == 200
         assert b"Fleet Dashboard" in body
 

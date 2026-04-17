@@ -55,6 +55,19 @@ _server_thread: Optional[threading.Thread] = None
 _ide_panel_server = None
 _panel_bus_bridge = None
 _panel_engine_bridge = None
+_theatrical_dashboard = None
+
+
+def _get_theatrical_dashboard():
+    """Lazy-init theatrical dashboard."""
+    global _theatrical_dashboard
+    if _theatrical_dashboard is None:
+        try:
+            from multifleet.theatrical.theatrical_dashboard import TheatricalDashboard
+            _theatrical_dashboard = TheatricalDashboard()
+        except Exception as e:
+            logger.warning("Could not init theatrical dashboard: %s", e)
+    return _theatrical_dashboard
 
 
 def _get_aggregator():
@@ -216,6 +229,8 @@ class FleetWebHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/", "/dashboard"):
+            self._serve_theatrical_dashboard()
+        elif path == "/dashboard/legacy":
             self._serve_dashboard()
         elif path == "/api/status":
             self._serve_json(self._get_status())
@@ -291,6 +306,26 @@ class FleetWebHandler(BaseHTTPRequestHandler):
     def _get_arbiter_pending(self):
         data = _fetch_daemon("/arbiter/pending")
         return data or {"decisions": [], "count": 0}
+
+    def _serve_theatrical_dashboard(self):
+        dash = _get_theatrical_dashboard()
+        if dash is None:
+            self._serve_dashboard()
+            return
+        try:
+            # Inject live fleet data from daemon if available
+            daemon_health = _fetch_daemon("/health", timeout=1.5)
+            if daemon_health:
+                data = dash.gather_data()
+                data["fleet"] = daemon_health
+                html_content = dash.render(data=data)
+            else:
+                html_content = dash.render()
+        except Exception as exc:
+            logger.warning("Theatrical dashboard render failed: %s", exc)
+            self._serve_dashboard()
+            return
+        self._send(200, html_content.encode("utf-8"), "text/html; charset=utf-8")
 
     def _serve_dashboard(self):
         try:

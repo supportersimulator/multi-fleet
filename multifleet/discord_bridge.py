@@ -19,6 +19,7 @@ import subprocess
 import time
 import urllib.request
 from collections import deque
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger("fleet-nerve.discord-bridge")
@@ -39,6 +40,8 @@ THREE_SURGEONS_URL = "http://127.0.0.1:3541"
 MIN_SEND_INTERVAL_S = 1.0
 MAX_QUEUE = 500
 POLL_INTERVAL_S = 5.0
+IMAGE_DIR = Path("/tmp/fleet-discord-images")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
 
 # Node colors for embeds
 _NODE_COLORS = {
@@ -115,7 +118,31 @@ def format_fleet_embed(msg: dict) -> dict:
     }
 
 
-def _write_seed_file(node_id: str, content: str, author_name: str, is_command: bool = False):
+async def _download_attachments(attachments: list) -> list[str]:
+    """Download image attachments from Discord message. Returns list of saved file paths."""
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    loop = asyncio.get_event_loop()
+    for att in attachments:
+        ext = Path(att.filename).suffix.lower()
+        if ext not in IMAGE_EXTENSIONS:
+            continue
+        ts = int(time.time() * 1000)
+        dest = IMAGE_DIR / f"{ts}_{att.filename}"
+        try:
+            req = urllib.request.Request(att.url)
+            resp = await loop.run_in_executor(None, lambda r=req: urllib.request.urlopen(r, timeout=30))
+            data = await loop.run_in_executor(None, resp.read)
+            dest.write_bytes(data)
+            saved.append(str(dest))
+            logger.info("Saved attachment: %s (%d bytes)", dest, len(data))
+        except Exception as e:
+            logger.warning("Failed to download attachment %s: %s", att.filename, e)
+    return saved
+
+
+def _write_seed_file(node_id: str, content: str, author_name: str, is_command: bool = False,
+                     image_paths: list[str] | None = None):
     """Write Discord message as seed file for Claude Code fleet-inbox-hook injection.
 
     Every Discord message in the fleet channel becomes a seed file at
@@ -130,11 +157,16 @@ def _write_seed_file(node_id: str, content: str, author_name: str, is_command: b
         with open(seed_path, "w") as f:
             f.write(f"## [{msg_type}] from {author_name} (via Discord)\n\n")
             f.write(f"{content}\n")
+            if image_paths:
+                f.write(f"\n### Attached Images ({len(image_paths)})\n")
+                for img in image_paths:
+                    f.write(f"- **Image**: `{img}`\n")
+                f.write("\nATLAS: Use the Read tool on each image path above to view them.\n")
         # Touch trigger file — LaunchAgent watches this to wake Claude Code
         trigger = "/tmp/discord-wake-trigger"
         with open(trigger, "w") as f:
             f.write(str(ts))
-        logger.info("Seed file written: %s (trigger touched)", seed_path)
+        logger.info("Seed file written: %s (trigger touched, images: %d)", seed_path, len(image_paths or []))
     except Exception as e:
         logger.warning("Failed to write seed file: %s", e)
 
@@ -196,6 +228,9 @@ def parse_discord_message(content: str, author_id: str = "unknown") -> Optional[
         !fleet send <target> <message>
         !fleet broadcast <message>
         !fleet status
+        !fleet search <query>           — search Discord channel history
+        !fleet report <node> <status>   — report node progress
+        !fleet progress                 — show all node progress
     """
     if not content.startswith("!fleet "):
         return None
@@ -206,6 +241,16 @@ def parse_discord_message(content: str, author_id: str = "unknown") -> Optional[
     cmd = parts[0]
     if cmd == "status":
         return {"type": "status_request", "from": f"discord:{author_id}"}
+    elif cmd == "search" and len(parts) >= 2:
+        query = " ".join(parts[1:])
+        return {"type": "history_search", "from": f"discord:{author_id}", "query": query}
+    elif cmd == "report" and len(parts) >= 3:
+        return {
+            "type": "progress_report", "from": f"discord:{author_id}",
+            "node": parts[1], "status_text": parts[2],
+        }
+    elif cmd == "progress":
+        return {"type": "progress_query", "from": f"discord:{author_id}"}
     elif cmd == "broadcast" and len(parts) >= 2:
         return {
             "type": "context", "from": f"discord:{author_id}", "to": "all",
@@ -217,6 +262,78 @@ def parse_discord_message(content: str, author_id: str = "unknown") -> Optional[
             "payload": {"subject": f"Discord -> {parts[1]}", "body": parts[2]},
         }
     return None
+
+
+# ── Progress Ledger (per-node return-and-report) ──
+
+_PROGRESS_DB = Path("/tmp/fleet-progress-ledger.json")
+
+
+def _load_progress() -> dict:
+    """Load progress ledger from disk. Returns {node_id: [entries]}."""
+    if _PROGRESS_DB.exists():
+        try:
+            return json.loads(_PROGRESS_DB.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_progress(data: dict) -> None:
+    """Persist progress ledger."""
+    try:
+        _PROGRESS_DB.write_text(json.dumps(data, indent=2))
+    except OSError as e:
+        logger.warning("Failed to save progress ledger: %s", e)
+
+
+def record_progress(node_id: str, status_text: str, source: str = "discord") -> dict:
+    """Record a progress entry for a node. Returns the entry."""
+    data = _load_progress()
+    entries = data.setdefault(node_id, [])
+    entry = {
+        "ts": time.time(),
+        "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "status": status_text,
+        "source": source,
+    }
+    entries.append(entry)
+    # Keep last 50 entries per node
+    if len(entries) > 50:
+        data[node_id] = entries[-50:]
+    _save_progress(data)
+    return entry
+
+
+def get_progress_summary() -> str:
+    """Get formatted progress summary for all nodes."""
+    data = _load_progress()
+    if not data:
+        return "No progress reports recorded yet."
+    lines = []
+    for node in sorted(data.keys()):
+        entries = data[node]
+        if not entries:
+            continue
+        latest = entries[-1]
+        age_s = time.time() - latest["ts"]
+        age_str = f"{int(age_s)}s" if age_s < 60 else f"{int(age_s/60)}m" if age_s < 3600 else f"{int(age_s/3600)}h"
+        lines.append(f"**{node}** ({age_str} ago): {latest['status']}")
+        if len(entries) > 1:
+            lines.append(f"  ↳ {len(entries)} total reports")
+    return "\n".join(lines) if lines else "No progress reports recorded."
+
+
+def get_node_progress(node_id: str, limit: int = 10) -> str:
+    """Get detailed progress for a specific node."""
+    data = _load_progress()
+    entries = data.get(node_id, [])
+    if not entries:
+        return f"No progress reports for {node_id}."
+    lines = [f"**{node_id}** — {len(entries)} report(s):"]
+    for entry in entries[-limit:]:
+        lines.append(f"  [{entry['iso']}] {entry['status']}")
+    return "\n".join(lines)
 
 
 # ── Bridge ──
@@ -308,10 +425,15 @@ class DiscordFleetBridge:
             content = message.content.strip()
             author_name = str(message.author.display_name or message.author.name)
 
+            # ── Download image attachments ──
+            image_paths: list[str] = []
+            if message.attachments:
+                image_paths = await _download_attachments(list(message.attachments))
+
             # ── !3s commands → 3-surgeons HTTP API (bypass fleet daemon) ──
             parsed_3s = parse_3s_command(content)
             if parsed_3s:
-                _write_seed_file(self.node_id, content, author_name, is_command=True)
+                _write_seed_file(self.node_id, content, author_name, is_command=True, image_paths=image_paths)
                 await message.add_reaction("\U0001F52C")  # microscope — thinking
                 result = await call_3s_api(parsed_3s)
                 if result["ok"]:
@@ -344,12 +466,88 @@ class DiscordFleetBridge:
 
             # Write seed file for Claude Code injection on ANY message
             # (not just !fleet commands — Aaron directing from iPad should inject)
-            _write_seed_file(self.node_id, content, author_name, is_command=parsed is not None)
+            _write_seed_file(self.node_id, content, author_name, is_command=parsed is not None,
+                             image_paths=image_paths)
 
             if not parsed:
                 # Not a !fleet command but still injected via seed file
-                await message.add_reaction("\U0001F4E8")  # envelope
+                if image_paths:
+                    await message.add_reaction("\U0001F4F7")  # camera — image saved
+                else:
+                    await message.add_reaction("\U0001F4E8")  # envelope
                 return
+
+            # ── Handle history search locally (Discord API, not fleet daemon) ──
+            if parsed["type"] == "history_search":
+                await message.add_reaction("\U0001F50D")  # magnifying glass
+                query = parsed["query"].lower()
+                matches = []
+                try:
+                    async for hist_msg in self._channel.history(limit=500):
+                        if hist_msg.author == client.user and hist_msg.embeds:
+                            # Search embed content (fleet messages)
+                            for emb in hist_msg.embeds:
+                                searchable = f"{emb.title or ''} {emb.description or ''}"
+                                for f_obj in (emb.fields or []):
+                                    searchable += f" {f_obj.value}"
+                                if query in searchable.lower():
+                                    matches.append({
+                                        "time": hist_msg.created_at.strftime("%m/%d %H:%M"),
+                                        "title": (emb.title or "")[:80],
+                                        "snippet": (emb.description or "")[:120],
+                                    })
+                        elif query in (hist_msg.content or "").lower():
+                            matches.append({
+                                "time": hist_msg.created_at.strftime("%m/%d %H:%M"),
+                                "title": f"@{hist_msg.author.display_name}",
+                                "snippet": hist_msg.content[:120],
+                            })
+                        if len(matches) >= 15:
+                            break
+                except Exception as e:
+                    logger.warning("History search failed: %s", e)
+                    await message.channel.send(f"Search error: {e}")
+                    await message.add_reaction("\u274C")
+                    return
+
+                if not matches:
+                    await message.channel.send(f"No results for: `{parsed['query']}`")
+                else:
+                    result_lines = [f"**{m['time']}** {m['title']}: {m['snippet']}" for m in matches]
+                    embed = discord.Embed(
+                        title=f"Search: \"{parsed['query']}\" ({len(matches)} results)",
+                        description="\n".join(result_lines)[:4096],
+                        color=0x3498DB,
+                    )
+                    await message.channel.send(embed=embed)
+                await message.add_reaction("\u2705")
+                return
+
+            # ── Handle progress report (local ledger) ──
+            if parsed["type"] == "progress_report":
+                entry = record_progress(parsed["node"], parsed["status_text"], source=str(message.author))
+                embed = discord.Embed(
+                    title=f"Progress: {parsed['node']}",
+                    description=f"Recorded: {parsed['status_text']}",
+                    color=_NODE_COLORS.get(parsed["node"], _DEFAULT_COLOR),
+                )
+                embed.set_footer(text=f"Logged at {entry['iso']}")
+                await message.channel.send(embed=embed)
+                await message.add_reaction("\u2705")
+                return
+
+            # ── Handle progress query ──
+            if parsed["type"] == "progress_query":
+                summary = get_progress_summary()
+                embed = discord.Embed(
+                    title="Fleet Progress — All Nodes",
+                    description=summary[:4096],
+                    color=0x9B59B6,
+                )
+                await message.channel.send(embed=embed)
+                await message.add_reaction("\u2705")
+                return
+
             # Forward to fleet daemon
             try:
                 data = json.dumps(parsed).encode()
@@ -403,6 +601,75 @@ class DiscordFleetBridge:
 
 
 # ── Module-level helpers ──
+
+def report_to_discord(node_id: str, status_text: str, channel_id: str = "") -> dict:
+    """Programmatic return-and-report: push progress from any node to Discord.
+
+    Usable from CLI, daemon hooks, or any Python caller.
+    Records to local ledger AND posts to Discord via fleet daemon relay.
+
+    Delivery priority: fleet daemon (relay to bridge) → Discord REST API direct.
+
+    Returns {"ok": bool, "ledger": entry_dict, "discord": bool}.
+    """
+    # Record locally first (always succeeds)
+    entry = record_progress(node_id, status_text, source="auto")
+
+    discord_sent = False
+
+    # Try 1: Route through fleet daemon → bridge bot (preferred, bot has permissions)
+    try:
+        msg = {
+            "type": "progress_report",
+            "from": node_id,
+            "to": "discord",
+            "payload": {
+                "subject": f"[{node_id.upper()}] Progress Report",
+                "body": status_text,
+            },
+        }
+        payload = json.dumps(msg).encode()
+        req = urllib.request.Request(
+            f"{DAEMON_URL}/message",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        discord_sent = True
+    except Exception as e:
+        logger.debug("Daemon relay failed, trying REST: %s", e)
+
+    # Try 2: Direct Discord REST API (fallback if daemon not running)
+    if not discord_sent:
+        token = get_bot_token()
+        ch_id = channel_id or os.environ.get("FLEET_DISCORD_CHANNEL_ID", "")
+        if validate_bot_token(token) and validate_channel_id(ch_id):
+            try:
+                color = _NODE_COLORS.get(node_id, _DEFAULT_COLOR)
+                embed_data = {
+                    "title": f"[{node_id.upper()}] Progress Report",
+                    "description": status_text[:4096],
+                    "color": color,
+                    "footer": {"text": f"Auto-report at {entry['iso']}"},
+                }
+                rest_payload = json.dumps({"embeds": [embed_data]}).encode()
+                req = urllib.request.Request(
+                    f"https://discord.com/api/v10/channels/{ch_id}/messages",
+                    data=rest_payload,
+                    headers={
+                        "Authorization": f"Bot {token}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=10)
+                discord_sent = True
+            except Exception as e:
+                logger.warning("report_to_discord REST fallback failed: %s", e)
+
+    return {"ok": True, "ledger": entry, "discord": discord_sent}
+
 
 def status() -> dict:
     token = get_bot_token()

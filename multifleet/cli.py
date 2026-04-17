@@ -770,6 +770,27 @@ def cmd_discord(args):
         except FileNotFoundError:
             print("  Cannot detect running processes (pgrep not available).")
 
+    elif action == "report":
+        from multifleet.discord_bridge import report_to_discord
+        import os as _os
+        node_id = getattr(args, "node", None) or _os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+        message = getattr(args, "message", None)
+        if not message:
+            _die("--message/-m required for report. Example: fleet discord report -m 'gap X bridged'")
+            return
+        _header(f"Reporting progress for {node_id}")
+        result = report_to_discord(node_id, message)
+        _ok(f"Ledger: recorded at {result['ledger']['iso']}")
+        if result["discord"]:
+            _ok("Discord: posted")
+        else:
+            _warn("Discord: not posted (token/channel not configured or unreachable)")
+
+    elif action == "progress":
+        from multifleet.discord_bridge import get_progress_summary
+        _header("Fleet Progress — All Nodes")
+        print(get_progress_summary())
+
     else:
         _die(f"Unknown discord action: {action}")
 
@@ -936,8 +957,10 @@ def main():
 
     # discord — Discord bridge management (P0 channel)
     disc_p = sub.add_parser("discord", help="Discord bridge — P0 communication channel")
-    disc_p.add_argument("action", choices=["start", "stop", "status"],
-                        help="start=launch bridge, stop=find/kill process, status=check config")
+    disc_p.add_argument("action", choices=["start", "stop", "status", "report", "progress"],
+                        help="start=launch bridge, stop=kill, status=config, report=log progress, progress=show all")
+    disc_p.add_argument("--node", help="Node ID for report (default: self)")
+    disc_p.add_argument("--message", "-m", help="Status message for report")
 
     # nats-cluster — NATS cluster management
     nc_p = sub.add_parser("nats-cluster", help="NATS cluster management (generate/start/stop/status)")
