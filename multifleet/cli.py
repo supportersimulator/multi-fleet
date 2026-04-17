@@ -795,6 +795,15 @@ def cmd_discord(args):
         _die(f"Unknown discord action: {action}")
 
 
+def cmd_init(args):
+    """Scaffold a working fleet setup from zero."""
+    from multifleet.init_command import run_init
+    run_init(
+        auto_yes=getattr(args, "yes", False),
+        node_id_override=getattr(args, "node_id", None),
+    )
+
+
 def cmd_nats_cluster(args):
     """NATS cluster management — generate config, start/stop server, check status."""
     from multifleet.nats_cluster import (
@@ -857,6 +866,11 @@ def main():
         version=f"%(prog)s {__version__}",
     )
     sub = parser.add_subparsers(dest="command")
+
+    # init
+    init_p = sub.add_parser("init", help="Scaffold a working fleet setup from zero")
+    init_p.add_argument("--yes", "-y", action="store_true", help="Non-interactive mode (accept all defaults)")
+    init_p.add_argument("--node-id", help="Override auto-detected node ID")
 
     # status
     sub.add_parser("status", help="Fleet health overview")
@@ -976,6 +990,7 @@ def main():
 
     # Route to handlers
     handlers = {
+        "init": cmd_init,
         "status": cmd_status,
         "peers": cmd_peers,
         "channels": cmd_channels,
