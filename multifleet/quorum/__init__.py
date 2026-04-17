@@ -25,6 +25,7 @@ from .stress_score import (
     STRESS_NORMAL,
     apply_stress_policy,
     compute_stress_score,
+    emit_stress_event,
     get_stress_level,
 )
 from .quorum_registry import QuorumRegistry
@@ -40,6 +41,7 @@ __all__ = [
     "STRESS_GUARDED",
     "STRESS_DEGRADED",
     "STRESS_CRITICAL",
+    "emit_stress_event",
     "QuorumRegistry",
     "compute_node_reputation",
 ]

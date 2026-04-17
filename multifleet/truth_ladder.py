@@ -139,6 +139,18 @@ class TruthLadder:
         except Exception:
             pass  # Best-effort
 
+        # Emit to EventBus (truth_ladder <-> event_bus wiring)
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            emit_typed(EventType.TRUTH_ENTRY_CREATED, EventSource.MULTI_FLEET, {
+                "entry_id": entry.id,
+                "layer": "inbox",
+                "title": title,
+            })
+        except Exception:
+            pass  # Best-effort — EventBus emission must never break truth ladder
+
         return entry
 
     def promote_to_vision(self, inbox_id: str, evidence_refs: list[str] = None,
@@ -307,6 +319,20 @@ class TruthLadder:
             )
         except Exception:
             pass  # Best-effort
+
+        # Emit promotion to EventBus (truth_ladder <-> event_bus wiring)
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            emit_typed(EventType.TRUTH_PROMOTION, EventSource.MULTI_FLEET, {
+                "entry_id": promoted.id,
+                "from_layer": expected_layer,
+                "to_layer": target_layer,
+                "source_id": source_id,
+                "promoted_by": promoted_by or "unknown",
+            })
+        except Exception:
+            pass  # Best-effort — EventBus emission must never break truth ladder
 
         return promoted
 

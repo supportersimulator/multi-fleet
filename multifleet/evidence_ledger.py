@@ -315,6 +315,45 @@ class EvidenceLedger:
             "chain_checked": chain_check["checked"],
         }
 
+    def evidence_for_surgeon(self, topic: str, limit: int = 5) -> list[dict]:
+        """Retrieve recent evidence relevant to a surgeon review topic.
+
+        Searches evidence entries by subject keyword matching against the topic.
+        Returns compact evidence summaries suitable for cross-exam context.
+
+        This is the evidence_ledger <-> surgeon_adapter bridge: surgeons
+        get real fleet evidence instead of operating on claims alone.
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT entry_id, timestamp, event_type, node_id, subject, entry_hash "
+                "FROM evidence WHERE subject LIKE ? ORDER BY seq DESC LIMIT ?",
+                (f"%{topic[:50]}%", limit),
+            ).fetchall()
+            if not rows:
+                # Fallback: return latest entries as general context
+                rows = conn.execute(
+                    "SELECT entry_id, timestamp, event_type, node_id, subject, entry_hash "
+                    "FROM evidence ORDER BY seq DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [
+                {
+                    "entry_id": r["entry_id"][:8],
+                    "event_type": r["event_type"],
+                    "node_id": r["node_id"],
+                    "subject": r["subject"] or "",
+                    "hash_prefix": r["entry_hash"][:12],
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.debug("evidence_for_surgeon query failed: %s", e)
+            return []
+        finally:
+            self._maybe_close(conn)
+
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         """Convert a sqlite3.Row to a plain dict with parsed payload."""
         d = dict(row)

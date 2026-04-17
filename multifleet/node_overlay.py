@@ -215,6 +215,18 @@ class NodeOverlayManager:
                     else:
                         logger.warning("Unknown field %s.%s", strip_name, k)
 
+        # Emit state change to EventBus (node_overlay <-> event_bus wiring)
+        try:
+            from multifleet.event_emitter import emit_typed
+            from multifleet.event_schema import EventType, EventSource
+            emit_typed(EventType.OVERLAY_STATE_CHANGED, EventSource.MULTI_FLEET, {
+                "node_id": node_id,
+                "health_score": overlay.health_score(),
+                "updated_strips": list(kwargs.keys()),
+            })
+        except Exception:
+            pass  # Best-effort — EventBus emission must never break overlay updates
+
         return overlay
 
     def get(self, node_id: str) -> Optional[NodeOverlay]:

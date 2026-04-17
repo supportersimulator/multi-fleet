@@ -381,6 +381,27 @@ class FleetSendGate:
                                 f"confidence={cross_exam.get('confidence', 0):.2f})",
                                 critical=True,
                             ))
+                            # INTERLOCK 1→4: Dissent flows to QuorumRegistry
+                            # When surgeon cross-exam rejects a strategic signal,
+                            # register the dissent as a fleet-visible proposal so
+                            # other nodes can see and vote on the disputed decision.
+                            if quorum_registry is not None and cross_exam.get("dissents"):
+                                try:
+                                    topic = (
+                                        f"Strategic signal rejected: "
+                                        f"{packet.get('type', 'unknown')}"
+                                    )
+                                    from_node = packet.get(
+                                        "from_node", packet.get("from", "unknown")
+                                    )
+                                    quorum_registry.record_surgeon_dissent(
+                                        topic, cross_exam, from_node,
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "Failed to register surgeon dissent in "
+                                        "quorum registry: %s", e,
+                                    )
                     except Exception as e:
                         # Graceful degradation: surgeon unavailable doesn't block
                         logger.warning("Surgeon cross-exam unavailable for strategic signal: %s", e)
@@ -428,6 +449,41 @@ class FleetSendGate:
                 from .quorum.stress_score import apply_stress_policy, get_stress_level
                 policy = apply_stress_policy(stress_score)
                 level = get_stress_level(stress_score)
+
+                # INTERLOCK 5→1: Critical stress triggers full surgeon protocol
+                # When stress crosses the critical threshold, emit an event
+                # and request surgeon risk assessment. This connects the
+                # environmental pressure sensor to the corrigibility layer.
+                if level == "critical":
+                    try:
+                        from .surgeon_adapter import SurgeonAdapter
+                        adapter = SurgeonAdapter()
+                        if adapter.is_available():
+                            risk_exam = adapter.request_cross_exam(
+                                topic=(
+                                    f"CRITICAL STRESS ({stress_score:.2f}): "
+                                    f"fleet sending {packet.get('type', 'unknown')} "
+                                    f"to {packet.get('to_node', packet.get('to', '?'))}"
+                                ),
+                                evidence={
+                                    "stress_score": f"{stress_score:.2f}",
+                                    "stress_level": level,
+                                    "signal_class": signal_class,
+                                    "policy": str(policy),
+                                },
+                            )
+                            checks.append(GateCheck(
+                                "stress_surgeon_risk",
+                                risk_exam.get("consensus", False),
+                                f"Surgeon risk assessment under critical stress: "
+                                f"confidence={risk_exam.get('confidence', 0):.2f}",
+                                critical=False,
+                            ))
+                    except Exception as e:
+                        logger.warning(
+                            "Surgeon risk assessment unavailable under critical "
+                            "stress: %s", e,
+                        )
 
                 if signal_class == "tactical" and not policy["allow_irreversible_actions"]:
                     is_irreversible = packet.get("meta", {}).get("irreversible", False)

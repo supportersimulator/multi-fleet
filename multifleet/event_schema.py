@@ -114,6 +114,13 @@ class EventType(Enum):
     SYNTHESIS_MERGE_DECISION = "synthesis.merge_decision"
     SYNTHESIS_DECISION = "synthesis.decision"
 
+    # Truth ladder events
+    TRUTH_ENTRY_CREATED = "truth.entry.created"
+    TRUTH_PROMOTION = "truth.promotion"
+
+    # Overlay events
+    OVERLAY_STATE_CHANGED = "overlay.state.changed"
+
     # Review events
     REVIEW_STARTED = "review.started"
     REVIEW_VERDICT_RECEIVED = "review.verdict_received"

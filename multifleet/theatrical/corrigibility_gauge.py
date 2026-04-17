@@ -107,6 +107,51 @@ class CorrigibilityGauge(TheatricalComponent):
 
         ts_str = self._format_ts(last_check) if last_check else "---"
 
+        # Gate event stats
+        block_count = data.get("block_count", 0)
+        override_count = data.get("override_count", 0)
+        gate_stats_html = (
+            f'<div class="tc-corr-stats">'
+            f'<span class="tc-badge tc-badge-{"red" if block_count else "green"}">'
+            f'{block_count} block{"s" if block_count != 1 else ""}</span>'
+            f'<span class="tc-badge tc-badge-{"yellow" if override_count else "gray"}">'
+            f'{override_count} override{"s" if override_count != 1 else ""}</span>'
+            f'</div>'
+        )
+
+        # Recent gate events (last 10)
+        recent_events = data.get("recent_gate_events", [])
+        gate_events_html = ""
+        if recent_events:
+            items = []
+            for ev in recent_events[:10]:
+                passed = ev.get("passed", True)
+                gate_name = self._esc(ev.get("gate", "?"))
+                ev_ts = self._format_ts(ev.get("timestamp"))
+                dot_color = "#22c55e" if passed else "#ef4444"
+                status = "PASS" if passed else "BLOCK"
+                failures = ev.get("failures", [])
+                fail_str = ""
+                if failures:
+                    fail_str = (
+                        f' <span class="tc-muted">({", ".join(self._esc(f) for f in failures[:3])})</span>'
+                    )
+                items.append(
+                    f'<div class="tc-gate-event">'
+                    f'{self._dot_html(dot_color)} '
+                    f'<span class="tc-ts">{ev_ts}</span> '
+                    f'<span style="color:{dot_color};font-weight:600;font-size:0.75rem;">{status}</span> '
+                    f'<span class="tc-muted">{gate_name}</span>'
+                    f'{fail_str}'
+                    f'</div>'
+                )
+            gate_events_html = (
+                f'<div class="tc-gate-feed">'
+                f'<div class="tc-feed-label">Recent Gate Events</div>'
+                f'{"".join(items)}'
+                f'</div>'
+            )
+
         return f'''<div class="tc-card" id="tc-corrigibility-gauge">
   <div class="tc-card-header">
     Corrigibility Gauge
@@ -114,5 +159,7 @@ class CorrigibilityGauge(TheatricalComponent):
   </div>
   <div class="tc-gauge-wrap">{gauge_svg}</div>
   {trend_svg}
+  {gate_stats_html}
   <div class="tc-factors">{factors_html}</div>
+  {gate_events_html}
 </div>'''

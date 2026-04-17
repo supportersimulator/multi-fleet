@@ -176,6 +176,19 @@ class SurgeonAdapter:
                 "source": "degraded",
             }
 
+        # Enrich with evidence ledger entries (evidence_ledger <-> surgeon bridge)
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            ledger = EvidenceLedger()
+            ledger_evidence = ledger.evidence_for_surgeon(topic, limit=5)
+            if ledger_evidence:
+                evidence = dict(evidence) if evidence else {}
+                evidence["ledger_entries"] = "; ".join(
+                    f"[{e['event_type']}] {e['subject']}" for e in ledger_evidence
+                )
+        except Exception as exc:
+            logger.debug("Evidence ledger enrichment failed (non-blocking): %s", exc)
+
         # Build prompt with evidence
         prompt = topic
         if evidence:

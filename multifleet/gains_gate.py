@@ -93,6 +93,7 @@ class FleetGainsGate:
             results.append(self._check_audit_trail())
             results.append(self._check_test_suite())
             results.append(self._check_invariance_rules())
+            results.append(self._check_channel_health_invariant())
 
         # Build gate result
         checks_dicts = [r.to_dict() for r in results]
@@ -428,6 +429,54 @@ class FleetGainsGate:
             return CheckResult(
                 "invariance_rules", True,
                 f"Invariance check skipped: {e}",
+                latency_ms=latency, critical=False,
+            )
+
+    def _check_channel_health_invariant(self) -> CheckResult:
+        """INV-008: Check channel health across all peers.
+
+        Uses ChannelHealthInvariant to detect degraded peer connections.
+        Violations are non-critical (advisory) — broken channels trigger
+        auto-repair, not gate failure.
+        """
+        t0 = time.monotonic()
+        try:
+            from .invariance_rules import ChannelHealthInvariant
+            health = self._get_health()
+            latency = (time.monotonic() - t0) * 1000
+            if not health:
+                return CheckResult(
+                    "channel_health_invariant", True,
+                    "No health data — channel health check skipped",
+                    latency_ms=latency, critical=False,
+                )
+            ch = health.get("channel_health", {})
+            if not ch:
+                return CheckResult(
+                    "channel_health_invariant", True,
+                    "No channel_health in daemon health (skipped)",
+                    latency_ms=latency, critical=False,
+                )
+            inv = ChannelHealthInvariant()
+            violations = inv.check(ch)
+            latency = (time.monotonic() - t0) * 1000
+            if violations:
+                peers = ", ".join(v["peer"] for v in violations)
+                return CheckResult(
+                    "channel_health_invariant", False,
+                    f"{len(violations)} peer(s) degraded: {peers}",
+                    latency_ms=latency, critical=False,
+                )
+            return CheckResult(
+                "channel_health_invariant", True,
+                f"All peer channels healthy ({len(ch)} peers checked)",
+                latency_ms=latency, critical=False,
+            )
+        except Exception as e:
+            latency = (time.monotonic() - t0) * 1000
+            return CheckResult(
+                "channel_health_invariant", True,
+                f"Channel health check skipped: {e}",
                 latency_ms=latency, critical=False,
             )
 

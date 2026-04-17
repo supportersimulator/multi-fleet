@@ -698,3 +698,149 @@ class TestIntegration_MergeBlockedBySurgeonDisagreement:
         surgeon_checks = [c for c in result.checks if c.name == "surgeon_state"]
         assert surgeon_checks[0].passed is False
         assert "disagreement" in surgeon_checks[0].message
+
+
+# ══════════════════════════════════════════════════════════════════
+# INTERLOCK WIRING: Cross-system connection points
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestWiring_DissentFlowsToQuorum:
+    """INTERLOCK 1→4: Surgeon dissent in FleetSendGate registers in QuorumRegistry."""
+
+    def test_dissent_registered_in_quorum_registry(self):
+        """When surgeon rejects a strategic signal, dissent flows to quorum registry."""
+        gate = FleetSendGate()
+        registry = QuorumRegistry()
+        pkt = _strategic_packet()
+        adapter = _mock_surgeon_adapter(
+            consensus=False, confidence=0.2,
+            dissents=["Architecture concern: shared state mutation"],
+        )
+
+        with patch(_SURGEON_ADAPTER_PATCH, return_value=adapter):
+            result = gate.check(pkt, quorum_registry=registry)
+
+        assert result.passed is False
+
+        # Dissent should have been registered as a proposal
+        pending = []
+        with patch(_SURGEON_ADAPTER_PATCH) as MockAdapter:
+            mock = _mock_surgeon_adapter(confidence=0.9)
+            MockAdapter.return_value = mock
+            pending = registry.pending_proposals()
+
+        assert len(pending) == 1
+        assert "SURGEON DISSENT" in pending[0]["topic"]
+        assert "mac1" in pending[0]["supporting_nodes"]
+
+    def test_dissent_not_registered_without_registry(self):
+        """Without quorum_registry, dissent is not registered (no crash)."""
+        gate = FleetSendGate()
+        pkt = _strategic_packet()
+        adapter = _mock_surgeon_adapter(
+            consensus=False, confidence=0.2,
+            dissents=["concern"],
+        )
+
+        with patch(_SURGEON_ADAPTER_PATCH, return_value=adapter):
+            result = gate.check(pkt, quorum_registry=None)
+
+        assert result.passed is False
+        # No crash, just no registration
+
+    def test_approval_does_not_register_dissent(self):
+        """When surgeon approves, no dissent is registered in quorum registry."""
+        gate = FleetSendGate()
+        registry = QuorumRegistry()
+        pkt = _strategic_packet()
+        adapter = _mock_surgeon_adapter(consensus=True, confidence=0.8)
+
+        with patch(_SURGEON_ADAPTER_PATCH, return_value=adapter):
+            result = gate.check(pkt, quorum_registry=registry)
+
+        with patch(_SURGEON_ADAPTER_PATCH) as MockAdapter:
+            mock = _mock_surgeon_adapter(confidence=0.9)
+            MockAdapter.return_value = mock
+            pending = registry.pending_proposals()
+
+        assert len(pending) == 0
+
+
+class TestWiring_CriticalStressSurgeonRisk:
+    """INTERLOCK 5→1: Critical stress triggers surgeon risk assessment in FleetSendGate."""
+
+    def test_critical_stress_triggers_risk_assessment(self):
+        """Critical stress score triggers surgeon risk assessment check."""
+        gate = FleetSendGate()
+        pkt = _strategic_packet(signal_class="tactical")
+        adapter = _mock_surgeon_adapter(consensus=True, confidence=0.7)
+        adapter.is_available.return_value = True
+
+        with patch(_SURGEON_ADAPTER_PATCH, return_value=adapter):
+            result = gate.check(pkt, stress_score=0.80)
+
+        risk_checks = [c for c in result.checks if c.name == "stress_surgeon_risk"]
+        assert len(risk_checks) == 1
+
+    def test_non_critical_stress_no_risk_assessment(self):
+        """Below critical stress, no surgeon risk assessment."""
+        gate = FleetSendGate()
+        pkt = _strategic_packet(signal_class="tactical")
+
+        result = gate.check(pkt, stress_score=0.40)
+
+        risk_checks = [c for c in result.checks if c.name == "stress_surgeon_risk"]
+        assert len(risk_checks) == 0
+
+    def test_critical_stress_surgeon_unavailable_degrades(self):
+        """Surgeon unavailable under critical stress degrades gracefully."""
+        gate = FleetSendGate()
+        pkt = _strategic_packet(signal_class="tactical")
+
+        with patch(_SURGEON_ADAPTER_PATCH, side_effect=ImportError("no bridge")):
+            result = gate.check(pkt, stress_score=0.80)
+
+        # Should not crash; risk check absent (degraded)
+        risk_checks = [c for c in result.checks if c.name == "stress_surgeon_risk"]
+        assert len(risk_checks) == 0
+
+
+class TestWiring_StressEventEmission:
+    """INTERLOCK 5: Stress level transitions emit events for surgeon protocol."""
+
+    def test_transition_to_critical_emits_event(self):
+        """Crossing into critical emits event with requires_surgeon=True."""
+        from multifleet.quorum.stress_score import emit_stress_event
+        event = emit_stress_event(0.60, 0.80, node_id="mac1")
+
+        assert event is not None
+        assert event["from_level"] == "degraded"
+        assert event["to_level"] == "critical"
+        assert event["requires_surgeon"] is True
+        assert event["node_id"] == "mac1"
+
+    def test_same_level_no_event(self):
+        """No event when stress stays within the same level."""
+        from multifleet.quorum.stress_score import emit_stress_event
+        event = emit_stress_event(0.30, 0.40, node_id="mac1")
+
+        assert event is None
+
+    def test_transition_from_critical_emits_event(self):
+        """Leaving critical also emits event (requires_surgeon=False)."""
+        from multifleet.quorum.stress_score import emit_stress_event
+        event = emit_stress_event(0.80, 0.50, node_id="mac2")
+
+        assert event is not None
+        assert event["from_level"] == "critical"
+        assert event["to_level"] == "degraded"
+        assert event["requires_surgeon"] is False
+
+    def test_normal_to_guarded_no_surgeon(self):
+        """Non-critical transitions don't require surgeon."""
+        from multifleet.quorum.stress_score import emit_stress_event
+        event = emit_stress_event(0.10, 0.30, node_id="mac3")
+
+        assert event is not None
+        assert event["requires_surgeon"] is False

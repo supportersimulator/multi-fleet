@@ -92,8 +92,10 @@ class TheatricalDashboard:
         # result["surgeon"]       — from 3-Surgeons probe/status endpoint
         # result["memory"]        — from ContextDNA memory heat map query
         # result["probes"]        — from probe engine last-fire results
-        # result["corrigibility"] — from corrigibility scoring system
         # result["gold"]          — from session_historian gold mining output
+
+        # Corrigibility data — gate events + ledger stats
+        result["corrigibility"] = self._gather_corrigibility_data()
 
         # Evidence ledger
         if self._ledger:
@@ -206,6 +208,107 @@ class TheatricalDashboard:
         if not component:
             return f'<div class="tc-muted">Unknown component: {html.escape(component_name)}</div>'
         return component.render(data)
+
+    def _gather_corrigibility_data(self) -> Optional[dict]:
+        """Pull real gate event data from EventBus + CorrigibilityLedger.
+
+        Returns dict with: score, trend, factors, last_check,
+        recent_gate_events, override_count, block_count.
+        """
+        now = time.time()
+        gate_events: list = []
+        pass_count = 0
+        fail_count = 0
+        block_count = 0
+        override_count = 0
+
+        # 1. Gate events from EventBus NS_GATE ring
+        try:
+            from multifleet.event_bus import IDEEventBus, NS_GATE
+            bus = IDEEventBus.get()
+            raw_events = bus.history(NS_GATE, limit=50, pattern="gate.*")
+            for ev in raw_events:
+                payload = ev.get("payload", {})
+                passed = payload.get("passed", True)
+                gate_name = payload.get("gate", "unknown")
+                ts = payload.get("timestamp") or ev.get("timestamp", 0)
+                failures = payload.get("failures", [])
+
+                if passed:
+                    pass_count += 1
+                else:
+                    fail_count += 1
+                    block_count += 1
+
+                gate_events.append({
+                    "gate": gate_name,
+                    "passed": passed,
+                    "failures": failures,
+                    "timestamp": ts,
+                })
+        except Exception as exc:
+            logger.debug("Gate event history unavailable: %s", exc)
+
+        # 2. Corrigibility ledger — decision impact stats
+        ledger_stats: dict = {}
+        try:
+            from multifleet.corrigibility_ledger import CorrigibilityLedger
+            cl = CorrigibilityLedger()
+            ledger_stats = cl.get_impact_stats()
+            override_count = ledger_stats.get("changed_by_surgeon", 0)
+        except Exception as exc:
+            logger.debug("Corrigibility ledger unavailable: %s", exc)
+
+        # 3. Compute score from real data
+        total_gate_events = pass_count + fail_count
+        if total_gate_events > 0:
+            gate_pass_rate = pass_count / total_gate_events
+        else:
+            gate_pass_rate = 1.0  # no events = assume healthy
+
+        # Corrigibility score: weighted blend of gate health + change rate
+        # High change rate = system IS corrigible (changes when surgeons say so)
+        change_rate = ledger_stats.get("change_rate", 0.0)
+        # Score: 60% gate pass rate + 40% corrigibility responsiveness
+        # A system that blocks when it should AND changes when told is maximally corrigible
+        if ledger_stats.get("total_decisions", 0) > 0:
+            score = 0.6 * gate_pass_rate + 0.4 * min(change_rate * 5, 1.0)
+        else:
+            score = gate_pass_rate
+
+        # 4. Build trend from gate events (newest first, reverse for chronological)
+        trend = []
+        running_pass = 0
+        running_total = 0
+        for ev in reversed(gate_events[:20]):
+            running_total += 1
+            if ev.get("passed"):
+                running_pass += 1
+            trend.append({
+                "timestamp": ev.get("timestamp", 0),
+                "score": running_pass / running_total if running_total else 1.0,
+            })
+
+        # 5. Factors breakdown
+        factors = {
+            "gate_pass_rate": round(gate_pass_rate, 3),
+        }
+        if ledger_stats.get("total_decisions", 0) > 0:
+            factors["change_rate"] = round(change_rate, 3)
+        if ledger_stats.get("total_disagreements", 0) > 0:
+            factors["disagreements"] = min(
+                ledger_stats["total_disagreements"] / 10.0, 1.0
+            )
+
+        return {
+            "score": round(score, 3),
+            "trend": trend,
+            "factors": factors,
+            "last_check": now,
+            "recent_gate_events": gate_events[:10],
+            "override_count": override_count,
+            "block_count": block_count,
+        }
 
     def _extract_surgeon_data(self, fleet: Optional[dict]) -> Optional[dict]:
         """Extract surgeon-relevant data from fleet snapshot."""
@@ -365,6 +468,9 @@ body {
 .tc-factors { padding: 0.3rem 0.75rem 0.5rem; }
 .tc-factor-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.15rem 0; font-size: 0.8rem; }
 .tc-factor-row .tc-muted { min-width: 100px; }
+.tc-corr-stats { display: flex; gap: 0.5rem; padding: 0.3rem 0.75rem; }
+.tc-gate-feed { padding: 0.3rem 0.75rem 0.5rem; max-height: 200px; overflow-y: auto; }
+.tc-gate-event { display: flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0; font-size: 0.8rem; border-bottom: 1px solid #1e293b; }
 
 /* === Component 9: Session Gold Stream === */
 .tc-gold-stats { display: flex; gap: 1rem; padding: 0.4rem 0.75rem; font-size: 0.8rem; color: #94a3b8; }

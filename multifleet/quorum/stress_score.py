@@ -23,7 +23,10 @@ environmentally responsive. The system that dominates at rest
 is not necessarily the system that dominates under pressure.
 """
 
+import logging
 from typing import Optional
+
+logger = logging.getLogger("fleet-nerve.stress")
 
 
 # ── Stress level constants ──
@@ -176,3 +179,56 @@ def apply_stress_policy(score: float) -> dict:
         "allow_irreversible_actions": True,
         "stress_level": STRESS_NORMAL,
     }
+
+
+def emit_stress_event(
+    previous_score: float,
+    current_score: float,
+    node_id: str = "unknown",
+) -> Optional[dict]:
+    """Emit event when stress level transitions, especially into critical.
+
+    INTERLOCK 5: When stress crosses into CRITICAL, emits an event that
+    downstream listeners (gates, surgeon adapter) can act on. This is
+    the bridge between the environmental pressure sensor and the
+    corrigibility layer.
+
+    Args:
+        previous_score: Stress score before the change.
+        current_score: Stress score after the change.
+        node_id: Which node is reporting.
+
+    Returns:
+        Event dict if a level transition occurred, None otherwise.
+    """
+    prev_level = get_stress_level(previous_score)
+    curr_level = get_stress_level(current_score)
+
+    if prev_level == curr_level:
+        return None
+
+    event = {
+        "type": "stress_level_change",
+        "from_level": prev_level,
+        "to_level": curr_level,
+        "previous_score": round(previous_score, 3),
+        "current_score": round(current_score, 3),
+        "node_id": node_id,
+        "requires_surgeon": curr_level == STRESS_CRITICAL,
+    }
+
+    # Best-effort event bus emission
+    try:
+        from ..event_bus import IDEEventBus
+        bus = IDEEventBus.get()
+        bus.emit("stress.level_change", event)
+        if curr_level == STRESS_CRITICAL:
+            bus.emit("stress.critical", event)
+            logger.warning(
+                "CRITICAL stress on %s (%.2f→%.2f) — surgeon protocol triggered",
+                node_id, previous_score, current_score,
+            )
+    except Exception:
+        pass  # Event emission must never break stress computation
+
+    return event
