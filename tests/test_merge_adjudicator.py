@@ -341,6 +341,125 @@ class TestDryRun:
         assert not (Path(git_repo["path"]) / "a.txt").exists()
 
 
+# ── Race merge (branch creation + cherry-pick automation) ──────────────────
+
+
+class TestExecuteRaceMerge:
+    def test_creates_merge_branch_and_cherry_picks(self, git_repo):
+        adj = MergeAdjudicator(repo_path=git_repo["path"])
+        result = adj.execute_race_merge({
+            "task_id": "race-42",
+            "decision": "cherry_pick",
+            "cherry_pick_from": [
+                {"machine": "mac2", "commit": git_repo["a_commit"], "reason": "adds a"},
+            ],
+        })
+        assert result.status == "ok"
+        assert result.winner_branch == "merge/race-42"
+        assert len(result.applied) == 1
+        # Verify branch exists and a.txt is on it
+        branches = _run(Path(git_repo["path"]), "git", "branch", "--list", "merge/race-42")
+        assert "merge/race-42" in branches.stdout
+        _run(Path(git_repo["path"]), "git", "checkout", "merge/race-42")
+        assert (Path(git_repo["path"]) / "a.txt").is_file()
+
+    def test_multiple_picks_on_merge_branch(self, git_repo):
+        adj = MergeAdjudicator(repo_path=git_repo["path"])
+        result = adj.execute_race_merge({
+            "task_id": "race-multi",
+            "decision": "cherry_pick",
+            "cherry_pick_from": [
+                {"machine": "mac2", "commit": git_repo["a_commit"], "reason": "a"},
+                {"machine": "mac3", "commit": git_repo["b_commit"], "reason": "b"},
+            ],
+        })
+        assert result.status == "ok"
+        assert len(result.applied) == 2
+        _run(Path(git_repo["path"]), "git", "checkout", "merge/race-multi")
+        assert (Path(git_repo["path"]) / "a.txt").is_file()
+        assert (Path(git_repo["path"]) / "b.txt").is_file()
+
+    def test_conflict_deletes_merge_branch(self, git_repo):
+        adj = MergeAdjudicator(repo_path=git_repo["path"])
+        # Fork from "winner" branch where file.txt differs — conflict_commit
+        # also modifies file.txt, so cherry-pick will conflict.
+        result = adj.execute_race_merge({
+            "task_id": "race-conflict",
+            "decision": "cherry_pick",
+            "cherry_pick_from": [
+                {"machine": "mac3", "commit": git_repo["conflict_commit"],
+                 "reason": "conflicts"},
+            ],
+        }, base_branch="winner")
+        assert result.status == "conflict"
+        assert result.winner_branch == ""  # cleaned up
+        # Merge branch should not exist
+        branches = _run(Path(git_repo["path"]), "git", "branch", "--list", "merge/race-conflict")
+        assert "merge/race-conflict" not in branches.stdout
+
+    def test_partial_keeps_merge_branch(self, git_repo):
+        adj = MergeAdjudicator(repo_path=git_repo["path"])
+        # Fork from "winner" so conflict_commit will conflict on file.txt
+        # but a_commit (adds a.txt) applies cleanly.
+        result = adj.execute_race_merge({
+            "task_id": "race-partial",
+            "decision": "cherry_pick",
+            "cherry_pick_from": [
+                {"machine": "mac2", "commit": git_repo["a_commit"], "reason": "clean"},
+                {"machine": "mac3", "commit": git_repo["conflict_commit"],
+                 "reason": "conflicts"},
+            ],
+        }, base_branch="winner")
+        assert result.status == "partial"
+        assert result.winner_branch == "merge/race-partial"
+        assert len(result.applied) == 1
+        assert len(result.conflicts) == 1
+
+    def test_skipped_for_non_cherry_pick_decision(self, git_repo):
+        adj = MergeAdjudicator(repo_path=git_repo["path"])
+        result = adj.execute_race_merge({
+            "task_id": "race-merge",
+            "decision": "merge",
+            "cherry_pick_from": [
+                {"machine": "mac2", "commit": git_repo["a_commit"], "reason": "x"},
+            ],
+        })
+        assert result.status == "skipped"
+
+    def test_records_evidence_for_race_merge(self, git_repo):
+        ledger = _FakeLedger()
+        adj = MergeAdjudicator(
+            repo_path=git_repo["path"],
+            evidence_ledger=ledger,
+            node_id="mac1",
+        )
+        result = adj.execute_race_merge({
+            "task_id": "race-ev",
+            "decision": "cherry_pick",
+            "cherry_pick_from": [
+                {"machine": "mac2", "commit": git_repo["a_commit"], "reason": "x"},
+            ],
+        })
+        assert result.evidence_id is not None
+        assert len(ledger.entries) == 1
+        assert ledger.entries[0]["event_type"] == "race_merge"
+        assert "race-ev" in ledger.entries[0]["subject"]
+
+    def test_dry_run_does_not_create_branch(self, git_repo):
+        adj = MergeAdjudicator(repo_path=git_repo["path"], dry_run=True)
+        result = adj.execute_race_merge({
+            "task_id": "race-dry",
+            "decision": "cherry_pick",
+            "cherry_pick_from": [
+                {"machine": "mac2", "commit": git_repo["a_commit"], "reason": "x"},
+            ],
+        })
+        assert result.status == "ok"
+        # In dry_run, branch creation is simulated, so the actual branch won't exist
+        branches = _run(Path(git_repo["path"]), "git", "branch", "--list", "merge/race-dry")
+        assert "merge/race-dry" not in branches.stdout
+
+
 # ── Result serialization ────────────────────────────────────────────────────
 
 

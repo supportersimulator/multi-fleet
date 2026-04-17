@@ -203,6 +203,143 @@ class MergeAdjudicator:
 
         return result
 
+    def execute_race_merge(
+        self,
+        decision: dict,
+        *,
+        base_branch: str = "main",
+        push_remote: str = "",
+    ) -> AdjudicationResult:
+        """Create a merge branch from a race verdict and cherry-pick winners.
+
+        High-level automation: given a chief synthesis decision from a fleet
+        race, creates ``merge/<race_id>`` off *base_branch*, cherry-picks the
+        winning commits onto it, and optionally pushes for human review.
+
+        Safety invariants:
+        - Never force-pushes
+        - Never merges to main (branch is for review only)
+        - Always creates a new branch
+        - Aborts cleanly on conflicts
+        - Records the attempt in evidence ledger
+
+        Args:
+            decision: Chief decision dict (from SynthesisResult.to_chief_decision()).
+            base_branch: Branch to fork the merge branch from (default "main").
+            push_remote: If non-empty, push the merge branch to this remote
+                (e.g. "origin"). Empty string = skip push.
+
+        Returns:
+            AdjudicationResult with winner_branch set to the merge branch name.
+        """
+        task_id = str(decision.get("task_id", "unknown"))
+        merge_branch = f"merge/{task_id}"
+
+        result = AdjudicationResult(
+            status="failed",
+            task_id=task_id,
+            winner_branch=merge_branch,
+        )
+
+        # Guard: must be a cherry_pick decision
+        if decision.get("decision") != "cherry_pick":
+            result.status = "skipped"
+            result.error = f"decision is '{decision.get('decision')}', not 'cherry_pick'"
+            return result
+
+        picks = decision.get("cherry_pick_from", []) or []
+        if not picks:
+            result.status = "noop"
+            result.error = "cherry_pick_from list is empty"
+            return result
+
+        if not self._is_git_repo():
+            result.error = f"{self._repo} is not a git repository"
+            return result
+
+        # 1. Ensure we're on a clean state and create the merge branch
+        checkout_base = self._git("checkout", base_branch)
+        if not checkout_base["ok"]:
+            result.error = f"checkout {base_branch} failed: {checkout_base['stderr'].strip()}"
+            return result
+
+        create_branch = self._git("checkout", "-b", merge_branch)
+        if not create_branch["ok"]:
+            result.error = f"create branch {merge_branch} failed: {create_branch['stderr'].strip()}"
+            return result
+
+        # 2. Cherry-pick each winning commit
+        for pick in picks:
+            commit = str(pick.get("commit", "")).strip()
+            if not commit:
+                result.failed.append({"pick": pick, "error": "no commit specified"})
+                continue
+
+            cp = self._git("cherry-pick", commit)
+            if cp["ok"]:
+                result.applied.append(pick)
+                logger.info("cherry-picked %s onto %s", commit[:12], merge_branch)
+                continue
+
+            stderr = (cp.get("stderr") or "").lower()
+            is_conflict = any(
+                marker in stderr
+                for marker in ("conflict", "could not apply", "merge conflict")
+            )
+            if is_conflict:
+                self._git("cherry-pick", "--abort")
+                result.conflicts.append({
+                    "pick": pick,
+                    "error": cp["stderr"].strip(),
+                })
+                logger.warning("conflict on %s — aborted", commit[:12])
+            else:
+                result.failed.append({
+                    "pick": pick,
+                    "error": cp["stderr"].strip() or "unknown failure",
+                })
+
+        # 3. Derive status
+        if not result.applied:
+            result.status = "conflict" if result.conflicts else "failed"
+            # Clean up: delete the empty merge branch
+            self._git("checkout", base_branch)
+            self._git("branch", "-D", merge_branch)
+            result.winner_branch = ""
+        elif result.conflicts or result.failed:
+            result.status = "partial"
+        else:
+            result.status = "ok"
+
+        # 4. Push for human review (never force, never to main)
+        if push_remote and result.applied:
+            push = self._git("push", push_remote, merge_branch)
+            if not push["ok"]:
+                logger.warning("push failed (non-fatal): %s", push["stderr"].strip())
+
+        # 5. Record to evidence ledger
+        if self._ledger is not None:
+            try:
+                subject = (
+                    f"race_merge {result.status}: "
+                    f"{len(result.applied)}/{len(picks)} applied "
+                    f"on {merge_branch} for race {task_id}"
+                )
+                entry = self._ledger.record(
+                    event_type="race_merge",
+                    node_id=self._node_id,
+                    subject=subject,
+                    payload=result.to_dict(),
+                )
+                if isinstance(entry, dict):
+                    result.evidence_id = entry.get("entry_id") or entry.get("entry_hash")
+                elif entry:
+                    result.evidence_id = str(entry)
+            except Exception as e:
+                logger.warning("Evidence ledger recording failed: %s", e)
+
+        return result
+
     # ── Internals ──
 
     def _is_git_repo(self) -> bool:

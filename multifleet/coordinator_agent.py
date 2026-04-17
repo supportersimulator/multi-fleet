@@ -430,12 +430,30 @@ class CoordinatorAgent:
             logger.info("Merge gate PASSED for %s", branch)
 
     async def _execute_cherry_pick(self, data: dict):
-        """Log cherry-pick decision for manual execution."""
+        """Execute cherry-pick via MergeAdjudicator — creates merge branch for review."""
         cherry_picks = data.get("cherry_pick_from", [])
         logger.info(
             "Cherry-pick decision: %d picks from non-winners",
             len(cherry_picks),
         )
+        if not cherry_picks:
+            return
+        try:
+            from multifleet.merge_adjudicator import MergeAdjudicator
+            repo_path = self._config.get("repo_path", os.getcwd())
+            adj = MergeAdjudicator(
+                repo_path=repo_path,
+                evidence_ledger=self.evidence,
+                node_id=self.node_id,
+            )
+            result = adj.execute_race_merge(data, push_remote="origin")
+            logger.info(
+                "Cherry-pick merge result: status=%s branch=%s applied=%d conflicts=%d",
+                result.status, result.winner_branch,
+                len(result.applied), len(result.conflicts),
+            )
+        except Exception as e:
+            logger.error("Cherry-pick automation failed: %s", e, exc_info=True)
 
     # ── Task Assignment ──
 
