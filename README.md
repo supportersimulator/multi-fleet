@@ -397,6 +397,7 @@ multi-fleet/
 
 | Document | Contents |
 |----------|----------|
+| [Getting Started](docs/getting-started.md) | Prerequisites, install, first run, multi-node setup |
 | [INSTALL.md](INSTALL.md) | Per-IDE installation for Claude Code, Cursor, VS Code, Codex, Gemini |
 | [COMMS-PROTOCOL.md](COMMS-PROTOCOL.md) | Full communication specification: channels, state machine, repair, security, observability |
 | [CHANGELOG.md](CHANGELOG.md) | Version history and release notes |
