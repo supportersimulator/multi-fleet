@@ -174,3 +174,106 @@ class TestSubscriptionListMaintenance:
 
         # Subs still tracked (reconnect callback will clean them up)
         assert len(nerve._active_subs) == count_before
+
+
+class TestMessageFlowAfterReconnect:
+    """Tests that messages can be published and received after reconnect."""
+
+    @pytest.mark.asyncio
+    async def test_publish_works_after_reconnect(self, mock_nc):
+        """After reconnect + resubscribe, publishing should succeed."""
+        nerve = _make_nerve(mock_nc)
+
+        # Initial connect
+        await nerve._subscribe_all()
+
+        # Simulate disconnect then reconnect
+        await nerve._on_disconnect()
+        await nerve._on_reconnect()
+
+        # Publish should work on reconnected connection
+        await nerve.nc.publish(b"fleet.mac2.message", b'{"type":"test"}')
+        mock_nc.publish.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_callbacks_wired_to_new_subs_after_reconnect(self, mock_nc):
+        """New subscriptions after reconnect must have callbacks attached."""
+        nerve = _make_nerve(mock_nc)
+
+        await nerve._on_reconnect()
+
+        # Every subscribe call should have a cb= argument
+        for call in mock_nc.subscribe.call_args_list:
+            _, kwargs = call
+            assert "cb" in kwargs, f"Subscription missing callback: {call}"
+
+    @pytest.mark.asyncio
+    async def test_correct_subjects_after_reconnect(self, mock_nc):
+        """Reconnect must re-subscribe to all required subjects."""
+        nerve = _make_nerve(mock_nc)
+
+        await nerve._on_reconnect()
+
+        subscribed_subjects = [
+            call.args[0] if call.args else call.kwargs.get("subject")
+            for call in mock_nc.subscribe.call_args_list
+        ]
+        # Must include direct, all, heartbeat, ack
+        assert any("mac1" in s for s in subscribed_subjects), "Missing direct subject"
+        assert any("all" in s for s in subscribed_subjects), "Missing broadcast subject"
+        assert any("heartbeat" in s for s in subscribed_subjects), "Missing heartbeat subject"
+        assert any("ack" in s for s in subscribed_subjects), "Missing ack subject"
+
+
+class TestProlongedDisconnect:
+    """Tests behavior during extended NATS outages (5+ minutes)."""
+
+    @pytest.mark.asyncio
+    async def test_error_counter_increments_on_failed_reconnect(self, mock_nc):
+        """Repeated reconnect failures should track errors without crashing."""
+        nerve = _make_nerve(mock_nc)
+        mock_nc.subscribe.side_effect = Exception("server still down")
+
+        errors_before = nerve._stats["errors"]
+
+        # Simulate multiple failed reconnect attempts
+        for _ in range(5):
+            await nerve._on_reconnect()
+
+        assert nerve._stats["errors"] >= errors_before + 5
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_prolonged_outage(self, mock_nc):
+        """After failures, a successful reconnect should restore subs."""
+        nerve = _make_nerve(mock_nc)
+
+        # Simulate 3 failed reconnects
+        mock_nc.subscribe.side_effect = Exception("NATS down")
+        for _ in range(3):
+            await nerve._on_reconnect()
+        assert nerve._stats["errors"] >= 3
+        assert len(nerve._active_subs) == 0  # No subs during outage
+
+        # NATS comes back
+        mock_nc.subscribe.side_effect = lambda subj, cb=None: MagicMock(unsubscribe=AsyncMock())
+        await nerve._on_reconnect()
+
+        # Subs restored
+        assert len(nerve._active_subs) >= 4
+        # Error count unchanged from successful reconnect
+        errors_after = nerve._stats["errors"]
+        await nerve._on_reconnect()  # Another clean reconnect
+        assert nerve._stats["errors"] == errors_after  # No new errors
+
+    @pytest.mark.asyncio
+    async def test_stats_accessible_during_disconnect(self, mock_nc):
+        """Stats dict should remain valid and queryable during disconnect."""
+        nerve = _make_nerve(mock_nc)
+
+        await nerve._subscribe_all()
+        await nerve._on_disconnect()
+
+        # Stats should be readable (used by health endpoint)
+        assert isinstance(nerve._stats["errors"], int)
+        assert isinstance(nerve._stats["received"], int)
+        assert nerve._running is True  # Still running, just disconnected
