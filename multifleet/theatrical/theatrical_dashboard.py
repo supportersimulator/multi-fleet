@@ -94,6 +94,12 @@ class TheatricalDashboard:
         # result["probes"]        — from probe engine last-fire results
         # result["gold"]          — from session_historian gold mining output
 
+        # Synaptic 8th Intelligence data
+        try:
+            result["synaptic"] = self._gather_synaptic_data()
+        except Exception as exc:
+            logger.debug("Synaptic data unavailable: %s", exc)
+
         # Corrigibility data — from CorrigibilityLedger + gate event history
         try:
             result["corrigibility"] = self._gather_corrigibility_data()
@@ -142,6 +148,7 @@ class TheatricalDashboard:
         probe_html = self.probe_status_grid.render(data.get("probes"))
         corrigibility_html = self.corrigibility_gauge.render(data.get("corrigibility"))
         gold_html = self.session_gold_stream.render(data.get("gold"))
+        synaptic_html = self._render_synaptic(data.get("synaptic"))
 
         return f'''<!DOCTYPE html>
 <html lang="en">
@@ -184,6 +191,7 @@ class TheatricalDashboard:
     {corrigibility_html}
     {memory_html}
     {gold_html}
+    {synaptic_html}
   </div>
 </div>
 
@@ -284,6 +292,56 @@ class TheatricalDashboard:
             "gate_history": gate_history,
         }
 
+    def _gather_synaptic_data(self) -> Optional[dict]:
+        """Gather Synaptic personality, patterns, and beliefs for dashboard."""
+        import sys
+        from pathlib import Path
+        # Add repo root so memory package is importable
+        repo_root = str(Path(__file__).resolve().parents[3])
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+
+        data: dict = {"personality": None, "patterns": [], "belief_count": 0}
+
+        # Personality traits
+        try:
+            from memory.synaptic_personality import get_personality
+            p = get_personality()
+            traits = p.get_traits() if hasattr(p, "get_traits") else {}
+            data["personality"] = {
+                "traits": traits if isinstance(traits, dict) else {},
+                "wisdom_count": len(p.get_wisdom(limit=100)) if hasattr(p, "get_wisdom") else 0,
+            }
+        except Exception as exc:
+            logger.debug("Synaptic personality unavailable: %s", exc)
+
+        # Recent patterns
+        try:
+            from memory.synaptic_pattern_engine import get_pattern_engine
+            engine = get_pattern_engine()
+            recent = engine.get_recent(limit=5)
+            data["patterns"] = [
+                {
+                    "title": p.title,
+                    "confidence": getattr(p, "confidence", 0),
+                    "type": getattr(p, "pattern_type", "unknown"),
+                }
+                for p in recent
+            ]
+        except Exception as exc:
+            logger.debug("Synaptic patterns unavailable: %s", exc)
+
+        # Active beliefs from evolution engine
+        try:
+            from memory.synaptic_evolution import SynapticEvolution
+            evo = SynapticEvolution()
+            proposals = evo.get_pending_proposals()
+            data["belief_count"] = len(proposals) if proposals else 0
+        except Exception as exc:
+            logger.debug("Synaptic evolution unavailable: %s", exc)
+
+        return data
+
     def _extract_surgeon_data(self, fleet: Optional[dict]) -> Optional[dict]:
         """Extract surgeon-relevant data from fleet snapshot."""
         if not fleet:
@@ -294,6 +352,65 @@ class TheatricalDashboard:
             "cross_exams": [],
             "rebuttals": [],
         }
+
+    def _render_synaptic(self, data: Optional[dict]) -> str:
+        """Render Synaptic 8th Intelligence section."""
+        if not data:
+            return '''<div class="tc-card tc-unavailable">
+  <div class="tc-card-header">Synaptic — 8th Intelligence</div>
+  <div class="tc-card-body"><span class="tc-muted">Synaptic unavailable</span></div>
+</div>'''
+
+        personality = data.get("personality") or {}
+        traits = personality.get("traits", {})
+        wisdom_count = personality.get("wisdom_count", 0)
+        patterns = data.get("patterns", [])
+        belief_count = data.get("belief_count", 0)
+
+        # Personality traits row
+        trait_chips = ""
+        if traits:
+            for name, val in list(traits.items())[:6]:
+                score = val if isinstance(val, (int, float)) else 0
+                color = "#a78bfa" if score >= 0.7 else "#94a3b8"
+                trait_chips += (
+                    f'<span class="tc-syn-trait" style="color:{color}">'
+                    f'{html.escape(str(name))}'
+                    f'</span> '
+                )
+        else:
+            trait_chips = '<span class="tc-muted">no traits loaded</span>'
+
+        # Patterns list
+        pattern_rows = ""
+        if patterns:
+            for p in patterns:
+                conf = p.get("confidence", 0)
+                badge_cls = "tc-badge-green" if conf >= 0.7 else "tc-badge-yellow" if conf >= 0.4 else "tc-badge-gray"
+                pattern_rows += (
+                    f'<div class="tc-syn-pattern">'
+                    f'<span class="tc-badge {badge_cls}">{conf:.0%}</span> '
+                    f'<span class="tc-syn-pattern-title">{html.escape(str(p.get("title", "?")))}</span>'
+                    f'</div>'
+                )
+        else:
+            pattern_rows = '<div class="tc-muted">no recent patterns</div>'
+
+        return f'''<div class="tc-card">
+  <div class="tc-card-header">Synaptic — 8th Intelligence
+    <span class="tc-card-count">{wisdom_count} wisdom · {belief_count} beliefs</span>
+  </div>
+  <div class="tc-card-body">
+    <div class="tc-syn-section">
+      <div class="tc-feed-label">Personality</div>
+      <div class="tc-syn-traits">{trait_chips}</div>
+    </div>
+    <div class="tc-syn-section">
+      <div class="tc-feed-label">Recent Patterns</div>
+      {pattern_rows}
+    </div>
+  </div>
+</div>'''
 
     def _css(self) -> str:
         """Return all CSS for the theatrical dashboard."""
@@ -453,6 +570,17 @@ body {
 .tc-gold-pass { font-weight: 600; }
 .tc-gold-severity { font-size: 0.7rem; text-transform: uppercase; }
 .tc-gold-content { font-size: 0.8rem; color: #e2e8f0; margin-top: 0.1rem; word-break: break-word; }
+
+/* === Component 10: Synaptic === */
+.tc-syn-section { margin-bottom: 0.5rem; }
+.tc-syn-traits { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.tc-syn-trait {
+  font-size: 0.75rem; font-weight: 500;
+  padding: 0.15rem 0.4rem; background: rgba(167,139,250,0.1);
+  border-radius: 4px;
+}
+.tc-syn-pattern { display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0; font-size: 0.8rem; }
+.tc-syn-pattern-title { color: #e2e8f0; }
 
 /* === Footer === */
 .tc-footer {
