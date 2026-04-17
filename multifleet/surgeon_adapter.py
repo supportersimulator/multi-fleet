@@ -272,6 +272,10 @@ class SurgeonAdapter:
             source="cross_exam",
         )
 
+        # INTERLOCK 4: Propagate dissent to QuorumRegistry as strategic proposal
+        if not exam_result.get("consensus", True) and exam_result.get("dissents"):
+            self._propagate_dissent_to_quorum(topic, exam_result)
+
         return exam_result
 
     def validate_acceptance(self, task_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -484,6 +488,28 @@ class SurgeonAdapter:
                 )
         except Exception as exc:
             logger.debug("Corrigibility ledger recording failed: %s", exc)
+
+    def _propagate_dissent_to_quorum(
+        self, topic: str, exam_result: Dict[str, Any]
+    ) -> None:
+        """INTERLOCK 4: Propagate surgeon dissent to QuorumRegistry.
+
+        When cross-exam produces a dissent, it becomes a strategic proposal
+        in the quorum registry. Other fleet nodes see the dissent via quorum
+        signals, enabling fleet-wide architectural concerns to propagate.
+        """
+        try:
+            from multifleet.quorum.quorum_registry import QuorumRegistry
+            node_id = os.environ.get("MULTIFLEET_NODE_ID", "unknown")
+            registry = QuorumRegistry()
+            registry.record_surgeon_dissent(topic, exam_result, node_id)
+            logger.info(
+                "INTERLOCK 4: Surgeon dissent propagated to quorum registry "
+                "(topic=%s, confidence=%.2f)",
+                topic[:80], exam_result.get("confidence", 0.0),
+            )
+        except Exception as exc:
+            logger.debug("Dissent propagation to quorum failed: %s", exc)
 
     def get_state(self) -> Dict[str, Any]:
         """Get current surgeon state for node overlay SurgeonStrip.
