@@ -224,8 +224,8 @@ class TestGateEventsReachDashboard:
         corr = data.get("corrigibility")
         assert corr is not None, "corrigibility data must be present"
         assert "score" in corr
-        assert "recent_gate_events" in corr
-        assert len(corr["recent_gate_events"]) >= 2  # at least some events
+        assert "gate_history" in corr
+        assert len(corr["gate_history"]) >= 2  # at least some events
         assert corr["block_count"] >= 1  # one failed gate
 
 
@@ -360,7 +360,7 @@ class TestEndToEnd:
         # Corrigibility gauge has gate events
         corr = data["corrigibility"]
         assert corr is not None
-        assert len(corr["recent_gate_events"]) >= 1
+        assert len(corr["gate_history"]) >= 1
         assert corr["block_count"] >= 1  # repair was blocked
 
         # Score reflects the failure
@@ -409,7 +409,7 @@ class TestEndToEnd:
         corr = data["corrigibility"]
         assert corr is not None
         # At least one event recorded
-        assert len(corr["recent_gate_events"]) >= 1
+        assert len(corr["gate_history"]) >= 1
 
     def test_multiple_gates_aggregate_in_dashboard(self):
         """Multiple gate events accumulate and score reflects them."""
@@ -427,7 +427,7 @@ class TestEndToEnd:
         corr = data["corrigibility"]
 
         assert corr is not None
-        assert len(corr["recent_gate_events"]) >= 5
+        assert len(corr["gate_history"]) >= 5
         assert corr["block_count"] >= 2
         # Gate pass rate should reflect failures (not 1.0)
         assert corr["factors"]["gate_pass_rate"] < 1.0
