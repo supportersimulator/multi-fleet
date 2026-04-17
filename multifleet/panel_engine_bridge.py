@@ -27,6 +27,8 @@ import time
 import uuid
 from typing import Any, Optional
 
+from multifleet.memory_scope import MemoryScope, map_python_source
+
 logger = logging.getLogger("multifleet.panel_engine_bridge")
 
 
@@ -46,6 +48,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Node health, channels, sessions across the multi-fleet",
         "source": "mcp",
         "entry": "/api/panels/fleet-status",
+        "memoryScope": MemoryScope.SESSION.value,
         "capabilities": ["bus_subscribe", "evidence_read"],
         "layout": {
             "defaultMode": "docked",
@@ -64,6 +67,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Hash-chained evidence ledger entries with verification",
         "source": "mcp",
         "entry": "/api/panels/evidence-timeline",
+        "memoryScope": MemoryScope.CORE.value,
         "capabilities": ["evidence_read", "bus_subscribe"],
         "layout": {
             "defaultMode": "docked",
@@ -82,6 +86,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "ChiefSynthesis decisions with confidence and winners",
         "source": "mcp",
         "entry": "/api/panels/synthesis-decisions",
+        "memoryScope": MemoryScope.WORKSPACE.value,
         "capabilities": ["evidence_read", "bus_subscribe"],
         "layout": {
             "defaultMode": "docked",
@@ -100,6 +105,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Latest probe scan results with severity and findings",
         "source": "mcp",
         "entry": "/api/panels/probe-findings",
+        "memoryScope": MemoryScope.TASK.value,
         "capabilities": ["evidence_read", "bus_subscribe"],
         "layout": {
             "defaultMode": "docked",
@@ -118,6 +124,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Professor wisdom, gotchas, and evidence-backed feedback",
         "source": "mcp",
         "entry": "/api/panels/wisdom-feedback",
+        "memoryScope": MemoryScope.CORE.value,
         "capabilities": ["evidence_read"],
         "layout": {
             "defaultMode": "docked",
@@ -136,6 +143,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Real-time quorum voting and consensus state",
         "source": "mcp",
         "entry": "/api/panels/poll",
+        "memoryScope": MemoryScope.SESSION.value,
         "capabilities": ["bus_subscribe"],
         "layout": {
             "defaultMode": "docked",
@@ -154,6 +162,7 @@ _PANEL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "3-surgeon cross-examination results and consensus",
         "source": "mcp",
         "entry": "/api/panels/poll",
+        "memoryScope": MemoryScope.TASK.value,
         "capabilities": ["bus_subscribe", "evidence_read"],
         "layout": {
             "defaultMode": "docked",
