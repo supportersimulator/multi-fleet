@@ -24,12 +24,13 @@ _REQUIRED_PAYLOAD_PRESENCE = False  # payload can be empty dict — that's valid
 def schema_validator(
     event_type: str, payload: dict, metadata: dict
 ) -> tuple[str, dict, dict]:
-    """Validate that an event has required structure.
+    """Validate that an event has required structure and payload fields.
 
     Checks:
     - event_type is a non-empty string with dotted namespace
     - payload is a dict
     - metadata is a dict
+    - If event is in the event_catalog, required payload fields are present
 
     Advisory only — always returns the event (never suppresses).
     Adds ``_validated: True`` to payload on success, or ``_validated: False``
@@ -50,6 +51,18 @@ def schema_validator(
     # metadata type check
     if not isinstance(metadata, dict):
         errors.append(f"metadata is {type(metadata).__name__}, expected dict")
+
+    # Catalog-based payload validation (advisory — adds warnings, never blocks)
+    if not errors and isinstance(payload, dict):
+        try:
+            from .event_catalog import validate_event as catalog_validate
+            catalog_errors = catalog_validate(event_type, payload)
+            # Only add field-level errors, not "unregistered" warnings
+            for err in catalog_errors:
+                if "not found in catalog" not in err:
+                    errors.append(err)
+        except Exception:
+            pass  # catalog import failure is non-fatal
 
     if errors:
         logger.warning(

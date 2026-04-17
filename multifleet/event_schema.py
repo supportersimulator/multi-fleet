@@ -100,6 +100,10 @@ class EventType(Enum):
 
     # Supervisor events
     SUPERVISOR_TRANSITION = "supervisor.transition"
+    SUPERVISOR_PHASE_TRANSITION = "supervisor.phase_transition"
+    SUPERVISOR_BLOCKED = "supervisor.blocked"
+    SUPERVISOR_STALL_DETECTED = "supervisor.stall_detected"
+    SUPERVISOR_COMPLETED = "supervisor.completed"
 
     # Ghost extended events
     GHOST_CORROBORATE_COMPLETED = "ghost.corroborate.completed"
@@ -125,6 +129,43 @@ class EventType(Enum):
     REVIEW_STARTED = "review.started"
     REVIEW_VERDICT_RECEIVED = "review.verdict_received"
     REVIEW_COMPLETED = "review.completed"
+
+    # Gate events (invariance, acceptance, constitutional)
+    GATE_CHECKED = "gate.checked"
+    GATE_RESULT = "gate.result"
+    GATE_ACCEPTANCE_CHECKED = "gate.acceptance.checked"
+    GATE_CONSTITUTIONAL_CHECKED = "gate.constitutional.checked"
+
+    # Stress events (quorum stress scoring)
+    STRESS_LEVEL_CHANGE = "stress.level_change"
+    STRESS_CRITICAL = "stress.critical"
+
+    # Surgeon extended events
+    SURGEON_CROSS_EXAM_STARTED = "surgeon.cross_exam.started"
+    SURGEON_CROSS_EXAM_COMPLETE = "surgeon.cross_exam.complete"
+    SURGEON_VERDICT = "surgeon.verdict"
+    SURGEON_VERDICT_BROADCAST = "surgeon.verdict.broadcast"
+
+    # Synaptic extended events
+    SYNAPTIC_INSIGHT = "synaptic.insight"
+    SYNAPTIC_PATTERN = "synaptic.pattern"
+    SYNAPTIC_PATTERN_DETECTED = "synaptic.pattern.detected"
+    SYNAPTIC_PERSONALITY_UPDATE = "synaptic.personality.update"
+
+    # Panel events
+    PANEL_REGISTERED = "panel.registered"
+    PANEL_ACTIVATED = "panel.activated"
+    PANEL_SUSPENDED = "panel.suspended"
+    PANEL_CLOSED = "panel.closed"
+    PANEL_ERROR = "panel.error"
+    PANEL_UPDATED = "panel.updated"
+
+    # Liaison events
+    LIAISON_MESSAGE_RECEIVED = "liaison.message.received"
+    LIAISON_MESSAGE_SENT = "liaison.message.sent"
+
+    # Evidence extended events
+    EVIDENCE_PROMOTED = "evidence.promoted"
 
 
 @dataclass
