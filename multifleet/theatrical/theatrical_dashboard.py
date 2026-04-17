@@ -94,8 +94,11 @@ class TheatricalDashboard:
         # result["probes"]        — from probe engine last-fire results
         # result["gold"]          — from session_historian gold mining output
 
-        # Corrigibility data — gate events + ledger stats
-        result["corrigibility"] = self._gather_corrigibility_data()
+        # Corrigibility data — from CorrigibilityLedger + gate event history
+        try:
+            result["corrigibility"] = self._gather_corrigibility_data()
+        except Exception as exc:
+            logger.debug("Corrigibility data unavailable: %s", exc)
 
         # Evidence ledger
         if self._ledger:
@@ -210,104 +213,75 @@ class TheatricalDashboard:
         return component.render(data)
 
     def _gather_corrigibility_data(self) -> Optional[dict]:
-        """Pull real gate event data from EventBus + CorrigibilityLedger.
+        """Gather corrigibility data from ledger + gate event history."""
+        from ..corrigibility_ledger import CorrigibilityLedger
+        from ..event_bus import IDEEventBus
 
-        Returns dict with: score, trend, factors, last_check,
-        recent_gate_events, override_count, block_count.
-        """
-        now = time.time()
-        gate_events: list = []
-        pass_count = 0
-        fail_count = 0
-        block_count = 0
-        override_count = 0
+        ledger = CorrigibilityLedger()
+        stats = ledger.get_impact_stats()
+        disagreements = ledger.get_recent_disagreements(limit=5)
 
-        # 1. Gate events from EventBus NS_GATE ring
+        # Compute corrigibility score from decision stats
+        total = stats.get("total_decisions", 0)
+        changed = stats.get("changed_by_surgeon", 0)
+        # Score: higher when system actually changes behavior on surgeon input
+        # Base 0.5 + up to 0.5 based on change rate (changing is good = corrigible)
+        if total > 0:
+            change_rate = changed / total
+            score = min(1.0, 0.5 + change_rate * 0.5)
+        else:
+            score = 0.5  # neutral when no data
+
+        # Gate event history from EventBus ring buffer
+        gate_history = []
         try:
-            from multifleet.event_bus import IDEEventBus, NS_GATE
             bus = IDEEventBus.get()
-            raw_events = bus.history(NS_GATE, limit=50, pattern="gate.*")
-            for ev in raw_events:
-                payload = ev.get("payload", {})
-                passed = payload.get("passed", True)
-                gate_name = payload.get("gate", "unknown")
-                ts = payload.get("timestamp") or ev.get("timestamp", 0)
-                failures = payload.get("failures", [])
-
-                if passed:
-                    pass_count += 1
-                else:
-                    fail_count += 1
-                    block_count += 1
-
-                gate_events.append({
-                    "gate": gate_name,
-                    "passed": passed,
-                    "failures": failures,
-                    "timestamp": ts,
+            gate_events = bus.history("gate", limit=20, pattern="gate.result")
+            for evt in gate_events:
+                payload = evt.get("payload", {})
+                gate_history.append({
+                    "gate": payload.get("gate", "?"),
+                    "passed": payload.get("passed", True),
+                    "summary": payload.get("summary", ""),
+                    "failures": payload.get("critical_failures", []),
+                    "duration_ms": payload.get("duration_ms", 0),
+                    "timestamp": payload.get("timestamp", 0),
                 })
-        except Exception as exc:
-            logger.debug("Gate event history unavailable: %s", exc)
+        except Exception:
+            pass  # EventBus may not be initialized
 
-        # 2. Corrigibility ledger — decision impact stats
-        ledger_stats: dict = {}
-        try:
-            from multifleet.corrigibility_ledger import CorrigibilityLedger
-            cl = CorrigibilityLedger()
-            ledger_stats = cl.get_impact_stats()
-            override_count = ledger_stats.get("changed_by_surgeon", 0)
-        except Exception as exc:
-            logger.debug("Corrigibility ledger unavailable: %s", exc)
-
-        # 3. Compute score from real data
-        total_gate_events = pass_count + fail_count
-        if total_gate_events > 0:
-            gate_pass_rate = pass_count / total_gate_events
-        else:
-            gate_pass_rate = 1.0  # no events = assume healthy
-
-        # Corrigibility score: weighted blend of gate health + change rate
-        # High change rate = system IS corrigible (changes when surgeons say so)
-        change_rate = ledger_stats.get("change_rate", 0.0)
-        # Score: 60% gate pass rate + 40% corrigibility responsiveness
-        # A system that blocks when it should AND changes when told is maximally corrigible
-        if ledger_stats.get("total_decisions", 0) > 0:
-            score = 0.6 * gate_pass_rate + 0.4 * min(change_rate * 5, 1.0)
-        else:
-            score = gate_pass_rate
-
-        # 4. Build trend from gate events (newest first, reverse for chronological)
-        trend = []
-        running_pass = 0
-        running_total = 0
-        for ev in reversed(gate_events[:20]):
-            running_total += 1
-            if ev.get("passed"):
-                running_pass += 1
-            trend.append({
-                "timestamp": ev.get("timestamp", 0),
-                "score": running_pass / running_total if running_total else 1.0,
-            })
-
-        # 5. Factors breakdown
+        # Factors breakdown
         factors = {
-            "gate_pass_rate": round(gate_pass_rate, 3),
+            "gate_pass_rate": 1.0,
+            "surgeon_influence": stats.get("change_rate", 0.0),
+            "disagreement_resolution": 1.0,
         }
-        if ledger_stats.get("total_decisions", 0) > 0:
-            factors["change_rate"] = round(change_rate, 3)
-        if ledger_stats.get("total_disagreements", 0) > 0:
-            factors["disagreements"] = min(
-                ledger_stats["total_disagreements"] / 10.0, 1.0
+        if gate_history:
+            passed_count = sum(1 for g in gate_history if g["passed"])
+            factors["gate_pass_rate"] = passed_count / len(gate_history)
+        if disagreements:
+            resolved = sum(1 for d in disagreements
+                          if d.get("resolution", "") != "unresolved")
+            factors["disagreement_resolution"] = (
+                resolved / len(disagreements) if disagreements else 1.0
             )
 
+        # Trend from gate history (timestamp + pass/fail as score proxy)
+        trend = []
+        for g in reversed(gate_history[:20]):
+            trend.append({
+                "timestamp": g.get("timestamp", 0),
+                "score": 1.0 if g["passed"] else 0.3,
+            })
+
         return {
-            "score": round(score, 3),
+            "score": score,
             "trend": trend,
             "factors": factors,
-            "last_check": now,
-            "recent_gate_events": gate_events[:10],
-            "override_count": override_count,
-            "block_count": block_count,
+            "last_check": time.time(),
+            "stats": stats,
+            "recent_disagreements": disagreements,
+            "gate_history": gate_history,
         }
 
     def _extract_surgeon_data(self, fleet: Optional[dict]) -> Optional[dict]:
@@ -468,9 +442,6 @@ body {
 .tc-factors { padding: 0.3rem 0.75rem 0.5rem; }
 .tc-factor-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.15rem 0; font-size: 0.8rem; }
 .tc-factor-row .tc-muted { min-width: 100px; }
-.tc-corr-stats { display: flex; gap: 0.5rem; padding: 0.3rem 0.75rem; }
-.tc-gate-feed { padding: 0.3rem 0.75rem 0.5rem; max-height: 200px; overflow-y: auto; }
-.tc-gate-event { display: flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0; font-size: 0.8rem; border-bottom: 1px solid #1e293b; }
 
 /* === Component 9: Session Gold Stream === */
 .tc-gold-stats { display: flex; gap: 1rem; padding: 0.4rem 0.75rem; font-size: 0.8rem; color: #94a3b8; }

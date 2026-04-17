@@ -107,48 +107,98 @@ class CorrigibilityGauge(TheatricalComponent):
 
         ts_str = self._format_ts(last_check) if last_check else "---"
 
-        # Gate event stats
-        block_count = data.get("block_count", 0)
-        override_count = data.get("override_count", 0)
-        gate_stats_html = (
-            f'<div class="tc-corr-stats">'
-            f'<span class="tc-badge tc-badge-{"red" if block_count else "green"}">'
-            f'{block_count} block{"s" if block_count != 1 else ""}</span>'
-            f'<span class="tc-badge tc-badge-{"yellow" if override_count else "gray"}">'
-            f'{override_count} override{"s" if override_count != 1 else ""}</span>'
-            f'</div>'
-        )
+        # Gate history section — shows recent gate firings (pass/fail/override)
+        gate_history = data.get("gate_history", [])
+        gate_html = ""
+        if gate_history:
+            gate_items = []
+            for g in gate_history[:8]:  # Show last 8 gate activations
+                passed = g.get("passed", True)
+                gate_name = self._esc(g.get("gate", "?"))
+                summary = self._esc(g.get("summary", ""))
+                failures = g.get("failures", [])
+                ts_gate = self._format_ts(g.get("timestamp"))
+                dur = g.get("duration_ms", 0)
 
-        # Recent gate events (last 10)
-        recent_events = data.get("recent_gate_events", [])
-        gate_events_html = ""
-        if recent_events:
-            items = []
-            for ev in recent_events[:10]:
-                passed = ev.get("passed", True)
-                gate_name = self._esc(ev.get("gate", "?"))
-                ev_ts = self._format_ts(ev.get("timestamp"))
-                dot_color = "#22c55e" if passed else "#ef4444"
-                status = "PASS" if passed else "BLOCK"
-                failures = ev.get("failures", [])
-                fail_str = ""
+                if passed:
+                    icon = '<span style="color:#22c55e;">&#10003;</span>'
+                    border_color = "#22c55e"
+                else:
+                    icon = '<span style="color:#ef4444;">&#10007;</span>'
+                    border_color = "#ef4444"
+
+                failure_html = ""
                 if failures:
-                    fail_str = (
-                        f' <span class="tc-muted">({", ".join(self._esc(f) for f in failures[:3])})</span>'
+                    fail_names = ", ".join(self._esc(f) for f in failures)
+                    failure_html = (
+                        f'<div style="color:#ef4444;font-size:0.7rem;'
+                        f'margin-top:2px;">Blocked: {fail_names}</div>'
                     )
-                items.append(
-                    f'<div class="tc-gate-event">'
-                    f'{self._dot_html(dot_color)} '
-                    f'<span class="tc-ts">{ev_ts}</span> '
-                    f'<span style="color:{dot_color};font-weight:600;font-size:0.75rem;">{status}</span> '
-                    f'<span class="tc-muted">{gate_name}</span>'
-                    f'{fail_str}'
+
+                gate_items.append(
+                    f'<div style="padding:0.3rem 0;border-left:2px solid {border_color};'
+                    f'padding-left:0.5rem;margin-bottom:0.3rem;">'
+                    f'<div style="display:flex;align-items:center;gap:0.3rem;'
+                    f'font-size:0.8rem;">'
+                    f'{icon} <span style="font-weight:600;">{gate_name}</span>'
+                    f'<span class="tc-ts">{ts_gate}</span>'
+                    f'<span class="tc-muted">{dur:.0f}ms</span>'
+                    f'</div>'
+                    f'{failure_html}'
                     f'</div>'
                 )
-            gate_events_html = (
-                f'<div class="tc-gate-feed">'
-                f'<div class="tc-feed-label">Recent Gate Events</div>'
-                f'{"".join(items)}'
+            gate_html = (
+                f'<div style="padding:0.3rem 0.75rem 0.5rem;">'
+                f'<div class="tc-muted" style="margin-bottom:0.3rem;'
+                f'text-transform:uppercase;font-size:0.7rem;">Gate Activity</div>'
+                f'{"".join(gate_items)}'
+                f'</div>'
+            )
+
+        # Recent disagreements section
+        disagreements = data.get("recent_disagreements", [])
+        disagree_html = ""
+        if disagreements:
+            disagree_items = []
+            for d in disagreements[:3]:
+                topic = self._esc(d.get("topic", "?"))
+                pos_a = self._esc(d.get("surgeon_a_position", ""))[:80]
+                pos_b = self._esc(d.get("surgeon_b_position", ""))[:80]
+                resolution = self._esc(d.get("resolution", ""))
+                ts_d = self._format_ts(d.get("ts"))
+                disagree_items.append(
+                    f'<div style="padding:0.3rem 0;border-bottom:1px solid #1e293b;">'
+                    f'<div style="font-size:0.8rem;font-weight:500;color:#f97316;">'
+                    f'&#9888; {topic}</div>'
+                    f'<div style="font-size:0.7rem;color:#94a3b8;margin-top:2px;">'
+                    f'A: {pos_a}</div>'
+                    f'<div style="font-size:0.7rem;color:#94a3b8;">'
+                    f'B: {pos_b}</div>'
+                    f'<div style="font-size:0.7rem;color:#22c55e;margin-top:2px;">'
+                    f'Resolution: {resolution} '
+                    f'<span class="tc-ts">{ts_d}</span></div>'
+                    f'</div>'
+                )
+            disagree_html = (
+                f'<div style="padding:0.3rem 0.75rem 0.5rem;">'
+                f'<div class="tc-muted" style="margin-bottom:0.3rem;'
+                f'text-transform:uppercase;font-size:0.7rem;">Disagreements</div>'
+                f'{"".join(disagree_items)}'
+                f'</div>'
+            )
+
+        # Impact stats
+        stats = data.get("stats", {})
+        stats_html = ""
+        if stats.get("total_decisions", 0) > 0:
+            total_d = stats["total_decisions"]
+            changed_d = stats.get("changed_by_surgeon", 0)
+            stats_html = (
+                f'<div style="padding:0.2rem 0.75rem;font-size:0.75rem;'
+                f'color:#94a3b8;display:flex;gap:1rem;">'
+                f'<span>{total_d} decisions</span>'
+                f'<span style="color:#22c55e;">{changed_d} changed by surgeon</span>'
+                f'<span>{stats.get("total_disagreements", 0)} disagreements</span>'
                 f'</div>'
             )
 
@@ -159,7 +209,8 @@ class CorrigibilityGauge(TheatricalComponent):
   </div>
   <div class="tc-gauge-wrap">{gauge_svg}</div>
   {trend_svg}
-  {gate_stats_html}
   <div class="tc-factors">{factors_html}</div>
-  {gate_events_html}
+  {stats_html}
+  {gate_html}
+  {disagree_html}
 </div>'''

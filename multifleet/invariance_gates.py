@@ -80,16 +80,50 @@ class GateResult:
 
 
 def _record_audit(gate_name: str, result: "GateResult"):
-    """Best-effort audit trail + event emission."""
+    """Best-effort audit trail + event emission.
+
+    Emits two event types:
+    - gate.checked: summary for dashboard health indicators
+    - gate.result: full detail for corrigibility gauge rendering
+    """
     try:
         from .event_bus import IDEEventBus
         bus = IDEEventBus.get()
+        now = time.time()
+
+        # Summary event (existing contract — keep for backward compat)
         bus.emit("gate.checked", {
             "gate": result.gate,
             "passed": result.passed,
             "checks_run": len(result.checks),
             "failures": [c.name for c in result.checks if not c.passed],
-            "timestamp": time.time(),
+            "timestamp": now,
+        })
+
+        # Detailed event for corrigibility gauge + dashboard rendering
+        checks_detail = []
+        for c in result.checks:
+            if isinstance(c, GateCheck):
+                checks_detail.append({
+                    "name": c.name,
+                    "passed": c.passed,
+                    "message": c.message,
+                    "critical": c.critical,
+                })
+            elif isinstance(c, dict):
+                checks_detail.append(c)
+        bus.emit("gate.result", {
+            "gate": result.gate,
+            "passed": result.passed,
+            "summary": result.summary,
+            "duration_ms": round(result.duration_ms, 1),
+            "checks": checks_detail,
+            "failures": [c.name for c in result.checks
+                         if isinstance(c, GateCheck) and not c.passed],
+            "critical_failures": [c.name for c in result.checks
+                                  if isinstance(c, GateCheck)
+                                  and not c.passed and c.critical],
+            "timestamp": now,
         })
     except Exception:
         pass  # Event emission must never break gate operation
