@@ -135,6 +135,7 @@ class FleetDoctor:
             self._check_message_store,
             self._check_fleet_messages,
             self._check_launchagents,
+            self._check_memory_subsystems,
         ]
 
         for check_fn in checks:
@@ -372,6 +373,40 @@ class FleetDoctor:
         return Check("FD-014", "launchagents", "warn",
                      f"{len(loaded)} loaded, {len(missing)} missing: {', '.join(missing)}",
                      detail={"missing": missing})
+
+    def _check_memory_subsystems(self) -> Check:
+        """FD-015: Context DNA memory subsystem health (memory/comprehensive_health_monitor.py)."""
+        try:
+            from memory.comprehensive_health_monitor import run_all_checks
+            health = run_all_checks()
+            healthy = health.healthy_count
+            degraded = health.degraded_count
+            down = health.down_count
+            total = healthy + degraded + down + health.unknown_count
+
+            if down > 0:
+                return Check(
+                    "FD-015", "memory_subsystems", "fail",
+                    f"{down}/{total} memory subsystems DOWN, {degraded} degraded",
+                    detail={"healthy": healthy, "degraded": degraded, "down": down,
+                            "alerts": health.alerts[:5]},
+                )
+            if degraded > 0:
+                return Check(
+                    "FD-015", "memory_subsystems", "warn",
+                    f"{degraded}/{total} memory subsystems degraded, {healthy} healthy",
+                    detail={"healthy": healthy, "degraded": degraded},
+                )
+            return Check(
+                "FD-015", "memory_subsystems", "pass",
+                f"{healthy}/{total} memory subsystems healthy",
+            )
+        except ImportError:
+            return Check("FD-015", "memory_subsystems", "skip",
+                         "memory.comprehensive_health_monitor not available")
+        except Exception as e:
+            return Check("FD-015", "memory_subsystems", "warn",
+                         f"Health check error: {e}")
 
 
 if __name__ == "__main__":

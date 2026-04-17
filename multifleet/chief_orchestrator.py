@@ -753,13 +753,29 @@ class ChiefOrchestrator:
         task_id = str(uuid.uuid4())[:8]
         start = time.time()
 
+        # Wire: get architecture blueprint before surgery (memory/context.py)
+        _blueprint_context = ""
+        try:
+            from memory.context import before_work
+            _blueprint_context = before_work(task=task) or ""
+            if _blueprint_context:
+                logger.info(
+                    "Surgical protocol: got %d-char blueprint for task=%s",
+                    len(_blueprint_context), task_id[:8],
+                )
+        except Exception as _bpe:
+            logger.debug("Blueprint lookup unavailable: %s", _bpe)
+
         logger.info(
             "Starting surgical protocol: task=%s machines=%s",
             task_id, machines,
         )
 
-        # Phase 1: Assign
-        result = self.phase_assign(task_id, task, machines, approach_hints)
+        # Phase 1: Assign (enrich task with blueprint context if available)
+        enriched_task = task
+        if _blueprint_context:
+            enriched_task = f"{task}\n\n[Blueprint Context]\n{_blueprint_context[:2000]}"
+        result = self.phase_assign(task_id, enriched_task, machines, approach_hints)
 
         # Phase 2/3: Wait for verdicts (machines operate independently)
         all_collected = False

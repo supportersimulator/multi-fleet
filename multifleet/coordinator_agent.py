@@ -496,11 +496,41 @@ class CoordinatorAgent:
     async def _execute_task(self, task_id: str, payload: dict, origin: str):
         """Execute a task and report results."""
         t0 = time.monotonic()
+        task_body = payload.get("body", payload.get("prompt", ""))
+
+        # Wire: architecture context for task-aware execution (memory/architecture.py)
+        try:
+            from memory.architecture import ArchitectureMemory
+            _arch = ArchitectureMemory()
+            _arch_ctx = _arch.get_architecture_context(task_body[:200])
+            if _arch_ctx and len(_arch_ctx) > 20:
+                logger.info("Task %s: got architecture context (%d chars)", task_id[:8], len(_arch_ctx))
+                task_body = f"{task_body}\n\n[Architecture Context]\n{_arch_ctx[:1500]}"
+        except Exception as _ae:
+            logger.debug("Architecture context unavailable: %s", _ae)
+
+        # Wire: impact analysis for files mentioned in task (memory/codebase_map.py)
+        try:
+            from memory.codebase_map import get_impact
+            # Extract file paths from task body (simple heuristic)
+            import re as _re
+            _file_refs = _re.findall(r'[\w/.-]+\.(?:py|ts|js|json|yaml|yml|sh)', task_body[:500])
+            if _file_refs:
+                _impacts = []
+                for _fp in _file_refs[:3]:  # max 3 files
+                    _imp = get_impact(_fp)
+                    if _imp and not _imp.get("error"):
+                        _impacts.append(f"{_fp}: {len(_imp.get('affected', []))} dependents")
+                if _impacts:
+                    logger.info("Task %s: impact analysis: %s", task_id[:8], "; ".join(_impacts))
+        except Exception as _ie:
+            logger.debug("Impact analysis unavailable: %s", _ie)
+
         try:
             # Use worker manager for task execution
             from .worker import FleetWorkerManager
             mgr = FleetWorkerManager()
-            result = await mgr.dispatch(self.node_id, payload.get("body", payload.get("prompt", "")))
+            result = await mgr.dispatch(self.node_id, task_body)
 
             duration_ms = (time.monotonic() - t0) * 1000
             self._active_tasks.pop(task_id, None)

@@ -510,6 +510,27 @@ class SelfHealManager:
             logger.info(f"Repair skipped for {target}: repair already in progress")
             return {"repaired": False, "reason": "repair_locked"}
 
+        # Wire: check bugfix tracker for known fixes/regressions (memory/bugfix_tracker.py)
+        try:
+            from memory.bugfix_tracker import check_for_regression, get_bugfix_by_symptom
+            _symptom_text = f"{action} {target} {' '.join(broken_channels)}"
+            _regression = check_for_regression(_symptom_text)
+            if _regression:
+                logger.warning(
+                    "Repair: REGRESSION detected for %s — known fix: %s (status=%s, failed=%d times)",
+                    target, _regression.get("title", "?")[:80],
+                    _regression.get("status", "?"), _regression.get("failed_count", 0),
+                )
+            else:
+                _known_fix = get_bugfix_by_symptom(_symptom_text)
+                if _known_fix:
+                    logger.info(
+                        "Repair: known bugfix for %s: %s (status=%s)",
+                        target, _known_fix.get("title", "?")[:80], _known_fix.get("status", "?"),
+                    )
+        except Exception:
+            pass  # never block fleet ops — bugfix tracker is advisory
+
         # Wire: search learning_store for prior repair knowledge
         try:
             fb = _get_memory_feedback()

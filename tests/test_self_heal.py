@@ -562,3 +562,387 @@ class TestLoadVacationMarkers:
         with patch("multifleet.self_heal.REPO_ROOT", tmp_path / "nonexistent"):
             mgr = SelfHealManager(nerve)
         assert len(mgr._vacation_nodes) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 13. Repair Actions (individual handlers)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestRepairActionHandlers:
+    @pytest.mark.asyncio
+    async def test_restart_nats_skips_when_healthy(self):
+        """If NATS connected with recent peers, skip restart to prevent cascade."""
+        mgr = _make_manager()
+        mgr._nerve._peers = {"mac2": {"_received_at": time.time() - 10}}
+        await mgr._repair_restart_nats({"reporter": "mac3"})
+        mgr._nerve.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_nats_reconnects_when_stale(self):
+        """If no recent peers, reconnect."""
+        mgr = _make_manager()
+        mgr._nerve._peers = {"mac2": {"_received_at": time.time() - 120}}
+        mgr._nerve.connect = AsyncMock()
+        mgr._nerve._subscribe_all = AsyncMock()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await mgr._repair_restart_nats({})
+        mgr._nerve.connect.assert_called_once()
+        mgr._nerve._subscribe_all.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_restart_nats_reconnects_when_disconnected(self):
+        """If NATS client is None, reconnect."""
+        mgr = _make_manager()
+        mgr._nerve.nc = None
+        mgr._nerve.connect = AsyncMock()
+        mgr._nerve._subscribe_all = AsyncMock()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await mgr._repair_restart_nats({})
+        mgr._nerve.connect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_repair_git_pull(self):
+        mgr = _make_manager()
+        with patch("multifleet.self_heal.subprocess") as mock_sp:
+            mock_sp.run.return_value = MagicMock(returncode=0)
+            await mgr._repair_git_pull({})
+            args = mock_sp.run.call_args[0][0]
+            assert "git" in args
+            assert "pull" in args
+
+    @pytest.mark.asyncio
+    async def test_repair_kill_zombie_no_pid(self):
+        mgr = _make_manager()
+        with patch("os.kill") as mock_kill:
+            await mgr._repair_kill_zombie({})
+            mock_kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repair_kill_zombie_with_pid(self):
+        mgr = _make_manager()
+        with patch("os.kill") as mock_kill:
+            await mgr._repair_kill_zombie({"pid": 99999})
+            mock_kill.assert_called_once_with(99999, 9)
+
+    @pytest.mark.asyncio
+    async def test_repair_kill_zombie_not_found(self):
+        """ProcessLookupError is handled gracefully."""
+        mgr = _make_manager()
+        with patch("os.kill", side_effect=ProcessLookupError):
+            await mgr._repair_kill_zombie({"pid": 99999})  # no raise
+
+    @pytest.mark.asyncio
+    async def test_repair_restart_tunnel(self):
+        mgr = _make_manager()
+        with patch("multifleet.self_heal.subprocess") as mock_sp:
+            mock_sp.run.return_value = MagicMock(returncode=0)
+            await mgr._repair_restart_tunnel({})
+            args = mock_sp.run.call_args[0][0]
+            assert "launchctl" in args
+            assert "kickstart" in args
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 14. Verify Channel
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestVerifyChannel:
+    @pytest.mark.asyncio
+    async def test_verify_p1_nats_success(self):
+        mgr = _make_manager()
+        mgr._nerve._send_p1_nats = AsyncMock(return_value={"delivered": True})
+        result = await mgr._verify_channel("mac2", "P1_nats")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_p2_http_success(self):
+        mgr = _make_manager()
+        mgr._nerve._send_p2_http = AsyncMock(return_value={"delivered": True})
+        result = await mgr._verify_channel("mac2", "P2_http")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_unknown_channel(self):
+        mgr = _make_manager()
+        result = await mgr._verify_channel("mac2", "P99_nonexistent")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_channel_delivery_fails(self):
+        mgr = _make_manager()
+        mgr._nerve._send_p1_nats = AsyncMock(return_value={"delivered": False})
+        result = await mgr._verify_channel("mac2", "P1_nats")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_channel_exception(self):
+        mgr = _make_manager()
+        mgr._nerve._send_p1_nats = AsyncMock(side_effect=ConnectionError("down"))
+        result = await mgr._verify_channel("mac2", "P1_nats")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_channel_timeout(self):
+        mgr = _make_manager()
+        async def slow(*a, **kw):
+            await asyncio.sleep(30)
+            return {"delivered": True}
+        mgr._nerve._send_p1_nats = slow
+        result = await mgr._verify_channel("mac2", "P1_nats")
+        assert result is False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 15. Degradation Alert & Fleet Assist
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestDegradationAlert:
+    @pytest.mark.asyncio
+    async def test_alert_writes_file(self, tmp_path):
+        mgr = _make_manager()
+        with patch("multifleet.self_heal.REPO_ROOT", tmp_path):
+            with patch("multifleet.self_heal.subprocess"):
+                await mgr._alert_degradation("mac2", ["P1_nats"], "restart_nats")
+        fleet_dir = tmp_path / ".fleet-messages" / "all"
+        files = list(fleet_dir.glob("*degradation*"))
+        assert len(files) == 1
+        content = files[0].read_text()
+        assert "mac2" in content
+        assert "P1_nats" in content
+
+    @pytest.mark.asyncio
+    async def test_alert_rate_limited(self, tmp_path):
+        mgr = _make_manager()
+        with patch("multifleet.self_heal.REPO_ROOT", tmp_path):
+            with patch("multifleet.self_heal.subprocess"):
+                await mgr._alert_degradation("mac2", ["P1_nats"], "restart_nats")
+        # Second call within 30min cooldown
+        with patch("multifleet.self_heal.REPO_ROOT", tmp_path):
+            with patch("multifleet.self_heal.subprocess") as mock_sp:
+                await mgr._alert_degradation("mac2", ["P1_nats"], "restart_nats")
+                mock_sp.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_alert_git_failure_falls_back_to_seed(self, tmp_path):
+        mgr = _make_manager()
+        with patch("multifleet.self_heal.REPO_ROOT", tmp_path):
+            with patch("multifleet.self_heal.subprocess") as mock_sp:
+                mock_sp.run.side_effect = Exception("git broken")
+                with patch("multifleet.self_heal.Path") as mock_path_cls:
+                    # Let REPO_ROOT paths work normally but seed path be mock
+                    mock_path_cls.side_effect = lambda x: Path(x)
+                    await mgr._alert_degradation("mac3", ["P2_http"], "check")
+        # Degradation should still be tracked (cooldown set)
+        assert "degrade:mac3" in mgr._degradation_cooldowns
+
+
+class TestFleetAssist:
+    @pytest.mark.asyncio
+    async def test_broadcast_via_nats(self):
+        mgr = _make_manager()
+        mgr._nerve.send = AsyncMock()
+        await mgr._request_fleet_assist("mac2", ["P1_nats"], "restart_nats")
+        mgr._nerve.send.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_seed_files(self):
+        mgr = _make_manager()
+        mgr._nerve.nc.is_connected = False
+        await mgr._request_fleet_assist("mac2", ["P1_nats"], "restart_nats")
+        # Should attempt seed files (mac3 only -- skip self=mac1, target=mac2)
+
+    @pytest.mark.asyncio
+    async def test_nats_send_failure_falls_back(self):
+        mgr = _make_manager()
+        mgr._nerve.send = AsyncMock(side_effect=Exception("nats down"))
+        mgr._nerve.nc.is_connected = True
+        await mgr._request_fleet_assist("mac2", ["P1_nats"], "restart_nats")
+        # Should not raise — gracefully degrades
+
+
+class TestHandleFleetAssist:
+    @pytest.mark.asyncio
+    async def test_ignores_self_request(self):
+        mgr = _make_manager(node_id="mac1")
+        msg = {"payload": {"body": json.dumps({
+            "target": "mac2", "reporter": "mac1",
+            "broken_channels": ["P1_nats"], "action": "restart_nats",
+        })}}
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock) as mock_rep:
+            await mgr._handle_fleet_assist(msg)
+            mock_rep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ignores_self_target(self):
+        mgr = _make_manager(node_id="mac1")
+        msg = {"payload": {"body": json.dumps({
+            "target": "mac1", "reporter": "mac2",
+            "broken_channels": ["P1_nats"], "action": "restart_nats",
+        })}}
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock) as mock_rep:
+            await mgr._handle_fleet_assist(msg)
+            mock_rep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_triggers_repair_for_other_node(self):
+        mgr = _make_manager(node_id="mac1")
+        msg = {"payload": {"body": json.dumps({
+            "target": "mac3", "reporter": "mac2",
+            "broken_channels": ["P1_nats"], "action": "restart_nats",
+        })}}
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock,
+                          return_value={"repaired": True, "level": 2}) as mock_rep:
+            await mgr._handle_fleet_assist(msg)
+            mock_rep.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_prevents_duplicate_assist(self):
+        mgr = _make_manager(node_id="mac1")
+        # Clear class-level cooldowns from prior tests
+        SelfHealManager._degradation_cooldowns.clear()
+        msg = {"payload": {"body": json.dumps({
+            "target": "mac3", "reporter": "mac2",
+            "broken_channels": ["P1_nats"], "action": "restart_nats",
+        })}}
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock,
+                          return_value={"repaired": False}) as mock_rep:
+            await mgr._handle_fleet_assist(msg)
+            mock_rep.assert_called_once()
+            # Second call within cooldown
+            mock_rep.reset_mock()
+            await mgr._handle_fleet_assist(msg)
+            mock_rep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handles_malformed_body(self):
+        mgr = _make_manager()
+        msg = {"payload": {"body": "not json"}}
+        await mgr._handle_fleet_assist(msg)  # no raise
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_payload(self):
+        mgr = _make_manager()
+        await mgr._handle_fleet_assist({})  # no raise
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 16. Repair With Backoff (learning store integration)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestRepairWithBackoff:
+    @pytest.mark.asyncio
+    async def test_success_resets_backoff(self):
+        mgr = _make_manager()
+        mgr._record_failed_repair("mac2")
+        assert "mac2" in mgr._idle_backoff
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock,
+                          return_value={"repaired": True, "level": 1}):
+            with patch("multifleet.self_heal._get_memory_feedback") as mock_fb:
+                mock_fb.return_value = MagicMock(record_repair=MagicMock())
+                await mgr._repair_with_backoff("mac2", ["P1_nats"], "restart_nats")
+        assert "mac2" not in mgr._idle_backoff
+
+    @pytest.mark.asyncio
+    async def test_failure_increases_backoff(self):
+        mgr = _make_manager()
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock,
+                          return_value={"repaired": False, "reason": "all_levels_failed", "level": 4}):
+            with patch("multifleet.self_heal._get_memory_feedback") as mock_fb:
+                mock_fb.return_value = MagicMock(record_repair=MagicMock())
+                await mgr._repair_with_backoff("mac2", ["P1_nats"], "restart_nats")
+        assert "mac2" in mgr._idle_backoff
+        assert mgr._idle_backoff["mac2"]["failed_repairs"] == 1
+
+    @pytest.mark.asyncio
+    async def test_memory_feedback_errors_dont_block(self):
+        """Memory feedback failures must never block fleet ops."""
+        mgr = _make_manager()
+        with patch.object(mgr, "repair_with_escalation", new_callable=AsyncMock,
+                          return_value={"repaired": True, "level": 1}):
+            with patch("multifleet.self_heal._get_memory_feedback", side_effect=Exception("boom")):
+                await mgr._repair_with_backoff("mac2", ["P1_nats"], "restart_nats")
+        # Should complete without raising
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 17. L2/L3 Escalation Paths
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestEscalationLevels:
+    @pytest.mark.asyncio
+    async def test_l1_fails_l2_succeeds(self):
+        """L1 probe fails, L2 repair succeeds."""
+        mgr = _make_manager()
+        probe_call = 0
+
+        async def probe_fn(target, msg):
+            nonlocal probe_call
+            probe_call += 1
+            # L1 probe fails, L2 probe succeeds
+            return {"delivered": probe_call >= 2}
+
+        mgr._nerve.send_with_fallback = AsyncMock(return_value={"delivered": True, "channel": "P4"})
+        mgr._nerve._send_p1_nats = probe_fn
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr.repair_with_escalation("mac2", ["P1_nats"], "restart_nats")
+        assert result["repaired"] is True
+        assert result["level"] == 2
+
+    @pytest.mark.asyncio
+    async def test_l1_l2_fail_l3_succeeds(self):
+        """L1 and L2 probes fail, L3 succeeds."""
+        mgr = _make_manager()
+        probe_call = 0
+
+        async def probe_fn(target, msg):
+            nonlocal probe_call
+            probe_call += 1
+            return {"delivered": probe_call >= 3}
+
+        mgr._nerve.send_with_fallback = AsyncMock(return_value={"delivered": True, "channel": "P4"})
+        mgr._nerve._send_p1_nats = probe_fn
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr.repair_with_escalation("mac2", ["P1_nats"], "restart_nats")
+        assert result["repaired"] is True
+        assert result["level"] == 3
+
+    @pytest.mark.asyncio
+    async def test_l1_delivery_fails_skips_wait(self):
+        """If L1 message can't even be delivered, skip straight to L2."""
+        mgr = _make_manager()
+        call_count = 0
+
+        async def fallback_fn(target, msg):
+            nonlocal call_count
+            call_count += 1
+            # L1 delivery fails, L2 delivery succeeds
+            return {"delivered": call_count >= 2, "channel": "P2"}
+
+        mgr._nerve.send_with_fallback = fallback_fn
+        mgr._nerve._send_p1_nats = AsyncMock(return_value={"delivered": True})
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr.repair_with_escalation("mac2", ["P1_nats"], "restart_nats")
+        assert result["repaired"] is True
+        assert result["level"] == 2
+
+    @pytest.mark.asyncio
+    async def test_prior_repair_knowledge_logged(self):
+        """Verify repair_with_escalation queries learning store for prior repairs."""
+        mgr = _make_manager()
+        mgr._nerve.send_with_fallback = AsyncMock(return_value={"delivered": True})
+        mgr._nerve._send_p1_nats = AsyncMock(return_value={"delivered": True})
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch("multifleet.self_heal._get_memory_feedback") as mock_fb:
+                fb_instance = MagicMock()
+                fb_instance.search_prior_repairs.return_value = [
+                    {"title": "Prior fix for NATS"}
+                ]
+                mock_fb.return_value = fb_instance
+                await mgr.repair_with_escalation("mac2", ["P1_nats"], "restart_nats")
+                fb_instance.search_prior_repairs.assert_called_once()
