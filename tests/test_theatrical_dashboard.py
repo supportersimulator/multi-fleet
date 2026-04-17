@@ -163,9 +163,43 @@ class TestTheatricalDashboard:
         assert data["fleet"] is not None
         assert data["evidence"] is not None
         assert data["evidence"]["total"] == 0
+        assert data["probes"] == mock_data.snapshot.return_value.get("probe_results")
 
     def test_header_shows_timestamp(self):
         dash = TheatricalDashboard()
         html = dash.render(data={})
         assert "tc-timestamp" in html
         assert "UTC" in html
+
+    def test_extract_surgeon_data_uses_safe_statuses(self):
+        dash = TheatricalDashboard()
+        fleet = {
+            "rebuttals": [
+                {
+                    "task_id": "task-123",
+                    "phase": "review",
+                    "verdicts_count": 2,
+                    "expected": 3,
+                }
+            ]
+        }
+
+        with patch("multifleet.surgeon_adapter.SurgeonAdapter") as MockAdapter:
+            instance = MockAdapter.return_value
+            instance.get_surgeon_state.return_value = {
+                "atlas": {"status": "online"},
+                "cardiologist": {"status": "online"},
+                "neurologist": {"status": "offline"},
+            }
+            data = dash._extract_surgeon_data(fleet)
+
+        assert data["surgeons"]["cardiologist"] == "online"
+        assert data["surgeons"]["neurologist"] == "offline"
+        assert data["rebuttals"][0]["task_id"] == "task-123"
+
+    def test_safe_text_redacts_secret_like_values(self):
+        dash = TheatricalDashboard()
+        text = dash._safe_text("OPENAI_API_KEY=sk-secret-123456789 and Bearer abcdefghijklmnop")
+        assert "sk-secret" not in text
+        assert "REDACTED" in text
+        assert "abcdefghijklmnop" not in text

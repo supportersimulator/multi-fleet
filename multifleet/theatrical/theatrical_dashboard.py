@@ -12,6 +12,7 @@ Usage:
 import html
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -85,14 +86,18 @@ class TheatricalDashboard:
                         "version": "unknown",
                     }
                 result["fleet"] = snapshot
+                result["probes"] = snapshot.get("probe_results")
             except Exception as exc:
                 logger.debug("Fleet data unavailable: %s", exc)
 
         # TODO: Wire remaining data sources when available:
-        # result["surgeon"]       — from 3-Surgeons probe/status endpoint
         # result["memory"]        — from ContextDNA memory heat map query
-        # result["probes"]        — from probe engine last-fire results
         # result["gold"]          — from session_historian gold mining output
+
+        try:
+            result["surgeon"] = self._gather_surgeon_data(result.get("fleet"))
+        except Exception as exc:
+            logger.debug("Surgeon data unavailable: %s", exc)
 
         # Synaptic 8th Intelligence data
         try:
@@ -346,12 +351,113 @@ class TheatricalDashboard:
         """Extract surgeon-relevant data from fleet snapshot."""
         if not fleet:
             return None
-        # Build minimal surgeon data from available fleet info
-        return {
-            "surgeons": {},
-            "cross_exams": [],
-            "rebuttals": [],
+        return self._gather_surgeon_data(fleet)
+
+    def _gather_surgeon_data(self, fleet: Optional[dict]) -> Optional[dict]:
+        """Gather safe surgeon-facing telemetry for the theatrical dashboard."""
+        surgeons = {
+            "atlas": "active",
+            "cardiologist": "unknown",
+            "neurologist": "unknown",
         }
+
+        try:
+            from ..surgeon_adapter import SurgeonAdapter
+
+            state = SurgeonAdapter().get_surgeon_state()
+            for surgeon in ("atlas", "cardiologist", "neurologist"):
+                surgeons[surgeon] = state.get(surgeon, {}).get("status", surgeons[surgeon])
+        except Exception as exc:
+            logger.debug("Could not gather surgeon adapter state: %s", exc)
+
+        rebuttals_raw = []
+        if fleet:
+            rebuttals_raw = fleet.get("rebuttals", []) or []
+            if isinstance(rebuttals_raw, dict):
+                rebuttals_raw = rebuttals_raw.get("active", []) if isinstance(rebuttals_raw.get("active"), list) else []
+
+        rebuttals = []
+        for rb in rebuttals_raw[:6]:
+            rebuttals.append({
+                "task_id": self._safe_text(str(rb.get("task_id", "")), 80),
+                "phase": self._safe_text(str(rb.get("phase", "unknown")), 40),
+                "verdicts_count": int(rb.get("verdicts_count", 0) or 0),
+                "expected": int(rb.get("expected", 0) or 0),
+            })
+
+        disagreements = []
+        decision_points = []
+        try:
+            from ..corrigibility_ledger import CorrigibilityLedger
+
+            ledger = CorrigibilityLedger()
+            for item in ledger.get_recent_disagreements(limit=6):
+                disagreements.append({
+                    "ts": item.get("ts"),
+                    "topic": self._safe_text(item.get("topic", "?"), 140),
+                    "surgeon_a_position": self._safe_text(item.get("surgeon_a_position", ""), 160),
+                    "surgeon_b_position": self._safe_text(item.get("surgeon_b_position", ""), 160),
+                    "resolution": self._safe_text(item.get("resolution", "unresolved"), 80),
+                    "evidence": {
+                        "surgeon_a_name": self._safe_text(item.get("evidence", {}).get("surgeon_a_name", "Surgeon A"), 40)
+                        if isinstance(item.get("evidence"), dict) else "Surgeon A",
+                        "surgeon_b_name": self._safe_text(item.get("evidence", {}).get("surgeon_b_name", "Surgeon B"), 40)
+                        if isinstance(item.get("evidence"), dict) else "Surgeon B",
+                    },
+                })
+        except Exception as exc:
+            logger.debug("Could not gather corrigibility disagreements: %s", exc)
+
+        try:
+            from ..event_bus import IDEEventBus
+
+            bus = IDEEventBus.get()
+            gate_events = bus.history("gate", limit=6, pattern="gate.result")
+            for evt in gate_events:
+                payload = evt.get("payload", {})
+                proposed = payload.get("proposed_action", "") or payload.get("proposal", "")
+                final = payload.get("final_action", "") or payload.get("result", "")
+                changed = bool(proposed and final and str(proposed) != str(final))
+                decision_points.append({
+                    "ts": payload.get("timestamp", evt.get("timestamp")),
+                    "context": self._safe_text(payload.get("gate", "gate.result"), 60),
+                    "proposed_action": self._safe_text(str(proposed), 120),
+                    "final_action": self._safe_text(str(final), 120),
+                    "changed": changed,
+                })
+        except Exception as exc:
+            logger.debug("Could not gather gate history: %s", exc)
+
+        return {
+            "surgeons": surgeons,
+            "cross_exams": [],
+            "rebuttals": rebuttals,
+            "disagreements": disagreements,
+            "decision_points": decision_points,
+        }
+
+    @staticmethod
+    def _safe_text(value: str, limit: int = 160) -> str:
+        text = str(value or "")
+        try:
+            from memory.secret_refs import get_secret_registry
+
+            text = get_secret_registry().redact(text)
+        except Exception:
+            pass
+
+        patterns = [
+            (r"\bsk-[A-Za-z0-9_-]{12,}\b", "sk-REDACTED"),
+            (r"(?i)\b(Bearer)\s+[A-Za-z0-9._-]{12,}", r"\1 REDACTED"),
+            (r"(?im)\b(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\n ]+['\"]?", r"\1=REDACTED"),
+        ]
+        for pattern, repl in patterns:
+            text = re.sub(pattern, repl, text)
+
+        text = " ".join(text.split())
+        if len(text) > limit:
+            text = text[: max(0, limit - 16)].rstrip() + " [truncated]"
+        return text
 
     def _render_synaptic(self, data: Optional[dict]) -> str:
         """Render Synaptic 8th Intelligence section."""
