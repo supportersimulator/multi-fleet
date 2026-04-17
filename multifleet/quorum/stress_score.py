@@ -232,3 +232,77 @@ def emit_stress_event(
         pass  # Event emission must never break stress computation
 
     return event
+
+
+def evaluate_stress_and_trigger_surgeon(
+    topic: str,
+    fallback_p3plus_count: int = 0,
+    stale_peers: int = 0,
+    chief_sync_failures: int = 0,
+    surgeon_deadlocks: int = 0,
+    context_staleness: float = 0.0,
+) -> dict:
+    """Compute stress and trigger surgeon protocol if critical.
+
+    INTERLOCK 5: When stress crosses into CRITICAL, automatically
+    triggers a surgeon cross-exam on the given topic. This bridges
+    the environmental pressure sensor to the corrigibility layer.
+
+    Args:
+        topic: Description of what's being evaluated.
+        (remaining args: same as compute_stress_score)
+
+    Returns:
+        {stress_score, stress_level, surgeon_triggered, surgeon_result}
+    """
+    # Check surgeon availability first
+    surgeon_available = True
+    try:
+        from multifleet.surgeon_adapter import SurgeonAdapter
+        adapter = SurgeonAdapter()
+        surgeon_available = adapter.is_available()
+    except Exception:
+        surgeon_available = False
+
+    score = compute_stress_score(
+        fallback_p3plus_count=fallback_p3plus_count,
+        stale_peers=stale_peers,
+        chief_sync_failures=chief_sync_failures,
+        surgeon_deadlocks=surgeon_deadlocks,
+        context_staleness=context_staleness,
+        surgeon_available=surgeon_available,
+    )
+    level = get_stress_level(score)
+
+    result = {
+        "stress_score": score,
+        "stress_level": level,
+        "surgeon_triggered": False,
+        "surgeon_result": None,
+    }
+
+    if level != STRESS_CRITICAL:
+        return result
+
+    # Critical stress -> trigger surgeon cross-exam
+    try:
+        from multifleet.surgeon_adapter import SurgeonAdapter
+        adapter = SurgeonAdapter()
+        cross_exam = adapter.request_cross_exam(
+            topic=f"CRITICAL STRESS ({score:.2f}): {topic}",
+            evidence={
+                "stress_score": f"{score:.2f}",
+                "stress_level": level,
+                "fallback_p3plus_count": str(fallback_p3plus_count),
+                "stale_peers": str(stale_peers),
+                "chief_sync_failures": str(chief_sync_failures),
+            },
+        )
+        result["surgeon_triggered"] = True
+        result["surgeon_result"] = cross_exam
+    except Exception as exc:
+        logger.warning("Surgeon cross-exam failed during critical stress: %s", exc)
+        result["surgeon_triggered"] = False
+        result["surgeon_result"] = {"error": str(exc)}
+
+    return result

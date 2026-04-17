@@ -580,10 +580,11 @@ class FleetSendGate:
 class FleetRepairGate:
     """Verifies a repair action is warranted before executing."""
 
-    # Track recent repairs: {target: last_repair_timestamp}
-    _repair_history: dict[str, float] = {}
-    # Track in-progress repairs: {target: start_timestamp}
-    _repair_in_progress: dict[str, float] = {}
+    def __init__(self):
+        # Track recent repairs: {target: last_repair_timestamp}
+        self._repair_history: dict[str, float] = {}
+        # Track in-progress repairs: {target: start_timestamp}
+        self._repair_in_progress: dict[str, float] = {}
 
     def check(self, target: str, action: str,
               channel_health: dict = None,
@@ -857,6 +858,53 @@ class FleetRepairGate:
                 f"Stress level OK (score={stress_score:.2f})",
                 critical=False,
             ))
+
+        # INTERLOCK 2: Surgeon review for critical channel degradation
+        # When the target has many broken channels (>= threshold), request
+        # surgeon review even if stress is below critical. This catches
+        # situations where a node is severely degraded but fleet-wide
+        # stress hasn't risen yet.
+        if channel_health is not None and action not in ("full_restart",):
+            target_health = channel_health.get(target, {})
+            if isinstance(target_health, dict):
+                broken_count = len(target_health.get("broken", []))
+                # Threshold: 4+ broken channels out of 7 is critical
+                if broken_count >= 4:
+                    try:
+                        from .surgeon_adapter import SurgeonAdapter
+                        adapter = SurgeonAdapter()
+                        review = adapter.request_cross_exam(
+                            topic=f"Critical channel degradation on '{target}': "
+                                  f"{broken_count} channels broken, repair action '{action}'",
+                            evidence={
+                                "target": target,
+                                "action": action,
+                                "broken_count": str(broken_count),
+                                "broken_channels": str(target_health.get("broken", [])),
+                                "node_id": node_id or "unknown",
+                            },
+                        )
+                        if review.get("consensus") and review.get("confidence", 0) >= 0.6:
+                            checks.append(GateCheck(
+                                "surgeon_critical_channel_review", True,
+                                f"Surgeon approved repair for critical channel degradation "
+                                f"({broken_count} broken, confidence={review.get('confidence', 0):.2f})",
+                                critical=False,
+                            ))
+                        else:
+                            checks.append(GateCheck(
+                                "surgeon_critical_channel_review", False,
+                                f"Surgeon flagged concern for critical channel degradation "
+                                f"({broken_count} broken, consensus={review.get('consensus')})",
+                                critical=False,  # advisory, not blocking
+                            ))
+                    except Exception as e:
+                        logger.warning("Surgeon review for critical channels unavailable: %s", e)
+                        checks.append(GateCheck(
+                            "surgeon_critical_channel_review", True,
+                            f"Surgeon review unavailable (degraded): {e}",
+                            critical=False,
+                        ))
 
         # Build result
         critical_failures = [c for c in checks if not c.passed and c.critical]

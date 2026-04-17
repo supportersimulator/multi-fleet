@@ -272,6 +272,28 @@ class SurgeonAdapter:
             source="cross_exam",
         )
 
+        # INTERLOCK 6: Record surgeon cross-exam result to EvidenceLedger
+        # Surgeon decisions become queryable evidence for future cross-exams.
+        # This closes the loop: evidence feeds surgeons (enrichment above),
+        # and surgeon results feed back into the evidence chain.
+        try:
+            from multifleet.evidence_ledger import EvidenceLedger
+            ledger = EvidenceLedger()
+            ledger.record(
+                "surgeon_cross_exam",
+                os.environ.get("MULTIFLEET_NODE_ID", "unknown"),
+                topic[:200],
+                {
+                    "consensus": exam_result.get("consensus", False),
+                    "confidence": exam_result.get("confidence", 0.0),
+                    "surgeons_consulted": exam_result.get("surgeons_consulted", []),
+                    "dissent_count": len(exam_result.get("dissents", [])),
+                    "source": exam_result.get("source", "unknown"),
+                },
+            )
+        except Exception as exc:
+            logger.debug("Evidence ledger recording for cross-exam failed: %s", exc)
+
         # INTERLOCK 4: Propagate dissent to QuorumRegistry as strategic proposal
         if not exam_result.get("consensus", True) and exam_result.get("dissents"):
             self._propagate_dissent_to_quorum(topic, exam_result)

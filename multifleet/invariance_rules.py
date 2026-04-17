@@ -403,6 +403,26 @@ class ChannelHealthInvariant:
                     "escalation_level": level,
                 })
 
+        # INTERLOCK 3: Record channel health degradation to CorrigibilityLedger
+        # When channels degrade, the system is making an implicit decision to
+        # continue operating with reduced connectivity. This must be tracked
+        # for corrigibility — surgeon input could change repair strategy.
+        if violations:
+            try:
+                from .corrigibility_ledger import CorrigibilityLedger
+                cl = CorrigibilityLedger()
+                for v in violations:
+                    cl.record_decision_point(
+                        context=f"channel_health_degraded:{v['peer']}",
+                        proposed_action=f"repair ({v['score']})",
+                        surgeon_input=f"severity={v['severity']}, broken={v.get('broken', [])}",
+                        final_action=f"escalation_L{v.get('escalation_level', 1)}",
+                        changed=False,
+                        source="channel_health_invariant",
+                    )
+            except Exception as exc:
+                logger.debug("CorrigibilityLedger recording failed for channel health: %s", exc)
+
         return violations
 
     def auto_repair(self, violation: dict, health_monitor=None) -> dict:

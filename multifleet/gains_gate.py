@@ -132,7 +132,65 @@ class FleetGainsGate:
         except Exception:
             pass  # Evidence recording must never break the gate
 
+        # INTERLOCK 7: Gains gate result triggers fleet health probe
+        # After gate runs, probe channel health so degradation surfaces
+        # even when gains gate is the only periodic check running.
+        try:
+            self._probe_fleet_health_on_gate(gate_result)
+        except Exception:
+            pass  # Fleet health probe must never break the gate
+
         return gate_result
+
+    def _probe_fleet_health_on_gate(self, gate_result: GateResult) -> Optional[dict]:
+        """INTERLOCK 7: Probe fleet channel health after gains-gate run.
+
+        When gains-gate detects failures (especially channel-related ones),
+        run ChannelHealthInvariant to surface degraded peers. Results are
+        recorded to the evidence ledger for the surgeon evidence chain.
+
+        Returns probe result dict or None if skipped.
+        """
+        health = self._get_health()
+        if not health:
+            return None
+
+        ch = health.get("channel_health", {})
+        if not ch:
+            return None
+
+        try:
+            from .invariance_rules import ChannelHealthInvariant
+            inv = ChannelHealthInvariant()
+            violations = inv.check(ch)
+
+            probe_result = {
+                "triggered_by": "gains_gate",
+                "gate_passed": gate_result.passed,
+                "peers_checked": len(ch),
+                "violations": len(violations),
+                "degraded_peers": [v["peer"] for v in violations],
+            }
+
+            # Record probe to evidence ledger
+            if violations:
+                try:
+                    from .evidence_ledger import EvidenceLedger
+                    ledger = EvidenceLedger()
+                    node_id = health.get("nodeId", "unknown")
+                    ledger.record(
+                        "fleet_health_probe",
+                        node_id,
+                        f"gains-gate triggered probe: {len(violations)} degraded peer(s)",
+                        probe_result,
+                    )
+                except Exception:
+                    pass
+
+            return probe_result
+        except Exception as exc:
+            logger.debug("Fleet health probe after gains-gate failed: %s", exc)
+            return None
 
     def _get_health(self) -> Optional[dict]:
         """Fetch daemon /health (cached per run)."""
@@ -195,8 +253,17 @@ class FleetGainsGate:
                                latency_ms=latency, critical=True)
         # Check channel_health for peer scores
         ch = health.get("channel_health", {})
+        def _score_positive(peer_data: dict) -> bool:
+            score = peer_data.get("score", "0/7")
+            if isinstance(score, (int, float)):
+                return score > 0
+            try:
+                return int(str(score).split("/")[0]) > 0
+            except (ValueError, IndexError):
+                return False
+
         reachable = sum(1 for peer_data in ch.values()
-                        if isinstance(peer_data, dict) and peer_data.get("score", 0) > 0)
+                        if isinstance(peer_data, dict) and _score_positive(peer_data))
         # Also check peers dict
         peers = health.get("peers", {})
         if reachable > 0 or len(peers) > 0:
