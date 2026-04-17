@@ -107,7 +107,9 @@ class TheaterDataFetcher:
             "evidence": (self._get("/evidence/latest") or {}).get("entries", []),
             "truth": self._get("/truth/stats") or {},
             "supervisor": self._get("/supervisor") or {"tasks": []},
-            "probe_results": (self._get("/scan/results") or {}).get("results", []),
+            # Read cached probe results for dashboard refreshes; explicit scans
+            # should remain user-triggered, not tied to every page poll.
+            "probe_results": ((self._get("/probes") or self._get("/scan/results") or {}).get("results", [])),
             "gains_gate": self._get("/gains-gate?quick=1") or {},
             "timestamp": time.time(),
             "online": bool(health),

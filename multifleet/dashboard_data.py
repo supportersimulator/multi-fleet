@@ -200,8 +200,15 @@ class FleetDashboardData:
         }
 
     def _get_probe_results(self) -> list:
-        """Get latest probe scan results from /scan/results."""
-        data = self._fetch("/scan/results")
+        """Get latest cached probe results.
+
+        Use ``/probes`` for read-only dashboards so refresh loops do not
+        trigger a fresh scan every time. Fall back to ``/scan/results`` only
+        if the cached endpoint is unavailable.
+        """
+        data = self._fetch("/probes")
+        if not data:
+            data = self._fetch("/scan/results")
         if not data:
             return []
         return data.get("results", [])

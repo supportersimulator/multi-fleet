@@ -881,7 +881,7 @@ def build_dashboard_html(daemon_port: int = DAEMON_PORT, eventbus_port: int = EV
       fetchJSON('/races'),
       fetchJSON('/evidence/latest'),
       fetchJSON('/gains-gate?quick=1'),
-      fetchJSON('/scan/results'),
+      fetchJSON('/probes'),
       fetchJSON('/truth/stats'),
       fetchJSON('/overlays'),
     ]);

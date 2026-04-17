@@ -46,6 +46,7 @@ SAMPLE_HEALTH = {
 SAMPLE_RACES = {"races": [{"id": "r1", "topic": "dashboard", "status": "active"}], "count": 1}
 SAMPLE_EVIDENCE = {"entries": [{"id": "e1", "event_type": "test", "ts": 1000}], "count": 1}
 SAMPLE_GAINS = {"passed": True, "checks": 10, "failures": 0}
+SAMPLE_PROBES = {"results": [{"id": "p1", "severity": "low"}], "count": 1, "cached": True}
 
 
 def _mock_fetch(responses: dict):
@@ -78,6 +79,7 @@ class TestDashboardDataSnapshot:
             "/races": SAMPLE_RACES,
             "/evidence/latest": SAMPLE_EVIDENCE,
             "/gains-gate": SAMPLE_GAINS,
+            "/probes": SAMPLE_PROBES,
         })):
             snap = dd.snapshot()
 
@@ -87,6 +89,7 @@ class TestDashboardDataSnapshot:
         assert snap["races"][0]["topic"] == "dashboard"
         assert snap["evidence"][0]["id"] == "e1"
         assert snap["gains_gate"]["passed"] is True
+        assert snap["probe_results"][0]["id"] == "p1"
         assert snap["messages"]["sent"] == 42
 
     def test_snapshot_daemon_offline(self):
@@ -148,6 +151,24 @@ class TestCaching:
             dd._get_nodes()
         dd.invalidate_cache()
         assert dd._cache == {}
+
+
+class TestProbeFetchBehavior:
+    """Dashboard read paths should prefer cached probe results."""
+
+    def test_probe_results_prefer_cached_endpoint(self):
+        dd = FleetDashboardData(cache_ttl=0)
+        with patch("urllib.request.urlopen", side_effect=_mock_fetch({"/probes": SAMPLE_PROBES})):
+            results = dd._get_probe_results()
+
+        assert results == SAMPLE_PROBES["results"]
+
+    def test_probe_results_fallback_to_scan_results(self):
+        dd = FleetDashboardData(cache_ttl=0)
+        with patch("urllib.request.urlopen", side_effect=_mock_fetch({"/scan/results": SAMPLE_PROBES})):
+            results = dd._get_probe_results()
+
+        assert results == SAMPLE_PROBES["results"]
 
 
 class TestNodeDetail:

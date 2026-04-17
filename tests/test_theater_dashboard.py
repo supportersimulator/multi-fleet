@@ -98,6 +98,31 @@ def test_data_fetch_graceful_daemon_down():
     assert data["races"] == []
 
 
+def test_data_fetch_prefers_cached_probes():
+    """Dashboard refresh should read cached probe results, not trigger scans."""
+    fetcher = TheaterDataFetcher(port=19999)
+
+    def fake_get(path):
+        mapping = {
+            "/health": {"nodeId": "mac1", "uptime_s": 1, "git": {}, "peers": {}, "channel_health": {}},
+            "/races": {"races": []},
+            "/evidence/latest": {"entries": []},
+            "/truth/stats": {},
+            "/supervisor": {"tasks": []},
+            "/probes": {"results": [{"probe": "cached"}]},
+            "/gains-gate?quick=1": {},
+        }
+        return mapping.get(path)
+
+    with patch.object(fetcher, "_get", side_effect=fake_get) as mock_get:
+        data = fetcher.fetch_all()
+
+    assert data["probe_results"] == [{"probe": "cached"}]
+    requested_paths = [call.args[0] for call in mock_get.call_args_list]
+    assert "/probes" in requested_paths
+    assert "/scan/results" not in requested_paths
+
+
 def test_render_methods_no_crash():
     """Every render method should return a Panel without raising."""
     dash = TheaterDashboard(daemon_port=19999)
