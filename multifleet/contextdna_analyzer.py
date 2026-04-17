@@ -377,6 +377,62 @@ def create_contextdna_analyzer():
         except Exception:
             pass
 
+        # 5. Query bugfix tracker: "have we seen this problem before?"
+        # Known regressions penalize confidence; known fixes boost it.
+        try:
+            from memory.bugfix_tracker import (
+                get_bugfix_by_symptom,
+                get_regressions,
+            )
+
+            # Check active regressions — any regression is a red flag
+            regressions = get_regressions()
+            if regressions:
+                regression_titles = [r.get("title", "")[:100] for r in regressions[:5]]
+                memory_reasons_detail.append({
+                    "source": "bugfix_tracker",
+                    "type": "active_regressions",
+                    "count": len(regressions),
+                    "titles": regression_titles,
+                })
+
+            # Check if any verdict's summary matches a known bugfix
+            for mid, v in verdicts.items():
+                summary = v.get("summary", "")
+                if not summary:
+                    continue
+                bugfix = get_bugfix_by_symptom(summary)
+                if bugfix:
+                    status = bugfix.get("status", "unknown")
+                    if status == "failed":
+                        # Known regression — penalize this approach
+                        adj = adjustments.get(mid, {"delta": 0.0, "reason": ""})
+                        adj["delta"] = adj.get("delta", 0.0) - PRIOR_FAILURE_PENALTY
+                        adj["reason"] = (
+                            f"Known regression: {bugfix.get('title', '')[:100]}. "
+                            + adj.get("reason", "")
+                        )[:200]
+                        adjustments[mid] = adj
+                        memory_reasons_detail.append({
+                            "machine": mid,
+                            "source": "bugfix_tracker",
+                            "type": "known_regression",
+                            "bugfix_id": bugfix.get("bugfix_id", ""),
+                            "title": bugfix.get("title", "")[:100],
+                        })
+                    elif status == "passed":
+                        # Known fix exists — boost if approach aligns
+                        memory_reasons_detail.append({
+                            "machine": mid,
+                            "source": "bugfix_tracker",
+                            "type": "known_fix_exists",
+                            "bugfix_id": bugfix.get("bugfix_id", ""),
+                            "title": bugfix.get("title", "")[:100],
+                            "fix": bugfix.get("fix", "")[:150],
+                        })
+        except Exception as e:
+            logger.debug("Bugfix tracker query failed (non-blocking): %s", e)
+
         # If no adjustments have non-zero delta, let the default analyzer handle it
         if all(a["delta"] == NO_MEMORY_MATCH for a in adjustments.values()):
             # Even if all deltas are zero, if we have professor wisdom, still return
@@ -442,6 +498,16 @@ def create_contextdna_analyzer():
         if professor_wisdom:
             reasoning += f" Professor: {professor_wisdom[:150]}."
 
+        # Surface bugfix tracker findings in reasoning
+        bugfix_entries = [e for e in memory_reasons_detail if e.get("source") == "bugfix_tracker"]
+        if bugfix_entries:
+            regression_count = sum(1 for e in bugfix_entries if e.get("type") in ("known_regression", "active_regressions"))
+            fix_count = sum(1 for e in bugfix_entries if e.get("type") == "known_fix_exists")
+            if regression_count:
+                reasoning += f" Bugfix tracker: {regression_count} regression warning(s)."
+            if fix_count:
+                reasoning += f" Bugfix tracker: {fix_count} known fix(es) found."
+
         # Write analysis back to Context DNA (close the learning loop)
         try:
             from multifleet.product_bridge import get_bridge
@@ -480,6 +546,23 @@ def create_contextdna_analyzer():
                 )
             if entry.get("source") == "strategic_analyst":
                 relevant_context.extend(entry.get("findings", []))
+            if entry.get("source") == "bugfix_tracker":
+                btype = entry.get("type", "")
+                if btype == "active_regressions":
+                    professor_warnings.append(
+                        f"Active regressions ({entry.get('count', 0)}): "
+                        + "; ".join(entry.get("titles", []))
+                    )
+                elif btype == "known_regression":
+                    professor_warnings.append(
+                        f"Known regression for {entry.get('machine', '?')}: "
+                        f"{entry.get('title', '')}"
+                    )
+                elif btype == "known_fix_exists":
+                    relevant_context.append(
+                        f"Known fix for {entry.get('machine', '?')}: "
+                        f"{entry.get('title', '')} → {entry.get('fix', '')}"
+                    )
 
         return SynthesisResult(
             task_id=task_id,
