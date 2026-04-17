@@ -890,6 +890,9 @@ class TestIntegration_RepairToEvidenceToCorrigibility:
     def test_critical_repair_full_chain(self):
         """Critical channel degradation -> surgeon review -> evidence + corrigibility."""
         gate = FleetRepairGate()
+        # Clear class-level state from prior tests
+        gate._repair_history.clear()
+        gate._repair_in_progress.clear()
         tmp_evidence_db = tempfile.mktemp(suffix=".db")
         evidence_ledger = EvidenceLedger(db_path=tmp_evidence_db)
         tmp_corrig_db = tempfile.mktemp(suffix=".db")
