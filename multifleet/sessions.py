@@ -269,10 +269,10 @@ class SessionManager:
         # Fallback: seed file + keystroke trigger
         self._inject_seed(data)
         self._notify(f"Fleet: {payload.get('subject', 'message')} from {sender}")
-        if not data.get("_idle_gated"):
-            self._keystroke_trigger(f"fleet message from {sender}: {payload.get('subject', '')}")
-        else:
-            logger.info(f"Idle-gated: skipping keystroke trigger for {sender} message")
+        # Keystroke disabled 2026-04-17: hijacks Aaron's input box + burns session turns.
+        # Seed file waits for next real prompt; UserPromptSubmit hook batch-injects.
+        # xbar F:N/T + notification provide zero-cost visibility.
+        logger.info(f"seed-only delivery (keystroke disabled) for {sender} {data.get('type', 'context')}")
 
     def _inject_seed(self, data: dict):
         """Write message to seed file (fallback injection method)."""
