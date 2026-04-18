@@ -726,9 +726,10 @@ class FleetRepairGate:
             try:
                 from .config import load_config
                 config = load_config()
-                chief_node = config.get("chief", {}).get("nodeId", "mac1")
+                # Chief falls back to current node (self-chief in single-node fleets)
+                chief_node = config.get("chief", {}).get("nodeId") or current_node
             except Exception:
-                chief_node = "mac1"
+                chief_node = current_node
 
             if current_node == chief_node:
                 checks.append(GateCheck(

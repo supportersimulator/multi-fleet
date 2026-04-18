@@ -235,14 +235,10 @@ def _detect_node_id() -> str:
     if node:
         return node
 
-    # Check hostname
+    # Fall back to hostname (sanitized: strip .local, lowercase)
     import platform
-    hostname = platform.node().lower()
-    for candidate in ["mac1", "mac2", "mac3"]:
-        if candidate in hostname:
-            return candidate
-
-    return "unknown"
+    hostname = platform.node().lower().replace(".local", "")
+    return hostname or "unknown"
 
 
 # ── Event-Based Auto-Launch ────────────────────────────────────────

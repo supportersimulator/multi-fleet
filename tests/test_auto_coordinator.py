@@ -94,6 +94,7 @@ class TestDispatch:
     def test_auto_dispatch_selects_least_loaded(self, coord, tmp_inbox):
         _write_task_message(tmp_inbox, "Fix auth")
         coord.scan_inbox()
+        coord._available_nodes = ["mac1", "mac2", "mac3"]  # explicit fleet
         coord.update_node_sessions("mac1", 5)
         coord.update_node_sessions("mac2", 1)
         coord.update_node_sessions("mac3", 3)

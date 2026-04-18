@@ -233,13 +233,12 @@ class TestFleetRepairGate:
     @patch("multifleet.invariance_gates._record_audit")
     def test_l4_chief_only_enforcement(self, _a):
         """L4 SSH repair (full_restart) blocked on non-chief node."""
-        gate = FleetRepairGate()
-        with patch.dict(os.environ, {"MULTIFLEET_NODE_ID": "mac2"}):
-            with patch("multifleet.invariance_gates.FleetRepairGate.check") as orig:
-                # Actually call through with node_id override
-                pass
-        # Direct test with node_id param
-        result = gate.check("mac3", "full_restart", node_id="mac2")
+        import sys
+        mock_cfg = type(sys)("multifleet.config")
+        mock_cfg.load_config = lambda: {"chief": {"nodeId": "mac1"}}
+        with patch.dict(sys.modules, {"multifleet.config": mock_cfg}):
+            gate = FleetRepairGate()
+            result = gate.check("mac3", "full_restart", node_id="mac2")
         l4_check = next(c for c in result.checks if c.name == "l4_chief_only")
         assert not l4_check.passed
         assert "chief" in l4_check.message
@@ -247,8 +246,12 @@ class TestFleetRepairGate:
     @patch("multifleet.invariance_gates._record_audit")
     def test_l4_chief_allowed(self, _a):
         """L4 SSH repair allowed on chief node."""
-        gate = FleetRepairGate()
-        result = gate.check("mac2", "full_restart", node_id="mac1")
+        import sys
+        mock_cfg = type(sys)("multifleet.config")
+        mock_cfg.load_config = lambda: {"chief": {"nodeId": "mac1"}}
+        with patch.dict(sys.modules, {"multifleet.config": mock_cfg}):
+            gate = FleetRepairGate()
+            result = gate.check("mac2", "full_restart", node_id="mac1")
         l4_check = next(c for c in result.checks if c.name == "l4_chief_only")
         assert l4_check.passed
 

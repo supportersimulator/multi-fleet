@@ -3043,7 +3043,7 @@ TOOLS = [
             },
             "required": [],
         },
-        "fn": _fleet_server_tool,
+        "fn": lambda args: _fleet_server_tool(args),
     },
 ]
 

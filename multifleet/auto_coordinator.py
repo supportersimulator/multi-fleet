@@ -68,7 +68,9 @@ class AutoCoordinator:
         self._inbox_dir = inbox_dir or (FLEET_MSG_DIR / node_id)
         self._tasks: dict[str, TrackedTask] = {}
         self._processed_files: set[str] = set()
-        self._available_nodes: list[str] = ["mac1", "mac2", "mac3"]
+        # Available nodes discovered dynamically via fleet daemon / config.
+        # Defaults to [node_id] (single-node) — populated from discovery at runtime.
+        self._available_nodes: list[str] = [node_id]
         self._node_session_counts: dict[str, int] = {}
         self._review_flow = None  # lazy init
         self._stats = {

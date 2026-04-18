@@ -29,11 +29,16 @@ dependencies = [  # Pinned 2026-04-16 for supply chain safety
     "jsonschema~=4.26.0",
     "websockets~=16.0",
     "rich~=13.0",
+    "redis~=5.0",
+    "aiohttp~=3.9",
 ]
 
 [project.optional-dependencies]
 discord = [
     "discord.py~=2.7.0",
+]
+full = [
+    "cryptography~=42.0",
 ]
 dev = [
     "pytest~=9.0",
@@ -44,6 +49,7 @@ dev = [
 fleet = "multifleet.cli:main"
 fleet-nerve-mcp = "multifleet.mcp:main"
 fleet-nerve = "multifleet.nats_client:main"
+fleet-daemon = "multifleet.daemon:main"
 fleet-dashboard = "multifleet.web_dashboard:main"
 fleet-nats-cluster = "multifleet.nats_cluster:main"
 
