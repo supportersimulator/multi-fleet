@@ -463,6 +463,23 @@ class FleetNerveNATS:
         connected_url = getattr(self.nc, 'connected_url', self.nats_url) or self.nats_url
         logger.info(f"Connected to NATS at {connected_url} as {self.node_id} ({len(servers)} server(s) configured)")
 
+        # Node ID collision detection (blocker #3). Probe fleet for duplicate node_id.
+        # Strict mode (MULTIFLEET_COLLISION_STRICT=1) refuses boot on collision.
+        # Default: warn + continue (backward-compat — existing daemons may not respond).
+        try:
+            collision = await self._check_node_id_collision()
+            if collision:
+                strict = os.environ.get("MULTIFLEET_COLLISION_STRICT", "0") == "1"
+                msg = f"Node ID collision: '{self.node_id}' already claimed by another daemon (session={collision.get('session','?')[:8]} pid={collision.get('pid','?')})"
+                if strict:
+                    logger.error(msg + " — MULTIFLEET_COLLISION_STRICT=1, refusing to boot")
+                    raise RuntimeError(msg)
+                logger.warning(msg + " — continuing (set MULTIFLEET_COLLISION_STRICT=1 to refuse boot)")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.debug(f"Collision probe skipped ({type(e).__name__}: {e})")
+
         # Set up JetStream for persistent messaging
         self.js = self.nc.jetstream()
         try:
@@ -481,6 +498,54 @@ class FleetNerveNATS:
             except Exception as e:
                 logger.warning(f"JetStream setup failed (non-fatal, pub/sub still works): {e}")
                 self.js = None
+
+    async def _check_node_id_collision(self) -> dict | None:
+        """Probe fleet for a daemon with the same node_id. Returns collision info or None.
+
+        Uses request/reply pattern on fleet.presence.{node_id}. Any daemon on this
+        subject that is NOT us replies with its session_uuid + pid. Timeout 2s.
+        Backward-compat: nodes without a responder produce no reply → treated as clean.
+        """
+        import uuid as _uuid
+        my_session = str(_uuid.uuid4())
+        self._presence_session = my_session  # stash for responder to self-filter
+        subject = f"fleet.presence.{self.node_id}"
+        try:
+            probe = json.dumps({
+                "session": my_session, "pid": os.getpid(),
+                "node_id": self.node_id, "probe": True,
+            }).encode()
+            reply = await self.nc.request(subject, probe, timeout=2.0)
+        except Exception:
+            # TimeoutError from nats.errors — no responder, no collision
+            return None
+        try:
+            data = json.loads(reply.data.decode())
+            if data.get("session") and data.get("session") != my_session:
+                return data
+        except Exception:
+            pass
+        return None
+
+    async def _handle_presence_probe(self, msg):
+        """Respond to node_id-collision probes. Only replies if probe session != ours."""
+        try:
+            data = json.loads(msg.data.decode())
+            if not data.get("probe"):
+                return
+            if data.get("session") == getattr(self, "_presence_session", None):
+                return  # own probe, don't reply
+            if not msg.reply:
+                return
+            reply = json.dumps({
+                "session": getattr(self, "_presence_session", "unknown"),
+                "pid": os.getpid(),
+                "node_id": self.node_id,
+                "reply": True,
+            }).encode()
+            await self.nc.publish(msg.reply, reply)
+        except Exception as e:
+            logger.debug(f"presence-probe handler error: {e}")
 
     async def _on_reconnect(self):
         logger.info("Reconnected to NATS — re-subscribing to all subjects")
@@ -1049,6 +1114,8 @@ class FleetNerveNATS:
         self._active_subs.append(await self.nc.subscribe(_sub_all(), cb=self._handle_message))
         self._active_subs.append(await self.nc.subscribe(_sub_heartbeat(), cb=self._handle_heartbeat))
         self._active_subs.append(await self.nc.subscribe(_sub_ack(self.node_id), cb=self._handle_ack))
+        # Node ID collision responder (blocker #3). Future daemons probe here.
+        self._active_subs.append(await self.nc.subscribe(f"fleet.presence.{self.node_id}", cb=self._handle_presence_probe))
         # Session historian subscription (fleet.sessions.> wildcard)
         if fleet_historian_nats:
             sub, cb = fleet_historian_nats.subscribe_sessions(self)
