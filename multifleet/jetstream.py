@@ -139,13 +139,58 @@ async def _stream_exists(js: Any, stream: str) -> bool:
     Uses stream_info which raises NotFoundError when missing. Any other
     error is treated as "unknown" (returns False so caller attempts create).
     """
+    return await _get_stream_info(js, stream) is not None
+
+
+async def _get_stream_info(js: Any, stream: str) -> Optional[Any]:
+    """Return stream_info result, or None if absent/unreachable."""
     try:
-        await js.stream_info(stream)
-        return True
+        return await js.stream_info(stream)
     except Exception as e:
-        # NotFoundError or timeout → treat as absent; caller will try add
         logger.debug("jetstream: stream_info(%s) → %s", stream, e)
-        return False
+        return None
+
+
+async def _reconcile_stream_config(
+    js: Any,
+    stream: str,
+    info: Any,
+    *,
+    max_age: int,
+    max_bytes: int,
+) -> None:
+    """Update an existing stream in-place if retention caps drifted.
+
+    Callers invoked ensure_streams expecting the configured caps — if the
+    stream was created under older defaults (e.g. 24h/unbounded), update
+    it so the new caps take effect without dropping stored messages.
+    """
+    try:
+        cfg = info.config
+        current_age = int(getattr(cfg, "max_age", 0) or 0)
+        current_bytes = int(getattr(cfg, "max_bytes", 0) or 0)
+    except Exception as e:
+        logger.debug("jetstream: %s config read failed: %s", stream, e)
+        return
+
+    needs_update = current_age != max_age or current_bytes != max_bytes
+    if not needs_update:
+        logger.info("jetstream: stream %s already at target retention", stream)
+        return
+
+    try:
+        cfg.max_age = max_age
+        cfg.max_bytes = max_bytes
+        await js.update_stream(config=cfg)
+        logger.info(
+            "jetstream: reconciled %s retention (max_age %ds→%ds, max_bytes %d→%d)",
+            stream, current_age, max_age, current_bytes, max_bytes,
+        )
+    except Exception as e:
+        logger.warning(
+            "jetstream: update_stream(%s) failed: %s — keeping existing config",
+            stream, e,
+        )
 
 
 async def ensure_streams(
@@ -189,8 +234,11 @@ async def ensure_streams(
             continue
 
         try:
-            if await _stream_exists(js, stream):
-                logger.info("jetstream: stream %s already present", stream)
+            existing = await _get_stream_info(js, stream)
+            if existing is not None:
+                await _reconcile_stream_config(
+                    js, stream, existing, max_age=max_age, max_bytes=max_bytes,
+                )
                 continue
 
             # Create with limits retention — oldest dropped when caps hit.
