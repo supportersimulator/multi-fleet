@@ -217,11 +217,20 @@ class FleetNerveNATS:
         self.nats_url = nats_url
         self.nc: Optional[nats.NATS] = None
         self.js = None  # JetStream context
+        # JetStream durable consumers (per-stream) for missed-message replay.
+        # Populated in connect() when config.jetstream.enabled is true.
+        self._js_subs: dict = {}  # stream_name -> pull subscription
+        self._js_enabled = False  # mirrors config.jetstream.enabled at connect
         self._loop = None  # Set in serve() for HTTP handler threads
         self._stats = {
             "received": 0, "sent": 0, "broadcasts": 0,
             "errors": 0, "started_at": time.time(),
         }
+        # Inbound schema validation counter (blocker #4). Incremented by
+        # inbound_validator.handle_inbound_validation on every malformed
+        # message (advisory + strict modes) so failures surface even when
+        # we do not reject. See multifleet/inbound_validator.py.
+        self._schema_rejected = 0
         self._peers = {}  # node_id -> last heartbeat data
         self._running = True
         self._active_subs: list = []  # Track subs for reconnect dedup
@@ -420,6 +429,55 @@ class FleetNerveNATS:
         except Exception as e:
             logger.warning(f"ChiefSynthesis init failed: {e}")
 
+        # Per-peer rate limiter — blocker #5: guard against flood from misbehaving peer
+        self._rate_limiter = None
+        self._rate_limited = 0  # counter for inbound drops (ZSF observability)
+        try:
+            from .peer_rate_limit import PeerRateLimiter
+            in_limit = int(os.environ.get("MULTIFLEET_PEER_RATE_INBOUND", "60"))
+            out_limit = int(os.environ.get("MULTIFLEET_PEER_RATE_OUTBOUND", "60"))
+            window_s = float(os.environ.get("MULTIFLEET_PEER_RATE_WINDOW_S", "60"))
+            self._rate_limiter = PeerRateLimiter(
+                max_per_minute=max(in_limit, out_limit),
+                max_per_minute_inbound=in_limit,
+                max_per_minute_outbound=out_limit,
+                window_s=window_s,
+                on_limit=self._on_peer_rate_limited,
+            )
+            # Best-effort restore of prior buckets (stale ones auto-reset inside load_state)
+            try:
+                self._rate_limiter.load_state()
+            except Exception:
+                pass
+            logger.info(
+                "PeerRateLimiter initialized (inbound=%d/min, outbound=%d/min, window=%.0fs)",
+                in_limit, out_limit, window_s,
+            )
+        except Exception as e:
+            logger.warning(f"PeerRateLimiter init failed: {e} — flood protection disabled")
+
+    def _on_peer_rate_limited(self, peer_id: str, direction: str, count: int) -> None:
+        """Callback fired by PeerRateLimiter on every rejection.
+
+        Emits a ``fleet.rate_limited`` event via FleetEventBus (best-effort).
+        Inbound drops increment ``self._rate_limited`` for health endpoint.
+        """
+        if direction == "inbound":
+            self._rate_limited += 1
+        try:
+            if self._eventbus is not None:
+                self._eventbus.emit(
+                    "rate_limited",
+                    {
+                        "peer_id": peer_id,
+                        "direction": direction,
+                        "count": count,
+                        "node_id": self.node_id,
+                    },
+                )
+        except Exception as exc:
+            logger.debug(f"rate_limited event emit failed: {exc}")
+
     async def connect(self):
         """Connect to NATS server(s) with auto-reconnect and cluster failover.
 
@@ -480,24 +538,27 @@ class FleetNerveNATS:
         except Exception as e:
             logger.debug(f"Collision probe skipped ({type(e).__name__}: {e})")
 
-        # Set up JetStream for persistent messaging
-        self.js = self.nc.jetstream()
+        # Set up JetStream for persistent messaging (fleet-open blocker #2).
+        # New streams: FLEET_MESSAGES (fleet.>) + FLEET_EVENTS (event.>), 7d/100MB.
+        # Gated by config.jetstream.enabled — when false, no streams are created
+        # and no durable consumers are attached (pub/sub behavior unchanged).
         try:
-            await self.js.find_stream_name_by_subject("fleet.>")
-            logger.info("JetStream stream FLEET found")
-        except Exception:
-            try:
-                await self.js.add_stream(
-                    name=STREAM_NAME,
-                    subjects=["fleet.>"],
-                    retention="limits",
-                    max_age=24 * 3600,  # 24h in seconds (NATS Go expects int64)
-                    storage="file",
-                )
-                logger.info("JetStream stream FLEET created (24h retention)")
-            except Exception as e:
-                logger.warning(f"JetStream setup failed (non-fatal, pub/sub still works): {e}")
+            from . import jetstream as _js_mod
+            js_cfg = _js_mod.get_jetstream_config()
+            self._js_enabled = bool(js_cfg.get("enabled"))
+            if self._js_enabled:
+                self.js = await _js_mod.ensure_streams(self.nc)
+                if self.js is not None:
+                    await self._setup_js_durables()
+                else:
+                    logger.warning("JetStream enabled in config but server returned no JS context")
+            else:
                 self.js = None
+                logger.info("JetStream disabled (config.jetstream.enabled=false) — pub/sub only")
+        except Exception as e:
+            logger.warning(f"JetStream setup failed (non-fatal, pub/sub still works): {e}")
+            self.js = None
+            self._js_enabled = False
 
     async def _check_node_id_collision(self) -> dict | None:
         """Probe fleet for a daemon with the same node_id. Returns collision info or None.
@@ -556,6 +617,101 @@ class FleetNerveNATS:
             logger.error(f"Failed to re-subscribe after reconnect: {e}")
             self._stats["errors"] += 1
 
+        # JetStream: replay messages missed while offline (blocker #2).
+        # Non-fatal — if durable consumers weren't set up or replay fails,
+        # regular pub/sub delivery continues.
+        if self._js_enabled and self.js is not None:
+            try:
+                count = await self._replay_js_missed()
+                if count:
+                    logger.info(f"JetStream replay on reconnect: {count} missed message(s)")
+            except Exception as e:
+                logger.warning(f"JetStream replay on reconnect failed: {e}")
+
+    async def _setup_js_durables(self):
+        """Create per-node durable consumers for each fleet stream.
+
+        Filter subjects are scoped to this node (direct + broadcast) plus
+        the full event stream. Idempotent — safe to call on reconnect.
+        """
+        if self.js is None:
+            return
+        from . import jetstream as _js_mod
+        # FLEET_MESSAGES: subscribe only to subjects this node cares about
+        # (own direct subject + broadcast). Keeps replay small.
+        msg_subject = f"fleet.{self.node_id}.>"
+        msg_durable = _js_mod.durable_consumer_name(_js_mod.STREAM_MESSAGES, self.node_id)
+        sub_msg = await _js_mod.create_durable_consumer(
+            self.js, _js_mod.STREAM_MESSAGES, msg_durable, msg_subject,
+        )
+        if sub_msg is not None:
+            self._js_subs[_js_mod.STREAM_MESSAGES] = sub_msg
+
+        # Broadcast durable: one consumer per node on fleet.all.>
+        bcast_subject = "fleet.all.>"
+        bcast_durable = _js_mod.durable_consumer_name(
+            _js_mod.STREAM_MESSAGES + "_all", self.node_id,
+        )
+        sub_bcast = await _js_mod.create_durable_consumer(
+            self.js, _js_mod.STREAM_MESSAGES, bcast_durable, bcast_subject,
+        )
+        if sub_bcast is not None:
+            self._js_subs[_js_mod.STREAM_MESSAGES + "_all"] = sub_bcast
+
+        # FLEET_EVENTS: all events, this node keeps its own cursor.
+        evt_subject = "event.>"
+        evt_durable = _js_mod.durable_consumer_name(_js_mod.STREAM_EVENTS, self.node_id)
+        sub_evt = await _js_mod.create_durable_consumer(
+            self.js, _js_mod.STREAM_EVENTS, evt_durable, evt_subject,
+        )
+        if sub_evt is not None:
+            self._js_subs[_js_mod.STREAM_EVENTS] = sub_evt
+
+    async def _replay_js_missed(self) -> int:
+        """Drain any pending messages from all durable consumers. Returns count.
+
+        Messages are routed through the same handlers as live pub/sub so
+        callers see replayed content identically to fresh deliveries.
+        """
+        from . import jetstream as _js_mod
+        cfg = _js_mod.get_jetstream_config()
+        max_msgs = int(cfg.get("replay_max_messages", _js_mod.DEFAULT_REPLAY_MAX_MESSAGES))
+        total = 0
+        for key, sub in list(self._js_subs.items()):
+            if sub is None:
+                continue
+            # Route by stream prefix to the right handler.
+            if key.startswith(_js_mod.STREAM_EVENTS):
+                handler = self._handle_js_event
+            else:
+                handler = self._handle_js_fleet_message
+            try:
+                delivered = await _js_mod.replay_missed(
+                    sub, handler, max_messages=max_msgs,
+                )
+                total += delivered
+            except Exception as e:
+                logger.debug(f"JetStream replay on {key} failed: {e}")
+        return total
+
+    async def _handle_js_fleet_message(self, msg):
+        """Replay handler: feed message through the regular fleet handler."""
+        await self._handle_message(msg)
+
+    async def _handle_js_event(self, msg):
+        """Replay handler for event.> stream. Best-effort logging hook.
+
+        Event bus is an internal system — we surface receipt to stats and
+        emit a debug log. Downstream subscribers in event_bus.py handle
+        live events via NATS core sub; JS replay gives durability.
+        """
+        self._stats["received"] += 1
+        try:
+            subject = getattr(msg, "subject", "event.?")
+            logger.debug(f"JetStream event replay: {subject}")
+        except Exception:
+            pass
+
     async def _on_disconnect(self):
         logger.warning(f"Disconnected from NATS at {datetime.now(timezone.utc).isoformat()} -- will auto-reconnect")
 
@@ -577,6 +733,40 @@ class FleetNerveNATS:
                 return
             if msg_type == "ack":
                 return
+
+            # Inbound schema validation (blocker #4). Advisory by default —
+            # logs + counter but still dispatches. Strict mode drops the
+            # message and emits fleet.schema.rejected. Configured via
+            # .multifleet/config.json -> inbound_validation.mode.
+            try:
+                from .inbound_validator import handle_inbound_validation
+                cfg = getattr(self, "_inbound_validation_config", None)
+                if cfg is None:
+                    try:
+                        cfg_path = REPO_ROOT / ".multifleet" / "config.json"
+                        cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+                    except Exception:
+                        cfg = {}
+                    self._inbound_validation_config = cfg
+                if not handle_inbound_validation(self, data, config=cfg):
+                    # strict mode rejected — drop without dispatching
+                    return
+            except Exception as _val_exc:
+                # Never let the validator itself break ingress; counter is
+                # already bookkept inside handle_inbound_validation.
+                logger.debug("inbound validator error: %s", _val_exc)
+
+            # Blocker #5: per-peer inbound rate limiting. Drops messages from
+            # peers exceeding their budget. Callback increments self._rate_limited
+            # and emits fleet.rate_limited event.
+            if self._rate_limiter is not None:
+                _from_peer = data.get("from", "unknown") or "unknown"
+                if not self._rate_limiter.record_inbound(_from_peer):
+                    logger.warning(
+                        "Inbound rate limit dropped message from %s (msg_id=%s)",
+                        _from_peer, str(data.get("id", ""))[:8],
+                    )
+                    return
 
             self._stats["received"] += 1
             self._touch_activity()
@@ -981,6 +1171,15 @@ class FleetNerveNATS:
                 for peer in self._channel_health
                 for score, broken in [self._get_peer_health_score(peer)]
             },
+            "rate_limits": (
+                {
+                    "inbound_dropped": self._rate_limited,
+                    "totals": self._rate_limiter.get_totals(),
+                    "peers": self._rate_limiter.get_peer_stats(),
+                }
+                if self._rate_limiter is not None
+                else {"inbound_dropped": 0, "disabled": True}
+            ),
         }
 
     def _probe_surgeons(self) -> dict:
@@ -1069,7 +1268,16 @@ class FleetNerveNATS:
             "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         }
         target = f"fleet.{to}.message" if to != "all" else "fleet.all.message"
-        await self.nc.publish(target, json.dumps(msg).encode())
+        payload = json.dumps(msg).encode()
+        await self.nc.publish(target, payload)
+        # Best-effort JetStream mirror for durable replay (blocker #2).
+        # Gated on config.jetstream.enabled; failure never blocks live pub/sub.
+        if self._js_enabled and self.js is not None:
+            try:
+                from . import jetstream as _js_mod
+                await _js_mod.publish_to_stream(self.js, target, payload)
+            except Exception as e:
+                logger.debug(f"JetStream mirror publish failed: {e}")
         self._stats["sent"] += 1
         self._touch_activity()
         if to == "all":
@@ -1147,7 +1355,15 @@ class FleetNerveNATS:
         if not self.nc or not self.nc.is_connected:
             return {"delivered": False}
         subject = f"fleet.{target}.message" if target != "all" else "fleet.all.message"
-        await self.nc.publish(subject, json.dumps(message).encode())
+        payload = json.dumps(message).encode()
+        await self.nc.publish(subject, payload)
+        # Best-effort JetStream mirror for durable replay (blocker #2).
+        if self._js_enabled and self.js is not None:
+            try:
+                from . import jetstream as _js_mod
+                await _js_mod.publish_to_stream(self.js, subject, payload)
+            except Exception as e:
+                logger.debug(f"JetStream P1 mirror failed: {e}")
         self._stats["sent"] += 1
         return {"delivered": True}
 
@@ -1468,6 +1684,16 @@ class FleetNerveNATS:
                 errors.append(f"{name}: skipped (30s budget exhausted)")
                 logger.info(f"[{name}] Skipped -- 30s budget exhausted after {elapsed:.0f}s")
                 continue
+
+            # Blocker #5: per-peer outbound rate limiting. Skip this channel if
+            # target's outbound budget is exhausted; cascade will try next channel.
+            # Rate limiting a single channel is treated like channel-down — the
+            # entire message is not failed, it just moves down the priority list.
+            if self._rate_limiter is not None and target != "all":
+                if not self._rate_limiter.record_outbound(target):
+                    errors.append(f"{name}: peer rate-limited")
+                    logger.debug(f"[{name}] peer rate-limited for {target}; trying next channel")
+                    continue
 
             try:
                 channel_timeout = CHANNEL_TIMEOUTS.get(name, 5)
@@ -2026,6 +2252,13 @@ class FleetNerveNATS:
                     logger.info("FleetDataLayer connections closed")
                 except Exception as e:
                     logger.warning(f"FleetDataLayer close failed: {e}")
+            # Persist per-peer rate-limit buckets (blocker #5) — best-effort
+            if self._rate_limiter is not None:
+                try:
+                    if self._rate_limiter.save_state():
+                        logger.info("PeerRateLimiter state persisted")
+                except Exception as e:
+                    logger.warning(f"PeerRateLimiter save_state failed: {e}")
             await self.nc.close()
 
     async def _start_http_compat(self):

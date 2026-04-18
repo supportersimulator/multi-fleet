@@ -448,6 +448,7 @@ class ConstitutionalGate:
             from .event_bus import IDEEventBus
             bus = IDEEventBus.get()
             bus.emit("gate.constitutional.checked", {
+                "rule": "ConstitutionalGate",
                 "gate": "ConstitutionalGate",
                 "action": action,
                 "passed": passed,

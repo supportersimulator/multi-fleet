@@ -2,6 +2,16 @@
 
 Cross-machine AI collaboration with self-healing communication. Messages always deliver -- even when NATS is down, HTTP is blocked, and SSH is your only path.
 
+## Platform
+
+Multi-Fleet runs on macOS, Linux, and Windows. Daemon management and secret storage differ by platform — follow the guide for yours, then return here for the common "First Run" steps.
+
+| Platform | Guide | Status | Daemon | Secrets |
+|----------|-------|--------|--------|---------|
+| macOS 13+ | [install-macos.md](install-macos.md) | Stable | launchd | Keychain |
+| Linux (systemd) | [install-linux.md](install-linux.md) | Stable | systemd --user | pass / GNOME Keyring / file (0600) |
+| Windows 10/11 | [install-windows.md](install-windows.md) | Experimental (WSL2 recommended) | nssm or sc.exe | Credential Manager via `keyring` |
+
 ## Prerequisites
 
 - Python 3.10+
