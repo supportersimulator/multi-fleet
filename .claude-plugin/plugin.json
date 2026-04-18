@@ -2,7 +2,7 @@
   "name": "multi-fleet",
   "displayName": "Multi-Fleet",
   "description": "Cross-machine AI collaboration — real-time peer-to-peer messaging, chain orchestration, dispatch gates, session-aware task agents, and fleet-wide productivity visibility across multiple Claude Code instances",
-  "version": "3.0.0",
+  "version": "5.0.0",
   "author": {
     "name": "Aaron Tjomsland",
     "email": "contextdna@users.noreply.github.com"

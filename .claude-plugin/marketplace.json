@@ -9,7 +9,7 @@
     {
       "name": "multi-fleet",
       "description": "Cross-machine AI collaboration — real-time messaging, task agents, productivity visibility",
-      "version": "3.0.0",
+      "version": "5.0.0",
       "source": "./",
       "author": { "name": "Multi-Fleet Contributors", "email": "contextdna@users.noreply.github.com" },
       "skills": [

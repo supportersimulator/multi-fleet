@@ -1,9 +1,9 @@
 {
-  "_comment": "Multi-Fleet v2.0.0 \u2014 Gemini extension manifest",
+  "_comment": "Multi-Fleet v5.0.0 \u2014 Gemini extension manifest",
   "name": "multi-fleet",
   "displayName": "Multi-Fleet",
   "description": "Cross-machine AI collaboration \u2014 real-time peer-to-peer messaging, session-aware task agents, and fleet-wide productivity visibility across multiple Claude Code instances",
-  "version": "2.0.0",
+  "version": "5.0.0",
   "author": "Aaron Tjomsland",
   "license": "MIT",
   "transport": {
