@@ -15,3 +15,9 @@ fleet-inbox/
 *.plist
 *.plist.disabled
 /tmp/
+
+# Runtime-generated evidence DB — never commit
+multifleet/evidence.db
+*.db-journal
+*.db-wal
+*.db-shm
