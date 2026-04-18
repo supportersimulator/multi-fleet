@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  io.contextdna.nats-server — NATS message broker
+  Runs nats-server on port 4222 (client) and 8222 (monitoring).
+  No secrets required.
+
+  Placeholders:
+    __NATS_SERVER_PATH__ — Absolute path to nats-server binary
+                           (typically /opt/homebrew/bin/nats-server)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.contextdna.nats-server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NATS_SERVER_PATH__</string>
+        <string>-p</string>
+        <string>4222</string>
+        <string>-m</string>
+        <string>8222</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/nats-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/nats-server.log</string>
+</dict>
+</plist>

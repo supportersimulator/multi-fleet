@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  io.contextdna.fleet-tunnel — Persistent SSH tunnels for fleet connectivity
+  Runs fleet-tunnel.sh start on boot and every 120s to maintain tunnels.
+  Requires autossh and SSH key auth between nodes.
+
+  Placeholders:
+    __REPO_ROOT__   — Absolute path to er-simulator-superrepo checkout
+    __NODE_ID__     — Fleet node identifier (e.g. mac1, mac2, mac3)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.contextdna.fleet-tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__REPO_ROOT__/scripts/fleet-tunnel.sh</string>
+        <string>start</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MULTIFLEET_NODE_ID</key>
+        <string>__NODE_ID__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>NetworkState</key>
+        <true/>
+    </dict>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/fleet-tunnel.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/fleet-tunnel.log</string>
+</dict>
+</plist>

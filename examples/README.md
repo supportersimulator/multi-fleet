@@ -1,59 +1,97 @@
 # Multi-Fleet Examples
 
-Runnable scripts demonstrating both low-level NATS primitives and the high-level fleet API.
+Runnable scripts demonstrating fleet communication, messaging, and health monitoring.
 
 ## Prerequisites
 
 ```bash
-pip install multifleet             # high-level API + NATS client
-nats-server -p 4222 &              # local NATS (required for 01–03 NATS series)
+# Install the package
+pip install multifleet
+
+# NATS server (required for NATS-based examples)
+brew install nats-server   # macOS
+# or: apt install nats-server  # Linux
+nats-server -p 4222 &
+
+# Set your node identity
+export MULTIFLEET_NODE_ID=mynode
 ```
 
-## Low-Level NATS Primitives (mac1 series)
+## Environment Variables
 
-| # | File | What it shows |
-|---|------|---------------|
-| 01 | `01_minimal_send_receive.py` | Pub + sub on `fleet.all.*` / `fleet.{node}.*` |
-| 02 | `02_peer_discovery.py` | Heartbeat-based peer liveness map |
-| 03 | `03_request_reply.py` | Request/reply pattern (same mechanism as node-ID collision detect) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MULTIFLEET_NODE_ID` | hostname | Unique identity for this node |
+| `NATS_URL` | `nats://127.0.0.1:4222` | NATS server connection URL |
+| `FLEET_DAEMON_URL` | `http://127.0.0.1:8855` | Fleet daemon HTTP endpoint |
+
+## Examples
+
+### 01 -- Hello Fleet (NATS basics)
+
+Connect to NATS, send heartbeats, discover peers automatically.
 
 ```bash
-# Example 1 — open two terminals
-MULTIFLEET_NODE_ID=alice python examples/01_minimal_send_receive.py
-MULTIFLEET_NODE_ID=bob   python examples/01_minimal_send_receive.py
+# Terminal 1
+MULTIFLEET_NODE_ID=alice python3 examples/01_hello_fleet.py
 
-# Example 2 — peer discovery
-MULTIFLEET_NODE_ID=alpha python examples/02_peer_discovery.py
-MULTIFLEET_NODE_ID=beta  python examples/02_peer_discovery.py
-
-# Example 3 — request/reply
-MULTIFLEET_ROLE=responder python examples/03_request_reply.py &
-MULTIFLEET_ROLE=requester python examples/03_request_reply.py
+# Terminal 2
+MULTIFLEET_NODE_ID=bob python3 examples/01_hello_fleet.py
 ```
 
-All respect `NATS_URL` env var. Default: `nats://127.0.0.1:4222`.
+Both nodes discover each other within seconds via heartbeat. Ctrl-C to quit.
 
-## High-Level Fleet API (mac3 series)
+### 02 -- Send Message (priority cascade)
 
-| # | File | What it shows |
-|---|------|---------------|
-| 01 | `01_single_node_health.py` | Spawn daemon, poll `/health`, show peers + uptime |
-| 02 | `02_invariance_gate.py` | Run Constitutional `validate_before_action` on 2 scenarios |
-| 03 | `03_send_fleet_message.py` | Send via 10-priority channel cascade (P0 Discord → P7 git) |
+Send a message to another node via the 9-priority channel cascade (P0 Cloud through P7 Git). Requires the fleet daemon running.
 
 ```bash
-# Single-node smoke test
-python examples/01_single_node_health.py
+# Start daemon first
+python3 -m multifleet.daemon &
 
-# Constitutional validation demo
-python examples/02_invariance_gate.py
+# Send a context message
+python3 examples/02_send_message.py mac2
 
-# Send a message (requires daemon + peer)
-python examples/03_send_fleet_message.py mac2
+# Send an alert (P1 only, 3x retry)
+python3 examples/02_send_message.py mac2 --type alert
+
+# Send a task assignment
+python3 examples/02_send_message.py mac2 --type task --subject "run tests"
 ```
+
+### 03 -- Health Monitor (live dashboard)
+
+Poll the fleet daemon's `/health` endpoint and display a formatted dashboard with peers, channels, and surgeon availability.
+
+```bash
+# Start daemon first
+python3 -m multifleet.daemon &
+
+# Run the monitor (refreshes every 5 seconds)
+python3 examples/03_health_monitor.py
+
+# Custom interval
+python3 examples/03_health_monitor.py --interval 10
+
+# Single check (no loop)
+python3 examples/03_health_monitor.py --once
+```
+
+## Additional Examples
+
+These demonstrate lower-level NATS primitives and high-level API features:
+
+| File | Description |
+|------|-------------|
+| `01_minimal_send_receive.py` | Raw NATS pub/sub on `fleet.all.*` and `fleet.{node}.*` |
+| `02_peer_discovery.py` | Heartbeat-based peer liveness map with stale detection |
+| `03_request_reply.py` | NATS request/reply pattern (same as node-ID collision detection) |
+| `01_single_node_health.py` | Spawn daemon in-process, check `/health`, shut down |
+| `02_invariance_gate.py` | Constitutional `validate_before_action` on safe vs destructive ops |
+| `03_send_fleet_message.py` | Minimal message send via daemon HTTP API |
 
 ## Next Steps
-- `fleet init` — scaffold config for your fleet
-- `fleet status` — current fleet health
-- `fleet doctor` — diagnose issues
-- See `docs/getting-started.md` for multi-node setup.
+
+- `docs/getting-started.md` -- full multi-node setup guide
+- `COMMS-PROTOCOL.md` -- channel cascade specification
+- `ARCHITECTURE.md` -- system design and module map

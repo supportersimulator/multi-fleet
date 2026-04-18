@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  io.contextdna.fleet-nerve — Fleet Nerve HTTP daemon
+  Runs the fleet daemon on port 8855 with KeepAlive.
+  Secrets are loaded from macOS Keychain at runtime (zero secrets in this file).
+
+  Placeholders:
+    __HOME__        — User home directory (e.g. /Users/alice)
+    __REPO_ROOT__   — Absolute path to er-simulator-superrepo checkout
+    __NODE_ID__     — Fleet node identifier (e.g. mac1, mac2, mac3)
+    __PYTHON_PATH__ — Absolute path to python3 binary
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.contextdna.fleet-nerve</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON_PATH__</string>
+        <string>__REPO_ROOT__/tools/fleet_nerve_daemon.py</string>
+        <string>--port</string>
+        <string>8855</string>
+        <string>--bind</string>
+        <string>0.0.0.0</string>
+        <string>--node-id</string>
+        <string>__NODE_ID__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/fleet-nerve.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/fleet-nerve.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>__REPO_ROOT__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>MULTIFLEET_NODE_ID</key>
+        <string>__NODE_ID__</string>
+        <key>FLEET_NERVE_ENV</key>
+        <string>__HOME__/.fleet-nerve/env</string>
+    </dict>
+</dict>
+</plist>
