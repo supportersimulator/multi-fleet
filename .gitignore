@@ -5,3 +5,13 @@ __pycache__/
 .DS_Store
 node_modules/
 dist/
+
+# Local fleet state (per-node, never shared)
+.fleet-messages/
+.fleet-nerve/
+.contextdna/
+.superset/
+fleet-inbox/
+*.plist
+*.plist.disabled
+/tmp/
