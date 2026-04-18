@@ -9,14 +9,17 @@ Two streams:
   - FLEET_EVENTS    — subjects `event.>`   (event bus, audit trail)
 
 Retention per stream:
-  - max_age   = 7 days
-  - max_bytes = 100 MB
-  - storage   = file
-  - retention = limits (drop oldest when caps hit)
+  - max_age   = 30 days  (vacation-safe: offline node returns, replays)
+  - max_bytes = 1024 MB  (hard cap per stream; oldest dropped when hit)
+  - storage   = file     (disk-backed at ~/.multifleet/jetstream/)
+  - retention = limits   (drop oldest when caps hit)
 
 Every node creates a durable consumer per stream (name = "{stream}_{node_id}")
 which tracks its own ack-delivery cursor. On reconnect, the node pulls any
 messages the server delivered since the cursor and replays them locally.
+`max_age` is a safety ceiling — durable consumers already implement
+"persist until this node acks" semantics, so a 30-day offline window
+just means the 30-day cap hasn't been reached yet.
 
 All functions are **graceful**:
   - If JetStream is disabled on the server → log once, return None
@@ -29,8 +32,8 @@ Enable via .multifleet/config.json:
     {
       "jetstream": {
         "enabled": true,
-        "max_age_days": 7,
-        "max_bytes_mb": 100,
+        "max_age_days": 30,
+        "max_bytes_mb": 1024,
         "replay_max_messages": 200
       }
     }
@@ -60,8 +63,8 @@ STREAM_SUBJECTS: dict[str, list[str]] = {
 
 # ── Retention defaults ────────────────────────────────────────────────────
 
-DEFAULT_MAX_AGE_DAYS = 7
-DEFAULT_MAX_BYTES_MB = 100
+DEFAULT_MAX_AGE_DAYS = 30
+DEFAULT_MAX_BYTES_MB = 1024
 DEFAULT_REPLAY_MAX_MESSAGES = 200
 DEFAULT_REPLAY_FETCH_BATCH = 50
 DEFAULT_REPLAY_FETCH_TIMEOUT_S = 2.0

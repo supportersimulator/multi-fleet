@@ -53,6 +53,38 @@ cp config/config.template.json .multifleet/config.json
 | `mac_address` | No | -- | MAC address for Wake-on-LAN (P6) |
 | `nats_port` | No | `4222` | NATS server port |
 
+### JetStream Persistence (optional)
+
+Durable message store on disk so offline nodes catch up when they reconnect.
+Disabled by default. Enable for multi-day offline tolerance (vacation scenarios):
+
+```json
+{
+  "jetstream": {
+    "enabled": true,
+    "max_age_days": 30,
+    "max_bytes_mb": 1024,
+    "replay_max_messages": 200
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Turn JetStream on. Server must also run with `-js` flag. |
+| `max_age_days` | `30` | Safety ceiling — oldest messages dropped after this. |
+| `max_bytes_mb` | `1024` | Per-stream hard cap in MB. Oldest dropped when hit. |
+| `replay_max_messages` | `200` | Messages replayed per reconnect batch. |
+
+Storage: file-backed at `~/.multifleet/jetstream/`. Typical fleet traffic
+~1-10 MB/day → 30-300 MB for 30 days. Durable consumers persist until the
+node acks — `max_age` is just the ceiling, not the delivery mechanism.
+
+Enable server-side with the bundled script:
+```bash
+./scripts/enable-jetstream.sh
+```
+
 ## Environment Variables
 
 | Variable | Description |
@@ -60,6 +92,8 @@ cp config/config.template.json .multifleet/config.json
 | `MULTIFLEET_NODE_ID` | **Required.** This machine's identity in the fleet |
 | `FLEET_NERVE_PORT` | Override daemon port (default `8855`) |
 | `NATS_URL` | NATS server URL (default `nats://127.0.0.1:4222`) |
+| `MULTIFLEET_JETSTREAM_ENABLED` | `1`/`true` to enable JetStream; overrides config file |
+| `MULTIFLEET_CONFIG` | Absolute path to config.json (overrides default lookup) |
 
 ## Presets
 
