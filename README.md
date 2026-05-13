@@ -4,9 +4,13 @@
 
 # Multi-Fleet
 
-**Cross-machine AI collaboration for Claude Code, Cursor, VS Code, Codex, and Gemini.**
+### One developer. One fleet. Limitless throughput.
 
-Real-time peer-to-peer messaging with a **9-priority self-healing fallback chain**, session-aware autonomous task agents, HMAC-signed communication, and fleet-wide productivity visibility. **Messages always deliver** — even when NATS is down, HTTP is blocked, and SSH is your only path.
+**Multi-Fleet turns every computer you own into a coordinated AI teammate.** Start with one laptop. Scale to three Macs. Scale to a hundred machines in a datacenter. Every node runs Claude Code (or Cursor, Codex, Gemini, VS Code) — and they all *talk to each other*.
+
+Stop context-switching between machines. Stop SSHing in to check on a build. Stop letting your second computer sit idle while the first one chokes. **Your fleet codes together** — racing, reviewing, refactoring, deploying — in real time, with HMAC-signed packets and a **9-priority self-healing fallback chain** that delivers messages even when the network is on fire.
+
+**This is what 10× productivity actually looks like.** Not a faster typist. A swarm.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -20,6 +24,22 @@ Real-time peer-to-peer messaging with a **9-priority self-healing fallback chain
 </div>
 
 ---
+
+## The Vision: Orchestrated Coding at Any Scale
+
+> A single developer with a coordinated fleet of AI agents will out-ship a team of ten with isolated IDEs.
+
+Multi-Fleet is built on one belief: **the bottleneck in software is no longer typing — it's coordination.** When you have one AI assistant in one IDE, you're driving a car. When you have a hundred AI assistants running on a hundred machines, all talking to each other, all aware of what the others just shipped — **you're not driving anymore. You're conducting an orchestra.**
+
+| Scale | What it unlocks |
+|-------|-----------------|
+| **1 machine** | Persistent context across sessions, never re-explain your codebase |
+| **2 machines** | Background agent on machine #2 reviews every PR you push from #1 — instant second opinion |
+| **3–5 machines** | A team of AI agents you own. One races to fix the bug, one writes the test, one updates the docs. Best result wins. |
+| **10+ machines** | A swarm. Refactor your entire monorepo overnight. Each agent owns a directory. Failures auto-redistribute. |
+| **100+ machines** | A coding datacenter. Continuous fleet-wide refactor. AI agents propose changes 24/7. You wake up to a stack of evidence-backed PRs. |
+
+The protocol scales linearly. The architecture scales horizontally. **The only ceiling is your imagination.**
 
 ## Why Multi-Fleet?
 
@@ -170,13 +190,31 @@ This is what makes the cascade smart: each node knows *which channels work to wh
 
 ---
 
-## Use Cases
+## Use Cases — What "Orchestrated Coding" Actually Means
 
-- **Distributed AI development** — Run Claude Code on 3 machines, route subtasks to whichever has the right context/GPU/database
-- **Always-available context** — Your IDE on the laptop tells the desktop "remember this for tomorrow"; the desktop persists it even if the laptop closes
-- **Auto-recovering pipelines** — CI/CD steps that don't fail when one box loses Wi-Fi for 90 seconds
-- **Pair-programming with your own fleet** — A second AI on a second machine reviews PRs while you keep coding
-- **Race coordination** — Multiple AI agents compete on the same task; first to finish wins, others learn from the winner
+### 🏁 Race Mode — Multiple AI agents, one task, best result wins
+Three machines, three Claude Code sessions, same prompt. They race. They watch each other. They learn from each other's commits. The first to ship a passing solution wins; the others diff against the winner and learn. **You get the best of three minds without paying for three.**
+
+### 🛠️ Swarm Refactor — Carve up a monorepo and ship it overnight
+"Update every component in the codebase to use the new logging interface." With one machine, that's a weekend. With Multi-Fleet, each agent claims a directory from a shared task pool, ships their patches, and the fleet auto-merges. **Wake up to 200 PRs. All tested. All evidence-logged.**
+
+### 🔁 Continuous Background Review
+Every commit you push from your laptop triggers a fleet-wide review. mac2 runs the test suite. mac3 audits for security. cloud-node runs the 3-Surgeons consensus check. **You ship; the fleet validates.** No more "I'll review this tomorrow."
+
+### 🧠 Always-On Context Memory
+Your IDE on the laptop tells the desktop "remember this for tomorrow." The desktop persists it. The laptop closes. You open a new session anywhere on the fleet and the context is there. **Your codebase has a memory now.**
+
+### 💾 Distributed AI Development
+The Mac with the GPU runs the model. The Mac with the database runs the migrations. The Mac with your IDE has zero latency on autocomplete. **Each machine does what it's best at — all coordinated through one protocol.**
+
+### 🌐 Geographically Distributed Teams
+One Multi-Fleet cluster spans your home office, your cabin laptop, your AWS cloud node, and your collaborator's desktop on another continent. **All four code on the same project as if they were on the same Wi-Fi.**
+
+### 🛡️ Auto-Recovering Pipelines
+CI/CD steps that don't fail when one box loses Wi-Fi for 90 seconds. The cascade reroutes. The work finishes. **Pipelines that survive what real networks do.**
+
+### 🚀 Solo-Founder Force Multiplier
+You are one person. Your fleet is twenty. You don't hire — you provision. **The next generation of unicorns will be built by one founder and one fleet.**
 
 ---
 
@@ -260,8 +298,14 @@ MIT — do anything you want, just keep the copyright notice. See [LICENSE](LICE
 
 <div align="center">
 
-**Built by humans who got tired of `ssh user@mac2 'pkill -9 daemon'`.**
+### The future is not faster developers. The future is coordinated fleets.
+
+Every machine you own is a teammate. Every spare CPU cycle is potential throughput. Every idle laptop is an AI agent waiting for a task.
+
+**Build the fleet. Conduct the orchestra. Ship at the speed of imagination.**
 
 ⭐ Star this repo if you've ever had three machines and wished they talked to each other.
+
+**Built by humans who got tired of `ssh user@mac2 'pkill -9 daemon'`.**
 
 </div>
