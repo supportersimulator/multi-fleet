@@ -1,0 +1,8 @@
+Targeted (tests/test_surgeon_repair_verdict.py): before 6 failed / 7 passed; after 13 passed.
+tests/test_invariance_gates.py: before 32 passed / 2 failed; after 32 passed / 2 failed (same pre-existing failures:
+  TestFleetRepairGate::test_concurrent_repair_blocked, ::test_clear_repair — unrelated to this change).
+Full suite (pytest tests -m "not integration", repo root, py3.12):
+  - Without --continue-on-collection-errors: aborts with 5 collection errors (ModuleNotFoundError: 'tools' x4,
+    'fleet_nerve_nats' x1) — tests import modules from the parent superrepo that don't exist here.
+  - With --continue-on-collection-errors --timeout=15: both before and after runs hung at ~21% and were killed
+    at 700s wall clock (identical progress). Full counts not obtainable on the box.
