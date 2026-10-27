@@ -4,13 +4,19 @@ on:
   push:
     branches: [main]
     paths:
-      - 'multi-fleet/**'
-      - 'tools/fleet_nerve_*.py'
+      - 'multifleet/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'ruff.toml'
+      - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'multi-fleet/**'
-      - 'tools/fleet_nerve_*.py'
+      - 'multifleet/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'ruff.toml'
+      - '.github/workflows/ci.yml'
 
 defaults:
   run:
@@ -37,13 +43,12 @@ jobs:
           pip install pytest pytest-asyncio
           pip install nats-py
           # Install from pyproject.toml if it exists
-          if [ -f multi-fleet/pyproject.toml ]; then
-            pip install -e multi-fleet/
+          if [ -f pyproject.toml ]; then
+            pip install -e .
           fi
 
       - name: Run unit tests
         run: |
-          cd multi-fleet
           python -m pytest tests/ -m "not integration" -v --tb=short
         env:
           MULTIFLEET_NODE_ID: ci-runner
@@ -51,7 +56,6 @@ jobs:
 
       - name: Run security tests
         run: |
-          cd multi-fleet
           python -m pytest tests/ -m "security" -v --tb=short
         env:
           MULTIFLEET_NODE_ID: ci-runner
@@ -73,11 +77,9 @@ jobs:
       - name: Ruff check
         continue-on-error: true
         run: |
-          cd multi-fleet
           ruff check . --config ruff.toml
 
       - name: Ruff format check
         continue-on-error: true
         run: |
-          cd multi-fleet
           ruff format --check . --config ruff.toml

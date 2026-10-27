@@ -5,8 +5,10 @@ fleet_repair_gate: verifies repair action is warranted (not stale diagnostic)
 fleet_merge_gate: pre-merge check (no lease conflicts, all nodes acked, gains pass)
 """
 
+import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -26,6 +28,34 @@ REQUIRED_ENVELOPE_FIELDS = ("from_node", "to_node", "type", "id")
 
 # Cooldown between repairs on the same target (seconds)
 REPAIR_COOLDOWN_S = 300  # 5 minutes
+
+
+_VERDICT_RE = re.compile(r'\{[^{}]*"verdict"[^{}]*\}', re.IGNORECASE | re.DOTALL)
+
+
+def parse_surgeon_verdict(output):
+    """Parse a structured surgeon verdict.
+
+    Accepts a dict ``{"verdict": "APPROVE"|"REJECT", ...}`` or text containing
+    exactly such a JSON object (e.g. inside a ```json fence). Returns
+    ``"APPROVE"``, ``"REJECT"``, or ``None`` when no valid verdict is found.
+    Callers MUST treat ``None`` as rejection. Free-text words like "approve"
+    are deliberately ignored ("do not approve" contains "approve").
+    """
+    obj = output if isinstance(output, dict) else None
+    if obj is None:
+        matches = _VERDICT_RE.findall(str(output or ""))
+        if len(matches) != 1:
+            return None
+        try:
+            obj = json.loads(matches[0])
+        except (ValueError, TypeError):
+            return None
+    verdict = obj.get("verdict") if isinstance(obj, dict) else None
+    if not isinstance(verdict, str):
+        return None
+    verdict = verdict.strip().upper()
+    return verdict if verdict in ("APPROVE", "REJECT") else None
 
 
 @dataclass
@@ -787,7 +817,8 @@ class FleetRepairGate:
                     adapter = SurgeonAdapter()
                     review = adapter.request_review(
                         subject=f"Destructive repair '{action}' on '{target}' under critical stress "
-                                f"(score={stress_score:.2f})",
+                                f"(score={stress_score:.2f}). Respond with a JSON object "
+                                f'{{"verdict": "APPROVE" or "REJECT", "reason": "..."}}.',
                         evidence=[
                             f"target: {target}",
                             f"action: {action}",
@@ -796,9 +827,22 @@ class FleetRepairGate:
                         ],
                     )
                     if review.get("status") == "ok":
-                        # Parse approval from review output
-                        output = str(review.get("output", "")).lower()
-                        if "approve" in output or "proceed" in output or "allow" in output:
+                        # Structured verdict only; unparseable = reject (loudly)
+                        verdict = parse_surgeon_verdict(review.get("output"))
+                        if verdict is None:
+                            logger.warning(
+                                "surgeon_repair_review: unparseable verdict for '%s' on '%s'; "
+                                "treating as REJECT. Output: %.200r",
+                                action, target, review.get("output"))
+                            checks.append(GateCheck(
+                                "surgeon_repair_review", False,
+                                f"Surgeon verdict unparseable for destructive repair '{action}' — "
+                                f"treated as REJECT. Expected JSON "
+                                f'{{"verdict": "APPROVE"|"REJECT"}}; re-run the review '
+                                f"or get chief review",
+                                critical=True,
+                            ))
+                        elif verdict == "APPROVE":
                             surgeon_approved = True
                             checks.append(GateCheck(
                                 "surgeon_repair_review", True,
@@ -808,7 +852,7 @@ class FleetRepairGate:
                         else:
                             checks.append(GateCheck(
                                 "surgeon_repair_review", False,
-                                f"Surgeon did not approve destructive repair '{action}'",
+                                f"Surgeon verdict REJECT for destructive repair '{action}'",
                                 critical=True,
                             ))
                     else:
