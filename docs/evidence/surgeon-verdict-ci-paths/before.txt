@@ -1,0 +1,147 @@
+FFFFF.......F                                                            [100%]
+=================================== FAILURES ===================================
+_ test_non_approval_blocks_destructive_repair[I do not approve this restart.] __
+
+output = 'I do not approve this restart.'
+
+    @pytest.mark.parametrize("output", [
+        "I do not approve this restart.",
+        "Do NOT proceed. Disallow.",
+        "We cannot allow a full restart under this stress.",
+        "REJECT — unsafe to proceed",
+        '{"verdict": "REJECT", "reason": "do not approve"}',
+        "",
+        "garbled ???",
+        '{"verdict": "maybe"}',
+        {"verdict": "REJECT"},
+    ])
+    def test_non_approval_blocks_destructive_repair(output):
+>       assert not _run(output).passed
+E       assert not True
+E        +  where True = GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False).passed
+E        +    where GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False) = _run('I do not approve this restart.')
+
+tests/test_surgeon_repair_verdict.py:35: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  fleet-nerve.surgeon-adapter:surgeon_adapter.py:68 Surgery bridge unavailable (import failed): No module named 'memory'
+____ test_non_approval_blocks_destructive_repair[Do NOT proceed. Disallow.] ____
+
+output = 'Do NOT proceed. Disallow.'
+
+    @pytest.mark.parametrize("output", [
+        "I do not approve this restart.",
+        "Do NOT proceed. Disallow.",
+        "We cannot allow a full restart under this stress.",
+        "REJECT — unsafe to proceed",
+        '{"verdict": "REJECT", "reason": "do not approve"}',
+        "",
+        "garbled ???",
+        '{"verdict": "maybe"}',
+        {"verdict": "REJECT"},
+    ])
+    def test_non_approval_blocks_destructive_repair(output):
+>       assert not _run(output).passed
+E       assert not True
+E        +  where True = GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False).passed
+E        +    where GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False) = _run('Do NOT proceed. Disallow.')
+
+tests/test_surgeon_repair_verdict.py:35: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  fleet-nerve.surgeon-adapter:surgeon_adapter.py:68 Surgery bridge unavailable (import failed): No module named 'memory'
+_ test_non_approval_blocks_destructive_repair[We cannot allow a full restart under this stress.] _
+
+output = 'We cannot allow a full restart under this stress.'
+
+    @pytest.mark.parametrize("output", [
+        "I do not approve this restart.",
+        "Do NOT proceed. Disallow.",
+        "We cannot allow a full restart under this stress.",
+        "REJECT — unsafe to proceed",
+        '{"verdict": "REJECT", "reason": "do not approve"}',
+        "",
+        "garbled ???",
+        '{"verdict": "maybe"}',
+        {"verdict": "REJECT"},
+    ])
+    def test_non_approval_blocks_destructive_repair(output):
+>       assert not _run(output).passed
+E       assert not True
+E        +  where True = GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False).passed
+E        +    where GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False) = _run('We cannot allow a full restart under this stress.')
+
+tests/test_surgeon_repair_verdict.py:35: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  fleet-nerve.surgeon-adapter:surgeon_adapter.py:68 Surgery bridge unavailable (import failed): No module named 'memory'
+_ test_non_approval_blocks_destructive_repair[REJECT \u2014 unsafe to proceed] _
+
+output = 'REJECT — unsafe to proceed'
+
+    @pytest.mark.parametrize("output", [
+        "I do not approve this restart.",
+        "Do NOT proceed. Disallow.",
+        "We cannot allow a full restart under this stress.",
+        "REJECT — unsafe to proceed",
+        '{"verdict": "REJECT", "reason": "do not approve"}',
+        "",
+        "garbled ???",
+        '{"verdict": "maybe"}',
+        {"verdict": "REJECT"},
+    ])
+    def test_non_approval_blocks_destructive_repair(output):
+>       assert not _run(output).passed
+E       assert not True
+E        +  where True = GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False).passed
+E        +    where GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False) = _run('REJECT — unsafe to proceed')
+
+tests/test_surgeon_repair_verdict.py:35: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  fleet-nerve.surgeon-adapter:surgeon_adapter.py:68 Surgery bridge unavailable (import failed): No module named 'memory'
+_ test_non_approval_blocks_destructive_repair[{"verdict": "REJECT", "reason": "do not approve"}] _
+
+output = '{"verdict": "REJECT", "reason": "do not approve"}'
+
+    @pytest.mark.parametrize("output", [
+        "I do not approve this restart.",
+        "Do NOT proceed. Disallow.",
+        "We cannot allow a full restart under this stress.",
+        "REJECT — unsafe to proceed",
+        '{"verdict": "REJECT", "reason": "do not approve"}',
+        "",
+        "garbled ???",
+        '{"verdict": "maybe"}',
+        {"verdict": "REJECT"},
+    ])
+    def test_non_approval_blocks_destructive_repair(output):
+>       assert not _run(output).passed
+E       assert not True
+E        +  where True = GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False).passed
+E        +    where GateCheck(name='stress_repair_policy', passed=True, message="Critical stress: destructive repair 'full_restart' approved by surgeon", critical=False) = _run('{"verdict": "REJECT", "reason": "do not approve"}')
+
+tests/test_surgeon_repair_verdict.py:35: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  fleet-nerve.surgeon-adapter:surgeon_adapter.py:68 Surgery bridge unavailable (import failed): No module named 'memory'
+_______________________ test_unparseable_verdict_is_loud _______________________
+
+    def test_unparseable_verdict_is_loud():
+        FleetRepairGate._repair_history = {}
+        FleetRepairGate._repair_in_progress = {}
+        with patch("multifleet.invariance_gates._record_audit"), \
+             patch("multifleet.surgeon_adapter.SurgeonAdapter.request_review",
+                   return_value={"status": "ok", "output": "sure, allow it"}):
+            result = FleetRepairGate().check("mac2", "full_restart", stress_score=0.9)
+        review = next(c for c in result.checks if c.name == "surgeon_repair_review")
+>       assert not review.passed
+E       assert not True
+E        +  where True = GateCheck(name='surgeon_repair_review', passed=True, message="Surgeon approved destructive repair 'full_restart'", critical=False).passed
+
+tests/test_surgeon_repair_verdict.py:55: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  fleet-nerve.surgeon-adapter:surgeon_adapter.py:68 Surgery bridge unavailable (import failed): No module named 'memory'
+=========================== short test summary info ============================
+FAILED tests/test_surgeon_repair_verdict.py::test_non_approval_blocks_destructive_repair[I do not approve this restart.]
+FAILED tests/test_surgeon_repair_verdict.py::test_non_approval_blocks_destructive_repair[Do NOT proceed. Disallow.]
+FAILED tests/test_surgeon_repair_verdict.py::test_non_approval_blocks_destructive_repair[We cannot allow a full restart under this stress.]
+FAILED tests/test_surgeon_repair_verdict.py::test_non_approval_blocks_destructive_repair[REJECT \u2014 unsafe to proceed]
+FAILED tests/test_surgeon_repair_verdict.py::test_non_approval_blocks_destructive_repair[{"verdict": "REJECT", "reason": "do not approve"}]
+FAILED tests/test_surgeon_repair_verdict.py::test_unparseable_verdict_is_loud
+6 failed, 7 passed in 0.13s
